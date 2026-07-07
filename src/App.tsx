@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Button, Group, TextInput } from "@mantine/core";
-import "./App.css";
+import { Center, Title } from "@mantine/core";
+import { ProjectSelector } from "./components/ProjectSelector";
+import { TitleBar } from "./components/TitleBar";
+import type { Project } from "./lib/bindings";
 
 async function checkForUpdates() {
   try {
@@ -19,52 +21,41 @@ async function checkForUpdates() {
 }
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [version, setVersion] = useState("");
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
   useEffect(() => {
     checkForUpdates();
+    getVersion().then(setVersion);
   }, []);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const windowTitle = selectedProject
+    ? `AmpCore ${version} - ${selectedProject.name}`.trim()
+    : `AmpCore ${version}`.trim();
+
+  useEffect(() => {
+    // Kept for the OS taskbar / Alt-Tab switcher — the native titlebar
+    // itself is hidden (decorations: false), replaced by <TitleBar />.
+    getCurrentWindow().setTitle(windowTitle);
+  }, [windowTitle]);
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      <TitleBar
+        title={windowTitle}
+        projectName={selectedProject?.name}
+        onCloseProject={() => setSelectedProject(null)}
+      />
+      <div style={{ flex: 1, minHeight: 0 }}>
+        {!selectedProject ? (
+          <ProjectSelector onSelect={setSelectedProject} />
+        ) : (
+          <Center style={{ height: "100%" }}>
+            <Title order={1}>hello</Title>
+          </Center>
+        )}
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <Group justify="center">
-          <TextInput
-            id="greet-input"
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="Enter a name..."
-          />
-          <Button type="submit">Greet</Button>
-        </Group>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 

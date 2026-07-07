@@ -52,6 +52,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tauri-specta",
+ "uuid",
 ]
 
 [[package]]

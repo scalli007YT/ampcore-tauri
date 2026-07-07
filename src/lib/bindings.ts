@@ -4,5 +4,175 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 
 /** Commands */
 export const commands = {
-  greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
+	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
+	projectsList: () => typedError<Project[], AppError>(__TAURI_INVOKE("projects_list")),
+	projectsGet: (id: string) => typedError<{
+	id: string,
+	name: string,
+	description: string,
+	schemaVersion: number,
+	createdAt: number | null,
+	updatedAt: number | null,
+	ampAssignments: AmpAssignment[],
+} | null, AppError>(__TAURI_INVOKE("projects_get", { id })),
+	projectsCreate: (name: string, description: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_create", { name, description })),
+	/**
+	 *  Full-document replace, matching the old app's PUT-whole-project pattern.
+	 *  Bumps `updated_at` regardless of what the caller passed.
+	 */
+	projectsUpdate: (project: Project) => typedError<Project, AppError>(__TAURI_INVOKE("projects_update", { project })),
+	projectsDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("projects_delete", { id })),
+	/**
+	 *  Adds an amp assignment to a project, identified only by MAC — the MAC
+	 *  need not ever have been seen live (offline pre-planning). If
+	 *  `amp_model_id` references a catalog entry, its channel count pre-populates
+	 *  the assignment's channels.
+	 */
+	projectsAddAmpAssignment: (projectId: string, mac: string, label: string | null, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, mac, label, ampModelId })),
+	projectsRemoveAmpAssignment: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_amp_assignment", { projectId, assignmentId })),
+	/**
+	 *  Changes (or clears) an assignment's amp model, reconciling its channel
+	 *  count additively — grows/shrinks `channels`, preserving existing
+	 *  per-channel config where indices still exist. Never a destructive wipe.
+	 */
+	projectsSetAmpModel: (projectId: string, assignmentId: string, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_model", { projectId, assignmentId, ampModelId })),
+	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, speakerLibraryId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, speakerLibraryId })),
+	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
+	speakerLibraryList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speaker_library_list")),
+	speakerLibraryCreate: (brand: string, model: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speaker_library_create", { brand, model })),
+	/**  Full-entry replace, mirroring `projects_update`'s pattern. */
+	speakerLibraryUpdate: (entry: SpeakerLibraryEntry) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speaker_library_update", { entry })),
+	/**
+	 *  Soft-delete — archived entries stay resolvable for existing Project
+	 *  references but are hidden from pickers for new assignments.
+	 */
+	speakerLibraryArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_archive", { id })),
+	ampModelsList: () => typedError<AmpModelCatalogEntry[], AppError>(__TAURI_INVOKE("amp_models_list")),
+	ampModelsCreate: (brand: string, model: string, channelCount: number) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount })),
+	/**
+	 *  Full-entry replace, mirroring `projects_update`'s pattern. Changing
+	 *  `channel_count` here does NOT retroactively touch any Project's
+	 *  assignments — reconciliation only happens explicitly via
+	 *  `projects_set_amp_model`.
+	 */
+	ampModelsUpdate: (entry: AmpModelCatalogEntry) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_update", { entry })),
+	/**  Soft-delete — see SpeakerLibraryEntry.archived for rationale. */
+	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
 };
+
+/* Types */
+/**
+ *  One assigned amp "slot" within a Project. `id` is independent of `mac` so
+ *  a slot's configuration survives a physical unit swap; `mac` may reference
+ *  hardware never seen live — offline pre-planning is the point.
+ */
+export type AmpAssignment = {
+	id: string,
+	mac: string,
+	label: string | null,
+	ampModelId: string | null,
+	channels: AmpChannel[],
+	linking: AmpLinkConfig,
+};
+
+/**
+ *  Per-channel config on an amp assignment. `ohms` is independently authored
+ *  (never derived from the assigned speaker's nominal spec — real wiring can
+ *  legitimately diverge) and `speaker_library_id` is a reference, never an
+ *  embedded copy of the speaker's data.
+ */
+export type AmpChannel = {
+	channelIndex: number,
+	ohms: number | null,
+	speakerLibraryId: string | null,
+};
+
+export type AmpLinkConfig = {
+	enabled: boolean,
+	scopes: { [key in string]: LinkScopeConfig },
+};
+
+/**
+ *  A reusable, project-independent amp hardware model — mirrors the Speaker
+ *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+ *  an assignment's channel count during offline planning.
+ */
+export type AmpModelCatalogEntry = {
+	id: string,
+	brand: string,
+	model: string,
+	channelCount: number,
+	notes: string | null,
+	origin: EntryOrigin,
+	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
+	archived: boolean,
+	createdAt: number | null,
+	updatedAt: number | null,
+};
+
+export type AppError = {
+	message: string,
+};
+
+/**
+ *  Marks whether a catalog entry (Speaker Library / Amp Model Catalog) was
+ *  authored by the user or shipped built-in with the app.
+ */
+export type EntryOrigin = "userDefined" | "builtIn";
+
+export type LinkGroup = {
+	id: string,
+	name: string,
+	channels: number[],
+};
+
+export type LinkScopeConfig = {
+	enabled: boolean,
+	groups: LinkGroup[],
+};
+
+export type Project = {
+	id: string,
+	name: string,
+	description: string,
+	schemaVersion: number,
+	createdAt: number | null,
+	updatedAt: number | null,
+	ampAssignments: AmpAssignment[],
+};
+
+/**
+ *  A reusable, project-independent speaker profile. Projects reference
+ *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
+ */
+export type SpeakerLibraryEntry = {
+	id: string,
+	brand: string,
+	model: string,
+	nominalImpedance: number | null,
+	powerRating: number | null,
+	sensitivity: number | null,
+	frequencyResponse: string | null,
+	speakerType: string | null,
+	ways: number | null,
+	notes: string | null,
+	origin: EntryOrigin,
+	/**
+	 *  Soft-delete flag — archived entries stay resolvable for existing
+	 *  Project references but are hidden from pickers for new assignments.
+	 */
+	archived: boolean,
+	createdAt: number | null,
+	updatedAt: number | null,
+};
+
+/* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
+
