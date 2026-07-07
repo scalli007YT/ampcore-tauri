@@ -1,0 +1,10 @@
+/* Preflight intentionally omitted — Mantine ships its own CSS reset. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}

@@ -3,6 +3,7 @@ import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { Button, Group, TextInput } from "@mantine/core";
 import "./App.css";
 
 async function checkForUpdates() {
@@ -48,18 +49,19 @@ function App() {
       <p>Click on the Tauri, Vite, and React logos to learn more.</p>
 
       <form
-        className="row"
         onSubmit={(e) => {
           e.preventDefault();
           greet();
         }}
       >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
+        <Group justify="center">
+          <TextInput
+            id="greet-input"
+            onChange={(e) => setName(e.currentTarget.value)}
+            placeholder="Enter a name..."
+          />
+          <Button type="submit">Greet</Button>
+        </Group>
       </form>
       <p>{greetMsg}</p>
     </main>
