@@ -36,4 +36,22 @@ impl AmpModelCatalogEntry {
             updated_at: now,
         }
     }
+
+    /// Builtin catalog entries use a deterministic id (not `new_id()`'s
+    /// random uuid) so re-seeding on every app start is idempotent — no
+    /// need to track "have we seeded yet" separately from the data itself.
+    pub fn new_builtin(id: &str, brand: &str, model: &str, channel_count: u32) -> Self {
+        let now = now_millis();
+        Self {
+            id: id.to_string(),
+            brand: brand.to_string(),
+            model: model.to_string(),
+            channel_count,
+            notes: None,
+            origin: EntryOrigin::BuiltIn,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }

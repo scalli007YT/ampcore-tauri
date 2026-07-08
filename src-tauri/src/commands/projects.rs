@@ -71,17 +71,16 @@ pub fn projects_delete(app: AppHandle, state: State<ProjectDataState>, id: Strin
     Ok(())
 }
 
-/// Adds an amp assignment to a project, identified only by MAC — the MAC
-/// need not ever have been seen live (offline pre-planning). If
-/// `amp_model_id` references a catalog entry, its channel count pre-populates
-/// the assignment's channels.
+/// Adds an amp assignment to a project by model/label alone — `mac` starts
+/// unset (`None`) and is linked later via live network discovery, not typed
+/// in manually. If `amp_model_id` references a catalog entry, its channel
+/// count pre-populates the assignment's channels.
 #[tauri::command]
 #[specta::specta]
 pub fn projects_add_amp_assignment(
     app: AppHandle,
     state: State<ProjectDataState>,
     project_id: String,
-    mac: String,
     label: Option<String>,
     amp_model_id: Option<String>,
 ) -> Result<Project, AppError> {
@@ -102,7 +101,7 @@ pub fn projects_add_amp_assignment(
 
     project
         .amp_assignments
-        .push(AmpAssignment::new(mac, label, channel_count, amp_model_id));
+        .push(AmpAssignment::new(None, label, channel_count, amp_model_id));
     project.touch();
 
     let project = project.clone();

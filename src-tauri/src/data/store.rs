@@ -22,6 +22,36 @@ pub struct ProjectDataInner {
     pub amp_models: Vec<AmpModelCatalogEntry>,
 }
 
+/// Builtin CVR amp product line — (model, channel_count). Seeded into the
+/// catalog on every load if missing; ids are deterministic (`builtin-<model
+/// lowercased>`) so this is idempotent rather than a one-time migration.
+const BUILTIN_AMP_MODELS: &[(&str, u32)] = &[
+    ("DSP-654", 4),
+    ("DSP-802", 2),
+    ("DSP-1002", 2),
+    ("DSP-1004", 4),
+    ("DSP-1502", 2),
+    ("DSP-2002", 2),
+    ("DSP-1504", 4),
+    ("DSP-2004", 4),
+    ("DSP-3002", 2),
+    ("DSP-3004", 4),
+    ("DSP-3302", 2),
+    ("DSP-4302", 2),
+];
+
+fn seed_builtin_amp_models(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
+    let mut changed = false;
+    for (model, channel_count) in BUILTIN_AMP_MODELS {
+        let id = format!("builtin-{}", model.to_lowercase());
+        if !amp_models.iter().any(|m| m.id == id) {
+            amp_models.push(AmpModelCatalogEntry::new_builtin(&id, "CVR", model, *channel_count));
+            changed = true;
+        }
+    }
+    changed
+}
+
 impl ProjectDataState {
     pub fn load(app: &AppHandle) -> Result<Self, String> {
         let data_dir = app
@@ -33,7 +63,10 @@ impl ProjectDataState {
 
         let projects = load_projects(&data_dir)?;
         let speaker_library = load_json_or_default(&data_dir.join("speaker_library.json"))?;
-        let amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
+        let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
+        if seed_builtin_amp_models(&mut amp_models) {
+            save_amp_models(&data_dir, &amp_models)?;
+        }
 
         Ok(Self(Mutex::new(ProjectDataInner {
             data_dir,

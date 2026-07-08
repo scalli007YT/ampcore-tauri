@@ -69,13 +69,15 @@ pub struct AmpChannel {
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
-/// a slot's configuration survives a physical unit swap; `mac` may reference
-/// hardware never seen live — offline pre-planning is the point.
+/// a slot's configuration survives a physical unit swap. `mac` starts unset
+/// at creation time — a slot is planned by model/label alone; linking it to
+/// a physical unit's MAC happens later via live network discovery, not by
+/// manual entry.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AmpAssignment {
     pub id: String,
-    pub mac: String,
+    pub mac: Option<String>,
     pub label: Option<String>,
     pub amp_model_id: Option<String>,
     pub channels: Vec<AmpChannel>,
@@ -116,7 +118,7 @@ impl Project {
 }
 
 impl AmpAssignment {
-    pub fn new(mac: String, label: Option<String>, channel_count: u32, amp_model_id: Option<String>) -> Self {
+    pub fn new(mac: Option<String>, label: Option<String>, channel_count: u32, amp_model_id: Option<String>) -> Self {
         let channels = (0..channel_count)
             .map(|channel_index| AmpChannel {
                 channel_index,

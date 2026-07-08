@@ -3,8 +3,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Center, Title } from "@mantine/core";
 import { ProjectSelector } from "./components/ProjectSelector";
+import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { SettingsModal } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateAvailableModal } from "./components/UpdateAvailableModal";
@@ -73,9 +73,7 @@ function App() {
         {!selectedProject ? (
           <ProjectSelector onSelect={setSelectedProject} />
         ) : (
-          <Center style={{ height: "100%" }}>
-            <Title order={1}>hello</Title>
-          </Center>
+          <ProjectWorkspace project={selectedProject} onProjectUpdate={setSelectedProject} />
         )}
       </div>
       <SettingsModal opened={settingsOpen} onClose={() => setSettingsOpen(false)} />

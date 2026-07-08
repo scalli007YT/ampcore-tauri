@@ -23,12 +23,12 @@ export const commands = {
 	projectsUpdate: (project: Project) => typedError<Project, AppError>(__TAURI_INVOKE("projects_update", { project })),
 	projectsDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("projects_delete", { id })),
 	/**
-	 *  Adds an amp assignment to a project, identified only by MAC — the MAC
-	 *  need not ever have been seen live (offline pre-planning). If
-	 *  `amp_model_id` references a catalog entry, its channel count pre-populates
-	 *  the assignment's channels.
+	 *  Adds an amp assignment to a project by model/label alone — `mac` starts
+	 *  unset (`None`) and is linked later via live network discovery, not typed
+	 *  in manually. If `amp_model_id` references a catalog entry, its channel
+	 *  count pre-populates the assignment's channels.
 	 */
-	projectsAddAmpAssignment: (projectId: string, mac: string, label: string | null, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, mac, label, ampModelId })),
+	projectsAddAmpAssignment: (projectId: string, label: string | null, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, label, ampModelId })),
 	projectsRemoveAmpAssignment: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_amp_assignment", { projectId, assignmentId })),
 	/**
 	 *  Changes (or clears) an assignment's amp model, reconciling its channel
@@ -63,12 +63,14 @@ export const commands = {
 /* Types */
 /**
  *  One assigned amp "slot" within a Project. `id` is independent of `mac` so
- *  a slot's configuration survives a physical unit swap; `mac` may reference
- *  hardware never seen live — offline pre-planning is the point.
+ *  a slot's configuration survives a physical unit swap. `mac` starts unset
+ *  at creation time — a slot is planned by model/label alone; linking it to
+ *  a physical unit's MAC happens later via live network discovery, not by
+ *  manual entry.
  */
 export type AmpAssignment = {
 	id: string,
-	mac: string,
+	mac: string | null,
 	label: string | null,
 	ampModelId: string | null,
 	channels: AmpChannel[],
