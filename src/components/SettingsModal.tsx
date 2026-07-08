@@ -2,7 +2,18 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { Badge, Button, Group, Modal, SegmentedControl, Stack, Text, useMantineColorScheme } from "@mantine/core";
+import {
+  Badge,
+  Button,
+  Group,
+  Modal,
+  SegmentedControl,
+  Stack,
+  Switch,
+  Text,
+  useMantineColorScheme,
+} from "@mantine/core";
+import { getAutoUpdateChecksEnabled, setAutoUpdateChecksEnabled } from "../lib/preferences";
 
 interface SettingsModalProps {
   opened: boolean;
@@ -25,6 +36,13 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const [status, setStatus] = useState<VersionStatus>("checking");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [autoUpdateChecks, setAutoUpdateChecks] = useState(true);
+
+  useEffect(() => {
+    if (opened) {
+      setAutoUpdateChecks(getAutoUpdateChecksEnabled());
+    }
+  }, [opened]);
 
   useEffect(() => {
     if (!opened) return;
@@ -90,6 +108,18 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
               { label: "Dark", value: "dark" },
               { label: "Auto", value: "auto" },
             ]}
+          />
+        </Group>
+
+        <Group justify="space-between" wrap="nowrap">
+          <Text size="sm">Check for updates on startup</Text>
+          <Switch
+            checked={autoUpdateChecks}
+            onChange={(e) => {
+              const enabled = e.currentTarget.checked;
+              setAutoUpdateChecks(enabled);
+              setAutoUpdateChecksEnabled(enabled);
+            }}
           />
         </Group>
 

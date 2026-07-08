@@ -1,35 +1,55 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { check } from "@tauri-apps/plugin-updater";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Center, Title } from "@mantine/core";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { SettingsModal } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
+import { UpdateAvailableModal } from "./components/UpdateAvailableModal";
+import { getAutoUpdateChecksEnabled, setAutoUpdateChecksEnabled } from "./lib/preferences";
 import type { Project } from "./lib/bindings";
-
-async function checkForUpdates() {
-  try {
-    const update = await check();
-    if (update) {
-      await update.downloadAndInstall();
-      await relaunch();
-    }
-  } catch (e) {
-    console.error("Update check failed", e);
-  }
-}
 
 function App() {
   const [version, setVersion] = useState("");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
 
   useEffect(() => {
-    checkForUpdates();
     getVersion().then(setVersion);
+
+    if (import.meta.env.DEV || !getAutoUpdateChecksEnabled()) {
+      return;
+    }
+
+    check()
+      .then((update) => {
+        if (update) {
+          setPendingUpdate(update);
+        }
+      })
+      .catch((e) => console.error("Update check failed", e));
   }, []);
+
+  async function handleInstallUpdate() {
+    if (!pendingUpdate) return;
+    setInstallingUpdate(true);
+    try {
+      await pendingUpdate.downloadAndInstall();
+      await relaunch();
+    } catch (e) {
+      console.error("Update install failed", e);
+      setInstallingUpdate(false);
+    }
+  }
+
+  function handleDisableUpdateChecks() {
+    setAutoUpdateChecksEnabled(false);
+    setPendingUpdate(null);
+  }
 
   const windowTitle = selectedProject
     ? `AmpCore ${version} - ${selectedProject.name}`.trim()
@@ -59,6 +79,13 @@ function App() {
         )}
       </div>
       <SettingsModal opened={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <UpdateAvailableModal
+        update={pendingUpdate}
+        installing={installingUpdate}
+        onInstall={handleInstallUpdate}
+        onAbort={() => setPendingUpdate(null)}
+        onDisable={handleDisableUpdateChecks}
+      />
     </div>
   );
 }
