@@ -9,9 +9,10 @@ interface TitleBarProps {
   title: string;
   projectName?: string;
   onCloseProject?: () => void;
+  onOpenSettings: () => void;
 }
 
-export function TitleBar({ title, projectName, onCloseProject }: TitleBarProps) {
+export function TitleBar({ title, projectName, onCloseProject, onOpenSettings }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -38,18 +39,22 @@ export function TitleBar({ title, projectName, onCloseProject }: TitleBarProps) 
       }}
     >
       <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-        {projectName && onCloseProject && (
-          <Menu shadow="md" width={160} position="bottom-start">
-            <Menu.Target>
-              <Button variant="subtle" color="gray" size="compact-sm">
-                File
-              </Button>
-            </Menu.Target>
-            <Menu.Dropdown>
-              <Menu.Item onClick={onCloseProject}>Exit Project</Menu.Item>
-            </Menu.Dropdown>
-          </Menu>
-        )}
+        <Menu shadow="md" width={180} position="bottom-start">
+          <Menu.Target>
+            <Button variant="subtle" color="gray" size="compact-sm">
+              File
+            </Button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item onClick={onOpenSettings}>Open App Settings</Menu.Item>
+            {projectName && onCloseProject && (
+              <>
+                <Menu.Divider />
+                <Menu.Item onClick={onCloseProject}>Exit Project</Menu.Item>
+              </>
+            )}
+          </Menu.Dropdown>
+        </Menu>
         <Text data-tauri-drag-region size="sm" fw={500} truncate style={{ flex: 1 }}>
           {title}
         </Text>

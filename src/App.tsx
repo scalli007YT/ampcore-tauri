@@ -5,6 +5,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Center, Title } from "@mantine/core";
 import { ProjectSelector } from "./components/ProjectSelector";
+import { SettingsModal } from "./components/SettingsModal";
 import { TitleBar } from "./components/TitleBar";
 import type { Project } from "./lib/bindings";
 
@@ -23,6 +24,7 @@ async function checkForUpdates() {
 function App() {
   const [version, setVersion] = useState("");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     checkForUpdates();
@@ -45,6 +47,7 @@ function App() {
         title={windowTitle}
         projectName={selectedProject?.name}
         onCloseProject={() => setSelectedProject(null)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <div style={{ flex: 1, minHeight: 0 }}>
         {!selectedProject ? (
@@ -55,6 +58,7 @@ function App() {
           </Center>
         )}
       </div>
+      <SettingsModal opened={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
