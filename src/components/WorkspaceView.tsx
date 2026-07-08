@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   ActionIcon,
   Box,
@@ -20,21 +20,15 @@ import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project }
 interface WorkspaceViewProps {
   project: Project;
   onProjectUpdate: (project: Project) => void;
+  ampModels: AmpModelCatalogEntry[] | null;
+  onOpenDevice: (assignment: AmpAssignment) => void;
 }
 
-export function WorkspaceView({ project, onProjectUpdate }: WorkspaceViewProps) {
-  const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
+export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice }: WorkspaceViewProps) {
   const [catalogueOpen, setCatalogueOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AmpAssignment | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  useEffect(() => {
-    commands.ampModelsList().then((result) => {
-      if (result.status === "ok") {
-        setAmpModels(result.data);
-      }
-    });
-  }, []);
 
   const modelsById = useMemo(() => {
     const map = new Map<string, AmpModelCatalogEntry>();
@@ -53,6 +47,7 @@ export function WorkspaceView({ project, onProjectUpdate }: WorkspaceViewProps) 
   }
 
   const assignments = project.ampAssignments;
+  const selectedAssignment = assignments.find((a) => a.id === selectedId) ?? null;
 
   function nameFor(assignment: AmpAssignment) {
     const model = assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined;
@@ -67,6 +62,7 @@ export function WorkspaceView({ project, onProjectUpdate }: WorkspaceViewProps) 
     setDeleting(false);
     if (result.status === "ok") {
       onProjectUpdate(result.data);
+      if (selectedId === deleteTarget.id) setSelectedId(null);
       setDeleteTarget(null);
     }
   }
@@ -79,9 +75,19 @@ export function WorkspaceView({ project, onProjectUpdate }: WorkspaceViewProps) 
           <Text fw={500} size="sm" c="dimmed">
             Amplifiers
           </Text>
-          <Button size="xs" onClick={() => setCatalogueOpen(true)}>
-            Add Amp
-          </Button>
+          <Group gap="xs">
+            <Button
+              size="xs"
+              variant="default"
+              disabled={!selectedAssignment}
+              onClick={() => selectedAssignment && onOpenDevice(selectedAssignment)}
+            >
+              Configure
+            </Button>
+            <Button size="xs" onClick={() => setCatalogueOpen(true)}>
+              Add Amp
+            </Button>
+          </Group>
         </Group>
 
         {assignments.length === 0 ? (
@@ -94,6 +100,7 @@ export function WorkspaceView({ project, onProjectUpdate }: WorkspaceViewProps) 
           <SimpleGrid cols={3} spacing="md" style={{ flex: 1, alignContent: "start" }}>
             {assignments.map((assignment) => {
               const displayName = nameFor(assignment);
+              const isSelected = assignment.id === selectedId;
 
               return (
                 <div
@@ -105,7 +112,16 @@ export function WorkspaceView({ project, onProjectUpdate }: WorkspaceViewProps) 
                     <Box
                       w={90}
                       h={90}
-                      className="flex items-center justify-center rounded-[var(--mantine-radius-sm)] border border-[var(--mantine-color-default-border)] transition-colors duration-150 group-hover:border-[var(--mantine-color-amber-filled)] group-hover:bg-[var(--mantine-color-amber-light)]"
+                      onClick={() => setSelectedId(assignment.id)}
+                      className="flex items-center justify-center rounded-[var(--mantine-radius-sm)] border transition-colors duration-150 group-hover:border-[var(--mantine-color-amber-filled)] group-hover:bg-[var(--mantine-color-amber-light)]"
+                      style={{
+                        cursor: "pointer",
+                        borderColor: isSelected
+                          ? "var(--mantine-color-amber-filled)"
+                          : "var(--mantine-color-default-border)",
+                        borderWidth: isSelected ? 2 : 1,
+                        borderStyle: "solid",
+                      }}
                     >
                       <ThemeIcon variant="light" color="gray" size={48}>
                         <Server size={28} />
