@@ -11,9 +11,10 @@ import {
   SimpleGrid,
   Stack,
   Text,
+  TextInput,
   ThemeIcon,
 } from "@mantine/core";
-import { Server, X } from "lucide-react";
+import { Pencil, Server, X } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 
@@ -29,6 +30,10 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AmpAssignment | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [editTarget, setEditTarget] = useState<AmpAssignment | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [savingLabel, setSavingLabel] = useState(false);
+  const [labelError, setLabelError] = useState<string | null>(null);
 
   const modelsById = useMemo(() => {
     const map = new Map<string, AmpModelCatalogEntry>();
@@ -49,10 +54,13 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   const assignments = project.ampAssignments;
   const selectedAssignment = assignments.find((a) => a.id === selectedId) ?? null;
 
-  function nameFor(assignment: AmpAssignment) {
+  function modelNameFor(assignment: AmpAssignment) {
     const model = assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined;
-    const modelName = model ? `${model.brand} ${model.model}` : "Unnamed";
-    return assignment.label ?? modelName;
+    return model ? `${model.brand} ${model.model}` : null;
+  }
+
+  function nameFor(assignment: AmpAssignment) {
+    return assignment.label ?? modelNameFor(assignment) ?? "Unnamed";
   }
 
   async function handleConfirmDelete() {
@@ -64,6 +72,25 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
       onProjectUpdate(result.data);
       if (selectedId === deleteTarget.id) setSelectedId(null);
       setDeleteTarget(null);
+    }
+  }
+
+  async function handleSaveLabel() {
+    if (!editTarget) return;
+    setLabelError(null);
+    setSavingLabel(true);
+    const result = await commands.projectsUpdate({
+      ...project,
+      ampAssignments: project.ampAssignments.map((a) =>
+        a.id === editTarget.id ? { ...a, label: editLabel.trim() || null } : a,
+      ),
+    });
+    setSavingLabel(false);
+    if (result.status === "ok") {
+      onProjectUpdate(result.data);
+      setEditTarget(null);
+    } else {
+      setLabelError(result.error.message);
     }
   }
 
@@ -100,6 +127,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
           <SimpleGrid cols={3} spacing="md" style={{ flex: 1, alignContent: "start" }}>
             {assignments.map((assignment) => {
               const displayName = nameFor(assignment);
+              const modelName = assignment.label ? modelNameFor(assignment) : null;
               const isSelected = assignment.id === selectedId;
 
               return (
@@ -131,6 +159,23 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       className="opacity-0 group-hover:opacity-100 transition-opacity"
                       size="sm"
                       radius="sm"
+                      color="gray"
+                      variant="filled"
+                      style={{ position: "absolute", top: -6, left: -6 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLabelError(null);
+                        setEditLabel(assignment.label ?? "");
+                        setEditTarget(assignment);
+                      }}
+                      aria-label="Rename amp"
+                    >
+                      <Pencil size={12} />
+                    </ActionIcon>
+                    <ActionIcon
+                      className="opacity-0 group-hover:opacity-100 transition-opacity"
+                      size="sm"
+                      radius="sm"
                       color="red"
                       variant="filled"
                       style={{ position: "absolute", top: -6, right: -6 }}
@@ -143,9 +188,16 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       <X size={12} />
                     </ActionIcon>
                   </Box>
-                  <Text size="xs" ta="center" lineClamp={2} style={{ maxWidth: 90 }}>
-                    {displayName}
-                  </Text>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+                    <Text size="xs" ta="center" lineClamp={2} style={{ maxWidth: 90 }}>
+                      {displayName}
+                    </Text>
+                    {modelName && (
+                      <Text size="xs" c="dimmed" ta="center" lineClamp={1} fz={10} style={{ maxWidth: 90 }}>
+                        {modelName}
+                      </Text>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -172,6 +224,31 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
         ampModels={ampModels}
         onProjectUpdate={onProjectUpdate}
       />
+
+      <Modal opened={editTarget !== null} onClose={() => setEditTarget(null)} title="Rename Amp" centered size="sm">
+        <Stack gap="md">
+          <TextInput
+            label="Label"
+            placeholder="Optional"
+            value={editLabel}
+            onChange={(e) => setEditLabel(e.currentTarget.value)}
+            data-autofocus
+          />
+          {labelError && (
+            <Text c="red" size="sm">
+              {labelError}
+            </Text>
+          )}
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setEditTarget(null)} disabled={savingLabel}>
+              Cancel
+            </Button>
+            <Button loading={savingLabel} onClick={handleSaveLabel}>
+              Save
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       <Modal
         opened={deleteTarget !== null}

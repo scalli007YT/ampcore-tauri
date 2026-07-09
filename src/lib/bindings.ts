@@ -36,12 +36,12 @@ export const commands = {
 	 *  per-channel config where indices still exist. Never a destructive wipe.
 	 */
 	projectsSetAmpModel: (projectId: string, assignmentId: string, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_model", { projectId, assignmentId, ampModelId })),
-	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, speakerLibraryId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, speakerLibraryId })),
+	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, speakerLibraryId: string | null, wayIndex: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, speakerLibraryId, wayIndex })),
 	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
-	speakerLibraryList: () => typedError<SpeakerLibraryEntry[], AppError>(__TAURI_INVOKE("speaker_library_list")),
-	speakerLibraryCreate: (brand: string, model: string) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speaker_library_create", { brand, model })),
+	speakerLibraryList: () => typedError<SpeakerLibraryEntry_Serialize[], AppError>(__TAURI_INVOKE("speaker_library_list")),
+	speakerLibraryCreate: (brand: string, model: string, family: string | null, application: string | null, ways: SpeakerWay[]) => typedError<SpeakerLibraryEntry_Serialize, AppError>(__TAURI_INVOKE("speaker_library_create", { brand, model, family, application, ways })),
 	/**  Full-entry replace, mirroring `projects_update`'s pattern. */
-	speakerLibraryUpdate: (entry: SpeakerLibraryEntry) => typedError<SpeakerLibraryEntry, AppError>(__TAURI_INVOKE("speaker_library_update", { entry })),
+	speakerLibraryUpdate: (entry: SpeakerLibraryEntry_Deserialize) => typedError<SpeakerLibraryEntry_Serialize, AppError>(__TAURI_INVOKE("speaker_library_update", { entry })),
 	/**
 	 *  Soft-delete — archived entries stay resolvable for existing Project
 	 *  references but are hidden from pickers for new assignments.
@@ -74,7 +74,6 @@ export type AmpAssignment = {
 	label: string | null,
 	ampModelId: string | null,
 	channels: AmpChannel[],
-	linking: AmpLinkConfig,
 };
 
 /**
@@ -87,11 +86,12 @@ export type AmpChannel = {
 	channelIndex: number,
 	ohms: number | null,
 	speakerLibraryId: string | null,
-};
-
-export type AmpLinkConfig = {
-	enabled: boolean,
-	scopes: { [key in string]: LinkScopeConfig },
+	/**
+	 *  Which way (driver/frequency band) of the assigned speaker this
+	 *  channel drives — e.g. a 2-way cab's "HF" way. Only meaningful when
+	 *  `speaker_library_id` is set; `None`/`0` for a single-way speaker.
+	 */
+	wayIndex: number | null,
 };
 
 /**
@@ -122,17 +122,6 @@ export type AppError = {
  */
 export type EntryOrigin = "userDefined" | "builtIn";
 
-export type LinkGroup = {
-	id: string,
-	name: string,
-	channels: number[],
-};
-
-export type LinkScopeConfig = {
-	enabled: boolean,
-	groups: LinkGroup[],
-};
-
 export type Project = {
 	id: string,
 	name: string,
@@ -147,16 +136,31 @@ export type Project = {
  *  A reusable, project-independent speaker profile. Projects reference
  *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
  */
-export type SpeakerLibraryEntry = {
+export type SpeakerLibraryEntry = SpeakerLibraryEntry_Serialize | SpeakerLibraryEntry_Deserialize;
+
+/**
+ *  A reusable, project-independent speaker profile. Projects reference
+ *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
+ */
+export type SpeakerLibraryEntry_Deserialize = {
 	id: string,
 	brand: string,
+	/**  Product family/series (e.g. "LX Series") — distinct from `model`. */
+	family: string | null,
 	model: string,
-	nominalImpedance: number | null,
-	powerRating: number | null,
-	sensitivity: number | null,
-	frequencyResponse: string | null,
-	speakerType: string | null,
-	ways: number | null,
+	/**
+	 *  Use-case category (e.g. "Full-range", "Subwoofer") — matches the old
+	 *  app's "Speaker Application" field.
+	 */
+	application: string | null,
+	/**
+	 *  A speaker may have multiple ways (e.g. a 2-way cab has LF + HF); a
+	 *  channel assignment references one specific way, not the whole entry.
+	 *  Custom deserializer: older persisted entries have this field as an
+	 *  explicit `null` (from a prior schema where it was `Option<u32>`) —
+	 *  `#[serde(default)]` alone only covers a *missing* key, not `null`.
+	 */
+	ways?: SpeakerWay[],
 	notes: string | null,
 	origin: EntryOrigin,
 	/**
@@ -166,6 +170,51 @@ export type SpeakerLibraryEntry = {
 	archived: boolean,
 	createdAt: number | null,
 	updatedAt: number | null,
+};
+
+/**
+ *  A reusable, project-independent speaker profile. Projects reference
+ *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
+ */
+export type SpeakerLibraryEntry_Serialize = {
+	id: string,
+	brand: string,
+	/**  Product family/series (e.g. "LX Series") — distinct from `model`. */
+	family: string | null,
+	model: string,
+	/**
+	 *  Use-case category (e.g. "Full-range", "Subwoofer") — matches the old
+	 *  app's "Speaker Application" field.
+	 */
+	application: string | null,
+	/**
+	 *  A speaker may have multiple ways (e.g. a 2-way cab has LF + HF); a
+	 *  channel assignment references one specific way, not the whole entry.
+	 *  Custom deserializer: older persisted entries have this field as an
+	 *  explicit `null` (from a prior schema where it was `Option<u32>`) —
+	 *  `#[serde(default)]` alone only covers a *missing* key, not `null`.
+	 */
+	ways: SpeakerWay[],
+	notes: string | null,
+	origin: EntryOrigin,
+	/**
+	 *  Soft-delete flag — archived entries stay resolvable for existing
+	 *  Project references but are hidden from pickers for new assignments.
+	 */
+	archived: boolean,
+	createdAt: number | null,
+	updatedAt: number | null,
+};
+
+/**
+ *  One named way (driver/frequency band) of a speaker, e.g. "LF", "HF Horn",
+ *  "S218" — matches the old app's simple way-label concept. Deliberately
+ *  does not carry `processing`/`deviceData` (DSP/tuning snapshots) — that's
+ *  live-device territory, deferred like every other device-I/O concern.
+ */
+export type SpeakerWay = {
+	id: string,
+	label: string,
 };
 
 /* Tauri Specta runtime */

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { Button, Card, Center, Modal, Stack, Text, TextInput, Textarea, Title } from "@mantine/core";
+import { ActionIcon, Button, Card, Center, Group, Modal, Stack, Text, TextInput, Textarea, Title } from "@mantine/core";
 import { useForm } from "@mantine/form";
+import { Pencil } from "lucide-react";
+import { ProjectEditModal } from "./ProjectEditModal";
 import { commands, type Project } from "../lib/bindings";
 
 interface ProjectSelectorProps {
@@ -12,6 +14,8 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
 
   const form = useForm({
     initialValues: { name: "", description: "" },
@@ -65,14 +69,32 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
               withBorder
               padding="sm"
               onClick={() => onSelect(project)}
+              onMouseEnter={() => setHoveredId(project.id)}
+              onMouseLeave={() => setHoveredId((current) => (current === project.id ? null : current))}
               style={{ cursor: "pointer" }}
             >
-              <Text fw={500}>{project.name}</Text>
-              {project.description && (
-                <Text size="sm" c="dimmed">
-                  {project.description}
-                </Text>
-              )}
+              <Group justify="space-between" wrap="nowrap">
+                <div style={{ minWidth: 0 }}>
+                  <Text fw={500}>{project.name}</Text>
+                  {project.description && (
+                    <Text size="sm" c="dimmed">
+                      {project.description}
+                    </Text>
+                  )}
+                </div>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  style={{ visibility: hoveredId === project.id ? "visible" : "hidden" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingProject(project);
+                  }}
+                  aria-label="Edit project"
+                >
+                  <Pencil size={16} />
+                </ActionIcon>
+              </Group>
             </Card>
           ))}
         </Stack>
@@ -111,6 +133,13 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
           </Stack>
         </form>
       </Modal>
+
+      <ProjectEditModal
+        project={editingProject}
+        onClose={() => setEditingProject(null)}
+        onSaved={(updated) => setProjects((current) => current.map((p) => (p.id === updated.id ? updated : p)))}
+        onDeleted={(id) => setProjects((current) => current.filter((p) => p.id !== id))}
+      />
     </Center>
   );
 }

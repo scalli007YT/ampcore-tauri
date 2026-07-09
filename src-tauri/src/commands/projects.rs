@@ -188,6 +188,7 @@ pub fn projects_set_channel_speaker(
     assignment_id: String,
     channel_index: u32,
     speaker_library_id: Option<String>,
+    way_index: Option<u32>,
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
     let project = inner
@@ -209,6 +210,7 @@ pub fn projects_set_channel_speaker(
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
 
     channel.speaker_library_id = speaker_library_id;
+    channel.way_index = way_index;
     project.touch();
 
     let project = project.clone();

@@ -40,12 +40,28 @@ const BUILTIN_AMP_MODELS: &[(&str, u32)] = &[
     ("DSP-4302", 2),
 ];
 
+/// Dante-networked counterparts of `BUILTIN_AMP_MODELS` — same product line,
+/// model name suffixed with "D" (e.g. "DSP-2004D").
+fn dante_builtin_amp_models() -> Vec<(String, u32)> {
+    BUILTIN_AMP_MODELS
+        .iter()
+        .map(|(model, channel_count)| (format!("{model}D"), *channel_count))
+        .collect()
+}
+
 fn seed_builtin_amp_models(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
     let mut changed = false;
     for (model, channel_count) in BUILTIN_AMP_MODELS {
         let id = format!("builtin-{}", model.to_lowercase());
         if !amp_models.iter().any(|m| m.id == id) {
             amp_models.push(AmpModelCatalogEntry::new_builtin(&id, "CVR", model, *channel_count));
+            changed = true;
+        }
+    }
+    for (model, channel_count) in dante_builtin_amp_models() {
+        let id = format!("builtin-{}", model.to_lowercase());
+        if !amp_models.iter().any(|m| m.id == id) {
+            amp_models.push(AmpModelCatalogEntry::new_builtin(&id, "CVR", &model, channel_count));
             changed = true;
         }
     }

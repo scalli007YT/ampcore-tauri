@@ -1,21 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Accordion,
   Box,
   Button,
   Center,
   Collapse,
   Group,
   Modal,
-  ScrollArea,
   Stack,
   Table,
   Text,
   TextInput,
   ThemeIcon,
+  Tree,
   UnstyledButton,
+  getTreeExpandedState,
+  useTree,
+  type RenderTreeNodePayload,
+  type TreeNodeData,
 } from "@mantine/core";
-import { ChevronDown, Server } from "lucide-react";
+import { ChevronDown, ChevronRight, Server } from "lucide-react";
 import { commands, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 import { AMP_SPEC_SHEETS } from "../lib/ampSpecSheets";
 
@@ -29,6 +32,17 @@ interface AmpCatalogueModalProps {
 
 function wattsOf(model: AmpModelCatalogEntry): number {
   return AMP_SPEC_SHEETS[model.model]?.watts8ohm ?? -1;
+}
+
+/** Maps every node value to its sibling values (same parent), so expanding
+ * one node in a layer can collapse the rest of that layer. */
+function buildSiblingMap(nodes: TreeNodeData[], map = new Map<string, string[]>()): Map<string, string[]> {
+  const values = nodes.map((n) => n.value);
+  for (const node of nodes) {
+    map.set(node.value, values.filter((v) => v !== node.value));
+    if (node.children) buildSiblingMap(node.children, map);
+  }
+  return map;
 }
 
 export function AmpCatalogueModal({
@@ -51,14 +65,92 @@ export function AmpCatalogueModal({
     return map;
   }, [active]);
 
-  const fourChannel = useMemo(
-    () => active.filter((m) => m.channelCount === 4).sort((a, b) => wattsOf(b) - wattsOf(a)),
-    [active],
+  const regular = useMemo(() => active.filter((m) => !m.model.endsWith("D")), [active]);
+  const dante = useMemo(() => active.filter((m) => m.model.endsWith("D")), [active]);
+
+  const regularFourChannel = useMemo(
+    () => regular.filter((m) => m.channelCount === 4).sort((a, b) => wattsOf(b) - wattsOf(a)),
+    [regular],
   );
-  const twoChannel = useMemo(
-    () => active.filter((m) => m.channelCount === 2).sort((a, b) => wattsOf(b) - wattsOf(a)),
-    [active],
+  const regularTwoChannel = useMemo(
+    () => regular.filter((m) => m.channelCount === 2).sort((a, b) => wattsOf(b) - wattsOf(a)),
+    [regular],
   );
+  const danteFourChannel = useMemo(
+    () => dante.filter((m) => m.channelCount === 4).sort((a, b) => wattsOf(b) - wattsOf(a)),
+    [dante],
+  );
+  const danteTwoChannel = useMemo(
+    () => dante.filter((m) => m.channelCount === 2).sort((a, b) => wattsOf(b) - wattsOf(a)),
+    [dante],
+  );
+
+  const treeData: TreeNodeData[] = useMemo(
+    () => [
+      {
+        label: "CVR",
+        value: "cvr",
+        children: [
+          {
+            label: "Regular",
+            value: "regular",
+            children: [
+              {
+                label: "4-Channel",
+                value: "regular-4ch",
+                children: regularFourChannel.map((m) => ({ label: m.model, value: m.id })),
+              },
+              {
+                label: "2-Channel",
+                value: "regular-2ch",
+                children: regularTwoChannel.map((m) => ({ label: m.model, value: m.id })),
+              },
+            ],
+          },
+          {
+            label: "Dante",
+            value: "dante",
+            children: [
+              {
+                label: "4-Channel",
+                value: "dante-4ch",
+                children: danteFourChannel.map((m) => ({ label: m.model, value: m.id })),
+              },
+              {
+                label: "2-Channel",
+                value: "dante-2ch",
+                children: danteTwoChannel.map((m) => ({ label: m.model, value: m.id })),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    [regularFourChannel, regularTwoChannel, danteFourChannel, danteTwoChannel],
+  );
+
+  const siblingMap = useMemo(() => buildSiblingMap(treeData), [treeData]);
+
+  const [expandedState, setExpandedState] = useState<Record<string, boolean>>(() =>
+    getTreeExpandedState(treeData, ["cvr", "regular", "regular-4ch"]),
+  );
+
+  function handleExpandedStateChange(newState: Record<string, boolean>) {
+    const next = { ...newState };
+    for (const value of Object.keys(newState)) {
+      if (newState[value] && !expandedState[value]) {
+        for (const sibling of siblingMap.get(value) ?? []) {
+          next[sibling] = false;
+        }
+      }
+    }
+    setExpandedState(next);
+  }
+
+  const tree = useTree({
+    expandedState,
+    onExpandedStateChange: handleExpandedStateChange,
+  });
 
   useEffect(() => {
     if (opened) {
@@ -66,7 +158,9 @@ export function AmpCatalogueModal({
       setSpecsExpanded(false);
       setLabel("");
       setSubmitError(null);
+      setExpandedState(getTreeExpandedState(treeData, ["cvr", "regular", "regular-4ch"]));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
   const selectedModel = selectedModelId ? modelById.get(selectedModelId) ?? null : null;
@@ -86,66 +180,63 @@ export function AmpCatalogueModal({
     }
   }
 
-  function renderRow(m: AmpModelCatalogEntry) {
-    const spec = AMP_SPEC_SHEETS[m.model];
-    const isSelected = m.id === selectedModelId;
+  function renderNode({ node, hasChildren, expanded, elementProps }: RenderTreeNodePayload) {
+    if (!hasChildren) {
+      const m = modelById.get(node.value);
+      if (!m) return null;
+      const spec = AMP_SPEC_SHEETS[m.model];
+      const isSelected = m.id === selectedModelId;
+      return (
+        <div
+          {...elementProps}
+          onClick={(e) => {
+            elementProps.onClick(e);
+            setSelectedModelId(m.id);
+            setSpecsExpanded(false);
+            setSubmitError(null);
+          }}
+          style={{
+            ...elementProps.style,
+            cursor: "pointer",
+            borderRadius: "var(--mantine-radius-xs)",
+            padding: "4px var(--mantine-spacing-xs)",
+            backgroundColor: isSelected ? "var(--mantine-color-amber-light)" : undefined,
+          }}
+        >
+          <Group gap="xs" wrap="nowrap">
+            <ThemeIcon variant="light" color="gray" size="lg">
+              <Server size={18} />
+            </ThemeIcon>
+            <div>
+              <Text size="sm">{m.model}</Text>
+              <Text size="xs" c="dimmed">
+                {spec ? `${spec.watts8ohm}W @ 8Ω` : null}
+              </Text>
+            </div>
+          </Group>
+        </div>
+      );
+    }
+
     return (
-      <UnstyledButton
-        key={m.id}
-        onClick={() => {
-          setSelectedModelId(m.id);
-          setSpecsExpanded(false);
-          setSubmitError(null);
-        }}
-        p="xs"
-        style={{
-          display: "block",
-          width: "100%",
-          borderRadius: "var(--mantine-radius-xs)",
-          backgroundColor: isSelected ? "var(--mantine-color-amber-light)" : undefined,
-        }}
-      >
-        <Group gap="xs" wrap="nowrap">
-          <ThemeIcon variant="light" color="gray" size="lg">
-            <Server size={18} />
-          </ThemeIcon>
-          <div>
-            <Text size="sm">{m.model}</Text>
-            <Text size="xs" c="dimmed">
-              {spec ? `${spec.watts8ohm}W @ 8Ω` : null}
-            </Text>
-          </div>
-        </Group>
-      </UnstyledButton>
+      <Group {...elementProps} gap={4} wrap="nowrap" style={{ ...elementProps.style, cursor: "pointer", padding: "4px 0" }}>
+        <ChevronRight
+          size={14}
+          style={{ transform: expanded ? "rotate(90deg)" : undefined, transition: "transform 100ms" }}
+        />
+        <Text size="sm" fw={600}>
+          {node.label}
+        </Text>
+      </Group>
     );
   }
 
   return (
     <Modal opened={opened} onClose={onClose} title="Add Amp" size="xl" centered>
       <Group align="stretch" wrap="nowrap" gap="md" style={{ minHeight: 420 }}>
-        <ScrollArea.Autosize mah={420} w={260} type="auto">
-          <Accordion defaultValue="cvr" variant="separated">
-            <Accordion.Item value="cvr">
-              <Accordion.Control>CVR</Accordion.Control>
-              <Accordion.Panel>
-                <Accordion defaultValue="4-channel" variant="separated">
-                  <Accordion.Item value="4-channel">
-                    <Accordion.Control>4-Channel</Accordion.Control>
-                    <Accordion.Panel>
-                      <Stack gap={4}>{fourChannel.map(renderRow)}</Stack>
-                    </Accordion.Panel>
-                  </Accordion.Item>
-                  <Accordion.Item value="2-channel">
-                    <Accordion.Control>2-Channel</Accordion.Control>
-                    <Accordion.Panel>
-                      <Stack gap={4}>{twoChannel.map(renderRow)}</Stack>
-                    </Accordion.Panel>
-                  </Accordion.Item>
-                </Accordion>
-              </Accordion.Panel>
-            </Accordion.Item>
-          </Accordion>
-        </ScrollArea.Autosize>
+        <Box w={260}>
+          <Tree data={treeData} tree={tree} renderNode={renderNode} levelOffset="md" />
+        </Box>
 
         <Box style={{ flex: 1, display: "flex", flexDirection: "column" }}>
           {selectedModel ? (

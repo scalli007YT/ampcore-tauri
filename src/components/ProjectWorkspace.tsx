@@ -3,6 +3,7 @@ import { ActionIcon, Box, Stack, Tabs, Text, ThemeIcon, UnstyledButton } from "@
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { OperatorView } from "./OperatorView";
+import { SpeakerLibraryView } from "./SpeakerLibraryView";
 import { WorkspaceView } from "./WorkspaceView";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 
@@ -48,6 +49,7 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
         <Tabs.List justify="center">
           <Tabs.Tab value="workspace">Workspace</Tabs.Tab>
           <Tabs.Tab value="operator">Operator View</Tabs.Tab>
+          <Tabs.Tab value="speakerLibrary">Speaker Library</Tabs.Tab>
         </Tabs.List>
       </Tabs>
 
@@ -118,6 +120,7 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
             />
           )}
           {activeTab === "operator" && <OperatorView />}
+          {activeTab === "speakerLibrary" && <SpeakerLibraryView />}
           {activeDevice && (
             <AmpConfigureView
               assignment={activeDevice}

@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::data::common::now_millis;
-use crate::data::speaker_library::SpeakerLibraryEntry;
+use crate::data::speaker_library::{SpeakerLibraryEntry, SpeakerWay};
 use crate::data::store::{save_speaker_library, ProjectDataState};
 use crate::error::AppError;
 
@@ -19,9 +19,12 @@ pub fn speaker_library_create(
     state: State<ProjectDataState>,
     brand: String,
     model: String,
+    family: Option<String>,
+    application: Option<String>,
+    ways: Vec<SpeakerWay>,
 ) -> Result<SpeakerLibraryEntry, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = SpeakerLibraryEntry::new(brand, model);
+    let entry = SpeakerLibraryEntry::new(brand, model, family, application, ways);
     inner.speaker_library.push(entry.clone());
     save_speaker_library(&inner.data_dir, &inner.speaker_library).map_err(AppError::from)?;
     app.emit("speaker_library:updated", &inner.speaker_library).ok();

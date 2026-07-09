@@ -3,6 +3,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { AppModeSelector } from "./components/AppModeSelector";
+import { LiveControlView } from "./components/LiveControlView";
 import { ProjectSelector } from "./components/ProjectSelector";
 import { ProjectWorkspace } from "./components/ProjectWorkspace";
 import { SettingsModal } from "./components/SettingsModal";
@@ -11,8 +13,11 @@ import { UpdateAvailableModal } from "./components/UpdateAvailableModal";
 import { getAutoUpdateChecksEnabled, setAutoUpdateChecksEnabled } from "./lib/preferences";
 import type { Project } from "./lib/bindings";
 
+type AppMode = "modeSelect" | "liveControl" | "projectDesign";
+
 function App() {
   const [version, setVersion] = useState("");
+  const [mode, setMode] = useState<AppMode>("modeSelect");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
@@ -51,6 +56,11 @@ function App() {
     setPendingUpdate(null);
   }
 
+  function handleBackToStart() {
+    setSelectedProject(null);
+    setMode("modeSelect");
+  }
+
   const windowTitle = selectedProject
     ? `AmpCore ${version} - ${selectedProject.name}`.trim()
     : `AmpCore ${version}`.trim();
@@ -66,15 +76,24 @@ function App() {
       <TitleBar
         title={windowTitle}
         projectName={selectedProject?.name}
-        onCloseProject={() => setSelectedProject(null)}
+        onCloseProject={handleBackToStart}
+        onBackToStart={!selectedProject && mode !== "modeSelect" ? handleBackToStart : undefined}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <div style={{ flex: 1, minHeight: 0 }}>
-        {!selectedProject ? (
-          <ProjectSelector onSelect={setSelectedProject} />
-        ) : (
-          <ProjectWorkspace project={selectedProject} onProjectUpdate={setSelectedProject} />
+        {mode === "modeSelect" && (
+          <AppModeSelector
+            onSelectLiveControl={() => setMode("liveControl")}
+            onSelectProjectDesign={() => setMode("projectDesign")}
+          />
         )}
+        {mode === "liveControl" && <LiveControlView />}
+        {mode === "projectDesign" &&
+          (!selectedProject ? (
+            <ProjectSelector onSelect={setSelectedProject} />
+          ) : (
+            <ProjectWorkspace project={selectedProject} onProjectUpdate={setSelectedProject} />
+          ))}
       </div>
       <SettingsModal opened={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <UpdateAvailableModal

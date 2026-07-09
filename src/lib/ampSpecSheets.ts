@@ -22,7 +22,7 @@ export interface AmpSpecSheet {
   weightKg: number;
 }
 
-export const AMP_SPEC_SHEETS: Record<string, AmpSpecSheet> = {
+const CVR_SPEC_SHEETS: Record<string, AmpSpecSheet> = {
   "DSP-654": {
     watts8ohm: 650,
     watts4ohm: 1100,
@@ -143,4 +143,16 @@ export const AMP_SPEC_SHEETS: Record<string, AmpSpecSheet> = {
     sizeWxHxDmm: "483x45x465mm",
     weightKg: 13,
   },
+};
+
+// Dante-networked counterparts share the same underlying spec sheet as their
+// non-networked equivalent — same amp, same power section, just a "D"
+// suffix on the model name to distinguish the network-connected variant.
+const DANTE_SPEC_SHEETS: Record<string, AmpSpecSheet> = Object.fromEntries(
+  Object.entries(CVR_SPEC_SHEETS).map(([model, spec]) => [`${model}D`, spec]),
+);
+
+export const AMP_SPEC_SHEETS: Record<string, AmpSpecSheet> = {
+  ...CVR_SPEC_SHEETS,
+  ...DANTE_SPEC_SHEETS,
 };

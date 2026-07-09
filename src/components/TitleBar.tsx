@@ -9,10 +9,11 @@ interface TitleBarProps {
   title: string;
   projectName?: string;
   onCloseProject?: () => void;
+  onBackToStart?: () => void;
   onOpenSettings: () => void;
 }
 
-export function TitleBar({ title, projectName, onCloseProject, onOpenSettings }: TitleBarProps) {
+export function TitleBar({ title, projectName, onCloseProject, onBackToStart, onOpenSettings }: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -51,6 +52,12 @@ export function TitleBar({ title, projectName, onCloseProject, onOpenSettings }:
               <>
                 <Menu.Divider />
                 <Menu.Item onClick={onCloseProject}>Exit Project</Menu.Item>
+              </>
+            )}
+            {onBackToStart && (
+              <>
+                <Menu.Divider />
+                <Menu.Item onClick={onBackToStart}>Back to Start</Menu.Item>
               </>
             )}
           </Menu.Dropdown>

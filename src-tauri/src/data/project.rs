@@ -1,60 +1,7 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use super::common::{new_id, now_millis};
-
-/// Known linking scopes, mirroring the old app's `LINK_SCOPES`. Kept as plain
-/// strings (not a Rust enum) so `AmpLinkConfig.scopes` stays a simple
-/// `Record<string, LinkScopeConfig>` on the TypeScript side.
-pub const LINK_SCOPES: &[&str] = &[
-    "muteIn",
-    "muteOut",
-    "volumeOut",
-    "noiseGateOut",
-    "polarityOut",
-    "trimOut",
-    "delayOut",
-    "inputEq",
-    "outputEq",
-    "limiters",
-];
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkGroup {
-    pub id: String,
-    pub name: String,
-    pub channels: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkScopeConfig {
-    pub enabled: bool,
-    pub groups: Vec<LinkGroup>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct AmpLinkConfig {
-    pub enabled: bool,
-    pub scopes: HashMap<String, LinkScopeConfig>,
-}
-
-impl AmpLinkConfig {
-    pub fn default_with_scopes() -> Self {
-        let mut scopes = HashMap::new();
-        for scope in LINK_SCOPES {
-            scopes.insert(scope.to_string(), LinkScopeConfig::default());
-        }
-        Self {
-            enabled: false,
-            scopes,
-        }
-    }
-}
 
 /// Per-channel config on an amp assignment. `ohms` is independently authored
 /// (never derived from the assigned speaker's nominal spec — real wiring can
@@ -66,6 +13,10 @@ pub struct AmpChannel {
     pub channel_index: u32,
     pub ohms: f64,
     pub speaker_library_id: Option<String>,
+    /// Which way (driver/frequency band) of the assigned speaker this
+    /// channel drives — e.g. a 2-way cab's "HF" way. Only meaningful when
+    /// `speaker_library_id` is set; `None`/`0` for a single-way speaker.
+    pub way_index: Option<u32>,
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
@@ -81,7 +32,6 @@ pub struct AmpAssignment {
     pub label: Option<String>,
     pub amp_model_id: Option<String>,
     pub channels: Vec<AmpChannel>,
-    pub linking: AmpLinkConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -124,6 +74,7 @@ impl AmpAssignment {
                 channel_index,
                 ohms: 8.0,
                 speaker_library_id: None,
+                way_index: None,
             })
             .collect();
         Self {
@@ -132,7 +83,6 @@ impl AmpAssignment {
             label,
             amp_model_id,
             channels,
-            linking: AmpLinkConfig::default_with_scopes(),
         }
     }
 
@@ -148,6 +98,7 @@ impl AmpAssignment {
                     channel_index,
                     ohms: 8.0,
                     speaker_library_id: None,
+                    way_index: None,
                 });
             }
         }
