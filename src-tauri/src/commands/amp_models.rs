@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Emitter, State};
 
-use crate::data::amp_model::AmpModelCatalogEntry;
+use crate::data::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use crate::data::common::now_millis;
 use crate::data::store::{save_amp_models, ProjectDataState};
 use crate::error::AppError;
@@ -20,9 +20,11 @@ pub fn amp_models_create(
     brand: String,
     model: String,
     channel_count: u32,
+    is_dante: bool,
+    protocol: AmpProtocol,
 ) -> Result<AmpModelCatalogEntry, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-    let entry = AmpModelCatalogEntry::new(brand, model, channel_count);
+    let entry = AmpModelCatalogEntry::new(brand, model, channel_count, is_dante, protocol);
     inner.amp_models.push(entry.clone());
     save_amp_models(&inner.data_dir, &inner.amp_models).map_err(AppError::from)?;
     app.emit("amp_model:updated", &inner.amp_models).ok();

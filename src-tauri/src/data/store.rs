@@ -4,7 +4,8 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager};
 
-use super::amp_model::AmpModelCatalogEntry;
+use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
+use super::common::EntryOrigin;
 use super::project::Project;
 use super::speaker_library::SpeakerLibraryEntry;
 
@@ -54,14 +55,42 @@ fn seed_builtin_amp_models(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
     for (model, channel_count) in BUILTIN_AMP_MODELS {
         let id = format!("builtin-{}", model.to_lowercase());
         if !amp_models.iter().any(|m| m.id == id) {
-            amp_models.push(AmpModelCatalogEntry::new_builtin(&id, "CVR", model, *channel_count));
+            amp_models.push(AmpModelCatalogEntry::new_builtin(
+                &id,
+                "CVR",
+                model,
+                *channel_count,
+                false,
+                AmpProtocol::CvrUdp,
+            ));
             changed = true;
         }
     }
     for (model, channel_count) in dante_builtin_amp_models() {
         let id = format!("builtin-{}", model.to_lowercase());
         if !amp_models.iter().any(|m| m.id == id) {
-            amp_models.push(AmpModelCatalogEntry::new_builtin(&id, "CVR", &model, channel_count));
+            amp_models.push(AmpModelCatalogEntry::new_builtin(
+                &id,
+                "CVR",
+                &model,
+                channel_count,
+                true,
+                AmpProtocol::CvrUdp,
+            ));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// One-time backfill for installs with `amp_models.json` predating
+/// `is_dante`. Scoped to `BuiltIn` origin only — a user-defined model that
+/// happens to end in "D" should not be force-flagged as Dante.
+fn migrate_dante_flag(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
+    let mut changed = false;
+    for m in amp_models.iter_mut() {
+        if !m.is_dante && m.origin == EntryOrigin::BuiltIn && m.model.ends_with('D') {
+            m.is_dante = true;
             changed = true;
         }
     }
@@ -80,7 +109,9 @@ impl ProjectDataState {
         let projects = load_projects(&data_dir)?;
         let speaker_library = load_json_or_default(&data_dir.join("speaker_library.json"))?;
         let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
-        if seed_builtin_amp_models(&mut amp_models) {
+        let migrated = migrate_dante_flag(&mut amp_models);
+        let seeded = seed_builtin_amp_models(&mut amp_models);
+        if migrated || seeded {
             save_amp_models(&data_dir, &amp_models)?;
         }
 

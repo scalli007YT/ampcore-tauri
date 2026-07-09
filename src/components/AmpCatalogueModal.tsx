@@ -20,7 +20,7 @@ import {
 } from "@mantine/core";
 import { ChevronDown, ChevronRight, Server } from "lucide-react";
 import { commands, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
-import { AMP_SPEC_SHEETS } from "../lib/ampSpecSheets";
+import { getAmpSpecSheet } from "../lib/ampSpecSheets";
 
 interface AmpCatalogueModalProps {
   opened: boolean;
@@ -31,7 +31,7 @@ interface AmpCatalogueModalProps {
 }
 
 function wattsOf(model: AmpModelCatalogEntry): number {
-  return AMP_SPEC_SHEETS[model.model]?.watts8ohm ?? -1;
+  return getAmpSpecSheet(model)?.watts8ohm ?? -1;
 }
 
 /** Maps every node value to its sibling values (same parent), so expanding
@@ -65,74 +65,73 @@ export function AmpCatalogueModal({
     return map;
   }, [active]);
 
-  const regular = useMemo(() => active.filter((m) => !m.model.endsWith("D")), [active]);
-  const dante = useMemo(() => active.filter((m) => m.model.endsWith("D")), [active]);
+  function buildBrandNode(brand: string, models: AmpModelCatalogEntry[]): TreeNodeData {
+    const regular = models.filter((m) => !m.isDante);
+    const dante = models.filter((m) => m.isDante);
+    const bucket = (list: AmpModelCatalogEntry[], channelCount: number) =>
+      list.filter((m) => m.channelCount === channelCount).sort((a, b) => wattsOf(b) - wattsOf(a));
 
-  const regularFourChannel = useMemo(
-    () => regular.filter((m) => m.channelCount === 4).sort((a, b) => wattsOf(b) - wattsOf(a)),
-    [regular],
-  );
-  const regularTwoChannel = useMemo(
-    () => regular.filter((m) => m.channelCount === 2).sort((a, b) => wattsOf(b) - wattsOf(a)),
-    [regular],
-  );
-  const danteFourChannel = useMemo(
-    () => dante.filter((m) => m.channelCount === 4).sort((a, b) => wattsOf(b) - wattsOf(a)),
-    [dante],
-  );
-  const danteTwoChannel = useMemo(
-    () => dante.filter((m) => m.channelCount === 2).sort((a, b) => wattsOf(b) - wattsOf(a)),
-    [dante],
-  );
+    return {
+      label: brand,
+      value: brand,
+      children: [
+        {
+          label: "Regular",
+          value: `${brand}-regular`,
+          children: [
+            {
+              label: "4-Channel",
+              value: `${brand}-regular-4ch`,
+              children: bucket(regular, 4).map((m) => ({ label: m.model, value: m.id })),
+            },
+            {
+              label: "2-Channel",
+              value: `${brand}-regular-2ch`,
+              children: bucket(regular, 2).map((m) => ({ label: m.model, value: m.id })),
+            },
+          ],
+        },
+        {
+          label: "Dante",
+          value: `${brand}-dante`,
+          children: [
+            {
+              label: "4-Channel",
+              value: `${brand}-dante-4ch`,
+              children: bucket(dante, 4).map((m) => ({ label: m.model, value: m.id })),
+            },
+            {
+              label: "2-Channel",
+              value: `${brand}-dante-2ch`,
+              children: bucket(dante, 2).map((m) => ({ label: m.model, value: m.id })),
+            },
+          ],
+        },
+      ],
+    };
+  }
 
-  const treeData: TreeNodeData[] = useMemo(
-    () => [
-      {
-        label: "CVR",
-        value: "cvr",
-        children: [
-          {
-            label: "Regular",
-            value: "regular",
-            children: [
-              {
-                label: "4-Channel",
-                value: "regular-4ch",
-                children: regularFourChannel.map((m) => ({ label: m.model, value: m.id })),
-              },
-              {
-                label: "2-Channel",
-                value: "regular-2ch",
-                children: regularTwoChannel.map((m) => ({ label: m.model, value: m.id })),
-              },
-            ],
-          },
-          {
-            label: "Dante",
-            value: "dante",
-            children: [
-              {
-                label: "4-Channel",
-                value: "dante-4ch",
-                children: danteFourChannel.map((m) => ({ label: m.model, value: m.id })),
-              },
-              {
-                label: "2-Channel",
-                value: "dante-2ch",
-                children: danteTwoChannel.map((m) => ({ label: m.model, value: m.id })),
-              },
-            ],
-          },
-        ],
-      },
-    ],
-    [regularFourChannel, regularTwoChannel, danteFourChannel, danteTwoChannel],
-  );
+  const treeData: TreeNodeData[] = useMemo(() => {
+    const byBrand = new Map<string, AmpModelCatalogEntry[]>();
+    for (const m of active) {
+      const list = byBrand.get(m.brand);
+      if (list) list.push(m);
+      else byBrand.set(m.brand, [m]);
+    }
+    return Array.from(byBrand.entries()).map(([brand, models]) => buildBrandNode(brand, models));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  const defaultExpandedPath = useMemo(() => {
+    const firstBrand = treeData[0]?.value;
+    return firstBrand ? [firstBrand, `${firstBrand}-regular`, `${firstBrand}-regular-4ch`] : [];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [treeData]);
 
   const siblingMap = useMemo(() => buildSiblingMap(treeData), [treeData]);
 
   const [expandedState, setExpandedState] = useState<Record<string, boolean>>(() =>
-    getTreeExpandedState(treeData, ["cvr", "regular", "regular-4ch"]),
+    getTreeExpandedState(treeData, defaultExpandedPath),
   );
 
   function handleExpandedStateChange(newState: Record<string, boolean>) {
@@ -158,13 +157,13 @@ export function AmpCatalogueModal({
       setSpecsExpanded(false);
       setLabel("");
       setSubmitError(null);
-      setExpandedState(getTreeExpandedState(treeData, ["cvr", "regular", "regular-4ch"]));
+      setExpandedState(getTreeExpandedState(treeData, defaultExpandedPath));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
   const selectedModel = selectedModelId ? modelById.get(selectedModelId) ?? null : null;
-  const selectedSpec = selectedModel ? AMP_SPEC_SHEETS[selectedModel.model] : undefined;
+  const selectedSpec = selectedModel ? getAmpSpecSheet(selectedModel) : undefined;
 
   async function handleAddAssignment() {
     if (!selectedModelId) return;
@@ -184,7 +183,7 @@ export function AmpCatalogueModal({
     if (!hasChildren) {
       const m = modelById.get(node.value);
       if (!m) return null;
-      const spec = AMP_SPEC_SHEETS[m.model];
+      const spec = getAmpSpecSheet(m);
       const isSelected = m.id === selectedModelId;
       return (
         <div

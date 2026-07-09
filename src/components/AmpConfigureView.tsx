@@ -11,7 +11,9 @@ import {
 import type { AmpAssignment, AmpModelCatalogEntry } from "../lib/bindings";
 
 interface AmpConfigureViewProps {
-  assignment: AmpAssignment;
+  /** Omitted when configuring a live-discovered device with no project
+   * assignment yet (Live Control mode) — see App.tsx's two entry points. */
+  assignment?: AmpAssignment;
   ampModel?: AmpModelCatalogEntry;
 }
 

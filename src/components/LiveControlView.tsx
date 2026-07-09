@@ -1,9 +1,84 @@
-import { Center, Text } from "@mantine/core";
+import { useState } from "react";
+import { Badge, Card, Center, Divider, Group, Loader, ScrollArea, Stack, Text } from "@mantine/core";
+import { AmpConfigureView } from "./AmpConfigureView";
+import { useLiveDevices } from "../hooks/useLiveDevices";
 
 export function LiveControlView() {
+  const { devices, ready } = useLiveDevices();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  if (!ready) {
+    return (
+      <Center h="100%">
+        <Loader size="sm" />
+      </Center>
+    );
+  }
+
+  const selectedDevice = devices.find((d) => d.id === selectedId) ?? null;
+
   return (
-    <Center h="100%">
-      <Text c="dimmed">Live Control — coming soon</Text>
-    </Center>
+    <Group h="100%" gap={0} align="stretch" wrap="nowrap">
+      <Stack w={260} h="100%" p="md" gap="md" style={{ flexShrink: 0 }}>
+        <Text fw={500} size="sm" c="dimmed">
+          Discovered Amps
+        </Text>
+
+        {devices.length === 0 ? (
+          <Center style={{ flex: 1 }}>
+            <Text c="dimmed" size="sm" ta="center">
+              Scanning for amplifiers on the network…
+            </Text>
+          </Center>
+        ) : (
+          <ScrollArea style={{ flex: 1 }}>
+            <Stack gap="xs">
+              {devices.map((d) => {
+                const isSelected = d.id === selectedId;
+                return (
+                  <Card
+                    key={d.id}
+                    withBorder
+                    padding="sm"
+                    onClick={() => setSelectedId(d.id)}
+                    style={{
+                      cursor: "pointer",
+                      borderColor: isSelected ? "var(--mantine-color-amber-filled)" : undefined,
+                      borderWidth: isSelected ? 2 : 1,
+                    }}
+                  >
+                    <Group justify="space-between" wrap="nowrap" gap="xs">
+                      <div style={{ minWidth: 0 }}>
+                        <Text fw={500} size="sm" truncate>
+                          {d.name || d.mac}
+                        </Text>
+                        <Text size="xs" c="dimmed">
+                          {d.ip}
+                        </Text>
+                      </div>
+                      <Badge color={d.online ? "green" : "gray"} variant="light" size="xs">
+                        {d.online ? "Online" : "Offline"}
+                      </Badge>
+                    </Group>
+                  </Card>
+                );
+              })}
+            </Stack>
+          </ScrollArea>
+        )}
+      </Stack>
+
+      <Divider orientation="vertical" />
+
+      <div style={{ flex: 1, height: "100%", minWidth: 0 }}>
+        {selectedDevice ? (
+          <AmpConfigureView />
+        ) : (
+          <Center h="100%">
+            <Text c="dimmed">Select an amp from the list</Text>
+          </Center>
+        )}
+      </div>
+    </Group>
   );
 }

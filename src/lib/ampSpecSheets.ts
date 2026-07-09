@@ -148,11 +148,18 @@ const CVR_SPEC_SHEETS: Record<string, AmpSpecSheet> = {
 // Dante-networked counterparts share the same underlying spec sheet as their
 // non-networked equivalent — same amp, same power section, just a "D"
 // suffix on the model name to distinguish the network-connected variant.
-const DANTE_SPEC_SHEETS: Record<string, AmpSpecSheet> = Object.fromEntries(
+const CVR_DANTE_SPEC_SHEETS: Record<string, AmpSpecSheet> = Object.fromEntries(
   Object.entries(CVR_SPEC_SHEETS).map(([model, spec]) => [`${model}D`, spec]),
 );
 
-export const AMP_SPEC_SHEETS: Record<string, AmpSpecSheet> = {
-  ...CVR_SPEC_SHEETS,
-  ...DANTE_SPEC_SHEETS,
+// One entry per onboarded brand — add a new brand's spec table here, scoped
+// under its own key, when it's added to the catalog. Scoping by brand (not
+// one flat cross-brand map) avoids a different brand's model name silently
+// colliding with a CVR key string.
+const SPEC_SHEETS_BY_BRAND: Record<string, Record<string, AmpSpecSheet>> = {
+  CVR: { ...CVR_SPEC_SHEETS, ...CVR_DANTE_SPEC_SHEETS },
 };
+
+export function getAmpSpecSheet(entry: { brand: string; model: string }): AmpSpecSheet | undefined {
+  return SPEC_SHEETS_BY_BRAND[entry.brand]?.[entry.model];
+}

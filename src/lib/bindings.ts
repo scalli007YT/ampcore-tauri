@@ -48,7 +48,7 @@ export const commands = {
 	 */
 	speakerLibraryArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_archive", { id })),
 	ampModelsList: () => typedError<AmpModelCatalogEntry[], AppError>(__TAURI_INVOKE("amp_models_list")),
-	ampModelsCreate: (brand: string, model: string, channelCount: number) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount })),
+	ampModelsCreate: (brand: string, model: string, channelCount: number, isDante: boolean, protocol: AmpProtocol) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount, isDante, protocol })),
 	/**
 	 *  Full-entry replace, mirroring `projects_update`'s pattern. Changing
 	 *  `channel_count` here does NOT retroactively touch any Project's
@@ -58,6 +58,9 @@ export const commands = {
 	ampModelsUpdate: (entry: AmpModelCatalogEntry) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_update", { entry })),
 	/**  Soft-delete — see SpeakerLibraryEntry.archived for rationale. */
 	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
+	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
+	liveControlStop: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_stop")),
+	liveControlListDevices: () => typedError<DiscoveredDevice[], AppError>(__TAURI_INVOKE("live_control_list_devices")),
 };
 
 /* Types */
@@ -95,6 +98,24 @@ export type AmpChannel = {
 };
 
 /**
+ *  Placeholder DSP-capability schema — all fields intentionally `None` until
+ *  real per-model datasheet data is sourced. Exists so the Configure tabs
+ *  (Matrix, Input, Output, etc.) have a real place to eventually read
+ *  per-model capability from, for any brand, not just channel_count.
+ */
+export type AmpDspTopology = {
+	matrixInputCount: number | null,
+	matrixOutputCount: number | null,
+	eqBandCount: number | null,
+	/**
+	 *  Free-text for now (e.g. "Butterworth", "Linkwitz-Riley") — not an enum
+	 *  yet since no real per-model data exists to validate against.
+	 */
+	crossoverTypes: string[] | null,
+	limiterCount: number | null,
+};
+
+/**
  *  A reusable, project-independent amp hardware model — mirrors the Speaker
  *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
@@ -104,6 +125,13 @@ export type AmpModelCatalogEntry = {
 	brand: string,
 	model: string,
 	channelCount: number,
+	/**
+	 *  Authoritative Dante-variant flag — replaces string-matching on the
+	 *  model name (e.g. a trailing "D") in the frontend.
+	 */
+	isDante?: boolean,
+	protocol?: AmpProtocol,
+	topology?: AmpDspTopology,
 	notes: string | null,
 	origin: EntryOrigin,
 	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
@@ -112,8 +140,40 @@ export type AmpModelCatalogEntry = {
 	updatedAt: number | null,
 };
 
+/**
+ *  Identifies which `AmpDriver` controls a catalog model — a brand-protocol-
+ *  family concept, not a firmware version (firmware is a runtime property of
+ *  a physical unit, detected at discovery time, not a fixed catalog attribute).
+ */
+export type AmpProtocol = "cvrUdp";
+
 export type AppError = {
 	message: string,
+};
+
+export type DiscoveredDevice = {
+	/**  "{driver_id}:{mac}", e.g. "cvr:AA:BB:CC:DD:EE:FF" — stable, brand-namespaced. */
+	id: string,
+	driverId: string,
+	brand: string,
+	name: string,
+	mac: string,
+	ip: string,
+	firmwareVersion: string,
+	/**
+	 *  Human-readable firmware family (e.g. "1.1.8"/"1.1.9" for CVR),
+	 *  `None` if unknown or not applicable to this brand's protocol.
+	 *  Brand-agnostic free text — driver-specific detection enums (like
+	 *  CVR's `CvrFirmwareFamily`) map into this rather than leaking here.
+	 */
+	firmwareFamily: string | null,
+	gainMax: number,
+	analogInputChannels: number,
+	digitalInputChannels: number,
+	outputChannels: number,
+	machineState: number,
+	online: boolean,
+	lastSeenAt: number | null,
 };
 
 /**
