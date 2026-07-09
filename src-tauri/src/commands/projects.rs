@@ -83,6 +83,7 @@ pub fn projects_add_amp_assignment(
     project_id: String,
     label: Option<String>,
     amp_model_id: Option<String>,
+    firmware_version: Option<String>,
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
 
@@ -101,7 +102,7 @@ pub fn projects_add_amp_assignment(
 
     project
         .amp_assignments
-        .push(AmpAssignment::new(None, label, channel_count, amp_model_id));
+        .push(AmpAssignment::new(None, label, channel_count, amp_model_id, firmware_version));
     project.touch();
 
     let project = project.clone();

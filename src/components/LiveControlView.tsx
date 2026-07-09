@@ -19,19 +19,19 @@ export function LiveControlView() {
 
   return (
     <Group h="100%" gap={0} align="stretch" wrap="nowrap">
-      <Stack w={260} h="100%" p="md" gap="md" style={{ flexShrink: 0 }}>
+      <Stack w={260} h="100%" p="md" gap="md" className="shrink-0">
         <Text fw={500} size="sm" c="dimmed">
           Discovered Amps
         </Text>
 
         {devices.length === 0 ? (
-          <Center style={{ flex: 1 }}>
+          <Center className="flex-1">
             <Text c="dimmed" size="sm" ta="center">
               Scanning for amplifiers on the network…
             </Text>
           </Center>
         ) : (
-          <ScrollArea style={{ flex: 1 }}>
+          <ScrollArea className="flex-1">
             <Stack gap="xs">
               {devices.map((d) => {
                 const isSelected = d.id === selectedId;
@@ -41,14 +41,10 @@ export function LiveControlView() {
                     withBorder
                     padding="sm"
                     onClick={() => setSelectedId(d.id)}
-                    style={{
-                      cursor: "pointer",
-                      borderColor: isSelected ? "var(--mantine-color-amber-filled)" : undefined,
-                      borderWidth: isSelected ? 2 : 1,
-                    }}
+                    className={`cursor-pointer${isSelected ? " border-2 border-[var(--mantine-color-amber-filled)]" : ""}`}
                   >
                     <Group justify="space-between" wrap="nowrap" gap="xs">
-                      <div style={{ minWidth: 0 }}>
+                      <div className="min-w-0">
                         <Text fw={500} size="sm" truncate>
                           {d.name || d.mac}
                         </Text>
@@ -70,7 +66,7 @@ export function LiveControlView() {
 
       <Divider orientation="vertical" />
 
-      <div style={{ flex: 1, height: "100%", minWidth: 0 }}>
+      <div className="h-full min-w-0 flex-1">
         {selectedDevice ? (
           <AmpConfigureView />
         ) : (

@@ -50,7 +50,7 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
   }
 
   return (
-    <Center style={{ height: "100%" }}>
+    <Center className="h-full">
       <Stack w={420}>
         <Title order={2} ta="center">
           Select a Project
@@ -71,10 +71,10 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
               onClick={() => onSelect(project)}
               onMouseEnter={() => setHoveredId(project.id)}
               onMouseLeave={() => setHoveredId((current) => (current === project.id ? null : current))}
-              style={{ cursor: "pointer" }}
+              className="cursor-pointer"
             >
               <Group justify="space-between" wrap="nowrap">
-                <div style={{ minWidth: 0 }}>
+                <div className="min-w-0">
                   <Text fw={500}>{project.name}</Text>
                   {project.description && (
                     <Text size="sm" c="dimmed">
@@ -85,7 +85,7 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
                 <ActionIcon
                   variant="subtle"
                   color="gray"
-                  style={{ visibility: hoveredId === project.id ? "visible" : "hidden" }}
+                  className={hoveredId === project.id ? "visible" : "invisible"}
                   onClick={(e) => {
                     e.stopPropagation();
                     setEditingProject(project);

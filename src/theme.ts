@@ -69,5 +69,32 @@ export const theme = createTheme({
     Textarea: { defaultProps: { size: "sm" } },
     Select: { defaultProps: { size: "sm" } },
     ActionIcon: { defaultProps: { size: "sm" } },
+    // Modal's close button is a separate component from ActionIcon, so it
+    // didn't inherit the "sm" downsize above.
+    CloseButton: { defaultProps: { size: "sm" } },
+    // Mantine's Modal.Title defaults to regular-weight md text — visually
+    // indistinguishable from body copy at our dense font scale. Bump it so
+    // dialog titles read as titles, the way they do in most other UI kits.
+    //
+    // The header also carries a hardcoded `min-height: 3.75rem` (60px) in
+    // Mantine's own stylesheet, unrelated to title/button size — verified
+    // via computed styles in a real browser. That's what actually produces
+    // the oversized gap under every modal title; zero it out so the header
+    // hugs its content instead.
+    Modal: {
+      // padding = breathing room inside the modal (header/body); yOffset/
+      // xOffset = the margin between the modal box and the viewport edges.
+      // Both default tighter than felt right at this density, independent
+      // of the header-height fix above.
+      defaultProps: {
+        padding: "lg",
+        yOffset: "8dvh",
+        xOffset: "8vw",
+      },
+      styles: {
+        title: { fontWeight: 600, fontSize: "var(--mantine-font-size-lg)" },
+        header: { minHeight: 0 },
+      },
+    },
   },
 });

@@ -52,7 +52,7 @@ export function SpeakerLibraryView() {
       </Group>
 
       {active.length === 0 ? (
-        <Center style={{ flex: 1 }}>
+        <Center className="flex-1">
           <Text c="dimmed" size="sm">
             No speakers yet.
           </Text>

@@ -33,13 +33,9 @@ export function TitleBar({ title, projectName, onCloseProject, onBackToStart, on
       wrap="nowrap"
       h={36}
       px="xs"
-      style={{
-        userSelect: "none",
-        borderBottom:
-          "1px solid light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-6))",
-      }}
+      className="select-none border-b border-b-[light-dark(var(--mantine-color-gray-2),var(--mantine-color-dark-6))]"
     >
-      <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
+      <Group gap="xs" wrap="nowrap" className="min-w-0 flex-1">
         <Menu shadow="md" width={180} position="bottom-start">
           <Menu.Target>
             <Button variant="subtle" color="gray" size="compact-sm">
@@ -62,7 +58,7 @@ export function TitleBar({ title, projectName, onCloseProject, onBackToStart, on
             )}
           </Menu.Dropdown>
         </Menu>
-        <Text data-tauri-drag-region size="sm" fw={500} truncate style={{ flex: 1 }}>
+        <Text data-tauri-drag-region size="sm" fw={500} truncate className="flex-1">
           {title}
         </Text>
       </Group>

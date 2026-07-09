@@ -1,6 +1,23 @@
 /* Preflight intentionally omitted — Mantine ships its own CSS reset. */
+
+/* Layer order = priority order, lowest to highest. Mantine's stylesheet
+   ships unlayered by default, which — per the CSS cascade-layers spec —
+   would beat ALL layered CSS outright, including every Tailwind utility,
+   regardless of specificity or source order (e.g. Mantine's ActionIcon
+   sets `position: relative` in its own CSS; an unlayered rule like that
+   can't be overridden by a layered `.absolute` utility no matter what we
+   do). Pulling it into an explicit "mantine" layer ordered below
+   Tailwind's own layers restores normal, expected utility-class overrides
+   everywhere in the app. */
+@layer mantine, theme, utilities;
+@import "@mantine/core/styles.css" layer(mantine);
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities);
+
+/* Key `dark:` off Mantine's resolved color scheme (light/dark/auto all end
+   up setting this attribute on <html>) instead of the `prefers-color-scheme`
+   media query, so it stays in sync with the in-app theme toggle. */
+@custom-variant dark (&:where([data-mantine-color-scheme="dark"], [data-mantine-color-scheme="dark"] *));
 
 html,
 body,

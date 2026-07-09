@@ -44,7 +44,7 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
   const activeDevice = openAssignments.find((a) => deviceTabValue(a.id) === activeTab) ?? null;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <div className="flex h-full flex-col">
       <Tabs value={activeTab} onChange={setActiveTab}>
         <Tabs.List justify="center">
           <Tabs.Tab value="workspace">Workspace</Tabs.Tab>
@@ -53,39 +53,34 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
         </Tabs.List>
       </Tabs>
 
-      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+      <div className="flex min-h-0 flex-1">
         {/* Vertical device rail — Armonia-style, persists across Workspace/Operator View */}
         {openAssignments.length > 0 && (
           <Stack
             gap={4}
             p={4}
             w={56}
-            style={{
-              flexShrink: 0,
-              borderRight: "1px solid var(--mantine-color-default-border)",
-              overflowY: "auto",
-            }}
+            className="shrink-0 overflow-y-auto border-r border-[var(--mantine-color-default-border)]"
           >
             {openAssignments.map((assignment) => {
               const tabValue = deviceTabValue(assignment.id);
               const isActive = activeTab === tabValue;
               return (
-                <Box key={assignment.id} style={{ position: "relative" }}>
+                <Box key={assignment.id} className="relative">
                   <UnstyledButton
                     onClick={() => setActiveTab(tabValue)}
                     p={4}
-                    style={{
-                      width: "100%",
-                      borderRadius: "var(--mantine-radius-sm)",
-                      border: `1px solid ${isActive ? "var(--mantine-color-amber-filled)" : "transparent"}`,
-                      backgroundColor: isActive ? "var(--mantine-color-amber-light)" : undefined,
-                    }}
+                    className={`w-full rounded-[var(--mantine-radius-sm)] border ${
+                      isActive
+                        ? "border-[var(--mantine-color-amber-filled)] bg-[var(--mantine-color-amber-light)]"
+                        : "border-transparent"
+                    }`}
                   >
                     <Stack align="center" gap={2}>
                       <ThemeIcon variant="light" color="gray" size={28}>
                         <Server size={16} />
                       </ThemeIcon>
-                      <Text fz={9} ta="center" lineClamp={2} style={{ maxWidth: 48 }}>
+                      <Text fz={9} ta="center" lineClamp={2} className="max-w-[48px]">
                         {assignment.label ?? "Amp"}
                       </Text>
                     </Stack>
@@ -95,7 +90,7 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
                     variant="filled"
                     color="red"
                     radius="sm"
-                    style={{ position: "absolute", top: -4, right: -4 }}
+                    className="absolute -top-1 -right-1"
                     onClick={(e) => {
                       e.stopPropagation();
                       closeDevice(assignment.id);
@@ -110,7 +105,7 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
           </Stack>
         )}
 
-        <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        <div className="min-h-0 flex-1 overflow-auto">
           {activeTab === "workspace" && (
             <WorkspaceView
               project={project}

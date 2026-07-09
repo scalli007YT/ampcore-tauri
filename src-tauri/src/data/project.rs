@@ -31,6 +31,13 @@ pub struct AmpAssignment {
     pub mac: Option<String>,
     pub label: Option<String>,
     pub amp_model_id: Option<String>,
+    /// Firmware version this slot is being planned for (e.g. "1.1.8",
+    /// "1.1.9") — declared by the user at planning time, not detected, since
+    /// offline planning has no live device to sniff it from. Free text
+    /// (mirrors `DiscoveredDevice.firmware_family`) rather than a closed
+    /// enum, since it's protocol-specific and protocols are pluggable.
+    #[serde(default)]
+    pub firmware_version: Option<String>,
     pub channels: Vec<AmpChannel>,
 }
 
@@ -68,7 +75,13 @@ impl Project {
 }
 
 impl AmpAssignment {
-    pub fn new(mac: Option<String>, label: Option<String>, channel_count: u32, amp_model_id: Option<String>) -> Self {
+    pub fn new(
+        mac: Option<String>,
+        label: Option<String>,
+        channel_count: u32,
+        amp_model_id: Option<String>,
+        firmware_version: Option<String>,
+    ) -> Self {
         let channels = (0..channel_count)
             .map(|channel_index| AmpChannel {
                 channel_index,
@@ -82,6 +95,7 @@ impl AmpAssignment {
             mac,
             label,
             amp_model_id,
+            firmware_version,
             channels,
         }
     }

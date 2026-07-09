@@ -6,6 +6,7 @@ import {
   Collapse,
   Group,
   Modal,
+  Select,
   Stack,
   Table,
   Text,
@@ -19,8 +20,13 @@ import {
   type TreeNodeData,
 } from "@mantine/core";
 import { ChevronDown, ChevronRight, Server } from "lucide-react";
-import { commands, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
+import {
+  commands,
+  type AmpModelCatalogEntry,
+  type Project,
+} from "../lib/bindings";
 import { getAmpSpecSheet } from "../lib/ampSpecSheets";
+import { firmwareOptionsFor } from "../lib/firmwareOptions";
 
 interface AmpCatalogueModalProps {
   opened: boolean;
@@ -36,10 +42,16 @@ function wattsOf(model: AmpModelCatalogEntry): number {
 
 /** Maps every node value to its sibling values (same parent), so expanding
  * one node in a layer can collapse the rest of that layer. */
-function buildSiblingMap(nodes: TreeNodeData[], map = new Map<string, string[]>()): Map<string, string[]> {
+function buildSiblingMap(
+  nodes: TreeNodeData[],
+  map = new Map<string, string[]>(),
+): Map<string, string[]> {
   const values = nodes.map((n) => n.value);
   for (const node of nodes) {
-    map.set(node.value, values.filter((v) => v !== node.value));
+    map.set(
+      node.value,
+      values.filter((v) => v !== node.value),
+    );
     if (node.children) buildSiblingMap(node.children, map);
   }
   return map;
@@ -55,21 +67,30 @@ export function AmpCatalogueModal({
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [specsExpanded, setSpecsExpanded] = useState(false);
   const [label, setLabel] = useState("");
+  const [firmwareVersion, setFirmwareVersion] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const active = useMemo(() => ampModels.filter((m) => !m.archived), [ampModels]);
+  const active = useMemo(
+    () => ampModels.filter((m) => !m.archived),
+    [ampModels],
+  );
   const modelById = useMemo(() => {
     const map = new Map<string, AmpModelCatalogEntry>();
     for (const m of active) map.set(m.id, m);
     return map;
   }, [active]);
 
-  function buildBrandNode(brand: string, models: AmpModelCatalogEntry[]): TreeNodeData {
+  function buildBrandNode(
+    brand: string,
+    models: AmpModelCatalogEntry[],
+  ): TreeNodeData {
     const regular = models.filter((m) => !m.isDante);
     const dante = models.filter((m) => m.isDante);
     const bucket = (list: AmpModelCatalogEntry[], channelCount: number) =>
-      list.filter((m) => m.channelCount === channelCount).sort((a, b) => wattsOf(b) - wattsOf(a));
+      list
+        .filter((m) => m.channelCount === channelCount)
+        .sort((a, b) => wattsOf(b) - wattsOf(a));
 
     return {
       label: brand,
@@ -82,12 +103,18 @@ export function AmpCatalogueModal({
             {
               label: "4-Channel",
               value: `${brand}-regular-4ch`,
-              children: bucket(regular, 4).map((m) => ({ label: m.model, value: m.id })),
+              children: bucket(regular, 4).map((m) => ({
+                label: m.model,
+                value: m.id,
+              })),
             },
             {
               label: "2-Channel",
               value: `${brand}-regular-2ch`,
-              children: bucket(regular, 2).map((m) => ({ label: m.model, value: m.id })),
+              children: bucket(regular, 2).map((m) => ({
+                label: m.model,
+                value: m.id,
+              })),
             },
           ],
         },
@@ -98,12 +125,18 @@ export function AmpCatalogueModal({
             {
               label: "4-Channel",
               value: `${brand}-dante-4ch`,
-              children: bucket(dante, 4).map((m) => ({ label: m.model, value: m.id })),
+              children: bucket(dante, 4).map((m) => ({
+                label: m.model,
+                value: m.id,
+              })),
             },
             {
               label: "2-Channel",
               value: `${brand}-dante-2ch`,
-              children: bucket(dante, 2).map((m) => ({ label: m.model, value: m.id })),
+              children: bucket(dante, 2).map((m) => ({
+                label: m.model,
+                value: m.id,
+              })),
             },
           ],
         },
@@ -118,20 +151,24 @@ export function AmpCatalogueModal({
       if (list) list.push(m);
       else byBrand.set(m.brand, [m]);
     }
-    return Array.from(byBrand.entries()).map(([brand, models]) => buildBrandNode(brand, models));
+    return Array.from(byBrand.entries()).map(([brand, models]) =>
+      buildBrandNode(brand, models),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
   const defaultExpandedPath = useMemo(() => {
     const firstBrand = treeData[0]?.value;
-    return firstBrand ? [firstBrand, `${firstBrand}-regular`, `${firstBrand}-regular-4ch`] : [];
+    return firstBrand
+      ? [firstBrand, `${firstBrand}-regular`, `${firstBrand}-regular-4ch`]
+      : [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [treeData]);
 
   const siblingMap = useMemo(() => buildSiblingMap(treeData), [treeData]);
 
-  const [expandedState, setExpandedState] = useState<Record<string, boolean>>(() =>
-    getTreeExpandedState(treeData, defaultExpandedPath),
+  const [expandedState, setExpandedState] = useState<Record<string, boolean>>(
+    () => getTreeExpandedState(treeData, defaultExpandedPath),
   );
 
   function handleExpandedStateChange(newState: Record<string, boolean>) {
@@ -156,20 +193,33 @@ export function AmpCatalogueModal({
       setSelectedModelId(null);
       setSpecsExpanded(false);
       setLabel("");
+      setFirmwareVersion(null);
       setSubmitError(null);
       setExpandedState(getTreeExpandedState(treeData, defaultExpandedPath));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
-  const selectedModel = selectedModelId ? modelById.get(selectedModelId) ?? null : null;
-  const selectedSpec = selectedModel ? getAmpSpecSheet(selectedModel) : undefined;
+  const selectedModel = selectedModelId
+    ? (modelById.get(selectedModelId) ?? null)
+    : null;
+  const selectedSpec = selectedModel
+    ? getAmpSpecSheet(selectedModel)
+    : undefined;
+  const firmwareOptions = selectedModel
+    ? firmwareOptionsFor(selectedModel.protocol)
+    : [];
 
   async function handleAddAssignment() {
     if (!selectedModelId) return;
     setSubmitError(null);
     setSubmitting(true);
-    const result = await commands.projectsAddAmpAssignment(projectId, label.trim() || null, selectedModelId);
+    const result = await commands.projectsAddAmpAssignment(
+      projectId,
+      label.trim() || null,
+      selectedModelId,
+      firmwareVersion,
+    );
     setSubmitting(false);
     if (result.status === "ok") {
       onProjectUpdate(result.data);
@@ -179,7 +229,12 @@ export function AmpCatalogueModal({
     }
   }
 
-  function renderNode({ node, hasChildren, expanded, elementProps }: RenderTreeNodePayload) {
+  function renderNode({
+    node,
+    hasChildren,
+    expanded,
+    elementProps,
+  }: RenderTreeNodePayload) {
     if (!hasChildren) {
       const m = modelById.get(node.value);
       if (!m) return null;
@@ -193,35 +248,52 @@ export function AmpCatalogueModal({
             setSelectedModelId(m.id);
             setSpecsExpanded(false);
             setSubmitError(null);
+            setFirmwareVersion(firmwareOptionsFor(m.protocol)[0] ?? null);
           }}
-          style={{
-            ...elementProps.style,
-            cursor: "pointer",
-            borderRadius: "var(--mantine-radius-xs)",
-            padding: "4px var(--mantine-spacing-xs)",
-            backgroundColor: isSelected ? "var(--mantine-color-amber-light)" : undefined,
-          }}
+          style={elementProps.style}
+          className={`${elementProps.className} cursor-pointer rounded-[var(--mantine-radius-xs)] px-[var(--mantine-spacing-xs)] py-1 ${
+            isSelected ? "bg-[var(--mantine-color-amber-light)] opacity-100" : "opacity-50"
+          }`}
         >
-          <Group gap="xs" wrap="nowrap">
-            <ThemeIcon variant="light" color="gray" size="lg">
-              <Server size={18} />
-            </ThemeIcon>
-            <div>
-              <Text size="sm">{m.model}</Text>
-              <Text size="xs" c="dimmed">
-                {spec ? `${spec.watts8ohm}W @ 8Ω` : null}
-              </Text>
-            </div>
+          <Group gap="xs" wrap="nowrap" justify="space-between">
+            <Group gap="xs" wrap="nowrap">
+              {m.brand === "CVR" ? (
+                <img src="/cvr_dsp_amp.png" alt="CVR amp" className="h-8 w-8 object-contain" />
+              ) : (
+                <ThemeIcon variant="light" color="gray" size="lg">
+                  <Server size={18} />
+                </ThemeIcon>
+              )}
+              <div>
+                <Text size="sm">{m.model}</Text>
+                <Text size="xs" c="dimmed">
+                  {spec ? `${spec.watts8ohm}W @ 8Ω` : null}
+                </Text>
+              </div>
+            </Group>
+            {m.isDante && (
+              <img
+                src="/dante_logo.png"
+                alt="Dante"
+                className="h-7 object-contain dark:brightness-0 dark:invert"
+              />
+            )}
           </Group>
         </div>
       );
     }
 
     return (
-      <Group {...elementProps} gap={4} wrap="nowrap" style={{ ...elementProps.style, cursor: "pointer", padding: "4px 0" }}>
+      <Group
+        {...elementProps}
+        gap={4}
+        wrap="nowrap"
+        style={elementProps.style}
+        className={`${elementProps.className} cursor-pointer py-1`}
+      >
         <ChevronRight
           size={14}
-          style={{ transform: expanded ? "rotate(90deg)" : undefined, transition: "transform 100ms" }}
+          className={`transition-transform duration-100 ${expanded ? "rotate-90" : ""}`}
         />
         <Text size="sm" fw={600}>
           {node.label}
@@ -232,26 +304,45 @@ export function AmpCatalogueModal({
 
   return (
     <Modal opened={opened} onClose={onClose} title="Add Amp" size="xl" centered>
-      <Group align="stretch" wrap="nowrap" gap="md" style={{ minHeight: 420 }}>
+      <Group align="stretch" wrap="nowrap" gap="md" className="min-h-[420px]">
         <Box w={260}>
-          <Tree data={treeData} tree={tree} renderNode={renderNode} levelOffset="md" />
+          <Tree
+            data={treeData}
+            tree={tree}
+            renderNode={renderNode}
+            levelOffset="md"
+          />
         </Box>
 
-        <Box style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <Box className="flex flex-1 flex-col">
           {selectedModel ? (
-            <Stack style={{ flex: 1 }}>
-              <Group gap="xs">
-                <ThemeIcon variant="light" color="gray" size="xl">
-                  <Server size={28} />
-                </ThemeIcon>
-                <div>
-                  <Text fw={600}>
-                    {selectedModel.brand} {selectedModel.model}
-                  </Text>
-                  <Text size="xs" c="dimmed">
-                    {selectedModel.channelCount}-Channel
-                  </Text>
-                </div>
+            <Stack className="flex-1">
+              {selectedModel.brand === "CVR" && (
+                <img src="/cvr_dsp_amp.png" alt="CVR amp" className="h-20 w-full object-contain" />
+              )}
+              <Group gap="xs" justify="space-between">
+                <Group gap="xs">
+                  {selectedModel.brand !== "CVR" && (
+                    <ThemeIcon variant="light" color="gray" size="xl">
+                      <Server size={28} />
+                    </ThemeIcon>
+                  )}
+                  <div>
+                    <Text fw={600}>
+                      {selectedModel.brand} {selectedModel.model}
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      {selectedModel.channelCount}-Channel
+                    </Text>
+                  </div>
+                </Group>
+                {selectedModel.isDante && (
+                  <img
+                    src="/dante_logo.png"
+                    alt="Dante"
+                    className="h-7 object-contain dark:brightness-0 dark:invert"
+                  />
+                )}
               </Group>
 
               {selectedSpec ? (
@@ -265,17 +356,14 @@ export function AmpCatalogueModal({
 
                   <UnstyledButton
                     onClick={() => setSpecsExpanded((v) => !v)}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 4, width: "fit-content" }}
+                    className="inline-flex w-fit items-center gap-1"
                   >
                     <Text size="xs" c="dimmed">
                       {specsExpanded ? "Hide more specs" : "Show more specs"}
                     </Text>
                     <ChevronDown
                       size={12}
-                      style={{
-                        transform: specsExpanded ? "rotate(180deg)" : undefined,
-                        transition: "transform 100ms",
-                      }}
+                      className={`transition-transform duration-100 ${specsExpanded ? "rotate-180" : ""}`}
                     />
                   </UnstyledButton>
 
@@ -301,7 +389,8 @@ export function AmpCatalogueModal({
                         <Table.Tr>
                           <Table.Td>Gain Range</Table.Td>
                           <Table.Td>
-                            {selectedSpec.gainRangeDb[0]}–{selectedSpec.gainRangeDb[1]}dB
+                            {selectedSpec.gainRangeDb[0]}–
+                            {selectedSpec.gainRangeDb[1]}dB
                           </Table.Td>
                         </Table.Tr>
                         <Table.Tr>
@@ -329,9 +418,19 @@ export function AmpCatalogueModal({
                   value={label}
                   onChange={(e) => setLabel(e.currentTarget.value)}
                 />
+                {firmwareOptions.length > 0 && (
+                  <Select
+                    label="Firmware Version"
+                    description="Which parameter ranges/units to plan around — not detected, since there's no live device yet."
+                    data={firmwareOptions}
+                    value={firmwareVersion}
+                    onChange={setFirmwareVersion}
+                    allowDeselect={false}
+                  />
+                )}
                 <Text size="xs" c="dimmed">
-                  This slot isn't linked to a physical unit yet — that happens later via network
-                  discovery, not manual entry.
+                  This slot isn't linked to a physical unit yet — that happens
+                  later via network discovery, not manual entry.
                 </Text>
                 {submitError && (
                   <Text c="red" size="sm">
@@ -346,7 +445,7 @@ export function AmpCatalogueModal({
               </Stack>
             </Stack>
           ) : (
-            <Center style={{ flex: 1 }}>
+            <Center className="flex-1">
               <Text c="dimmed">Select an amp model from the list</Text>
             </Center>
           )}

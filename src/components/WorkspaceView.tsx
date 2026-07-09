@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   ActionIcon,
+  Badge,
   Box,
   Button,
   Center,
@@ -8,6 +9,7 @@ import {
   Group,
   Loader,
   Modal,
+  Select,
   SimpleGrid,
   Stack,
   Text,
@@ -17,6 +19,7 @@ import {
 import { Pencil, Server, X } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
+import { firmwareOptionsFor } from "../lib/firmwareOptions";
 
 interface WorkspaceViewProps {
   project: Project;
@@ -32,6 +35,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   const [deleting, setDeleting] = useState(false);
   const [editTarget, setEditTarget] = useState<AmpAssignment | null>(null);
   const [editLabel, setEditLabel] = useState("");
+  const [editFirmwareVersion, setEditFirmwareVersion] = useState<string | null>(null);
   const [savingLabel, setSavingLabel] = useState(false);
   const [labelError, setLabelError] = useState<string | null>(null);
 
@@ -82,7 +86,9 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
     const result = await commands.projectsUpdate({
       ...project,
       ampAssignments: project.ampAssignments.map((a) =>
-        a.id === editTarget.id ? { ...a, label: editLabel.trim() || null } : a,
+        a.id === editTarget.id
+          ? { ...a, label: editLabel.trim() || null, firmwareVersion: editFirmwareVersion }
+          : a,
       ),
     });
     setSavingLabel(false);
@@ -94,10 +100,13 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
     }
   }
 
+  const editModel = editTarget?.ampModelId ? modelsById.get(editTarget.ampModelId) : undefined;
+  const editFirmwareOptions = firmwareOptionsFor(editModel?.protocol);
+
   return (
     <Group h="100%" gap={0} align="stretch" wrap="nowrap">
       {/* Amplifiers pane */}
-      <Stack w={340} h="100%" p="md" gap="md" style={{ flexShrink: 0 }}>
+      <Stack w={340} h="100%" p="md" gap="md" className="shrink-0">
         <Group justify="space-between">
           <Text fw={500} size="sm" c="dimmed">
             Amplifiers
@@ -118,67 +127,79 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
         </Group>
 
         {assignments.length === 0 ? (
-          <Center style={{ flex: 1 }}>
+          <Center className="flex-1">
             <Text c="dimmed" size="sm" ta="center">
               No amps assigned yet — add one to get started.
             </Text>
           </Center>
         ) : (
-          <SimpleGrid cols={3} spacing="md" style={{ flex: 1, alignContent: "start" }}>
+          <SimpleGrid cols={3} spacing="md" className="flex-1 content-start">
             {assignments.map((assignment) => {
               const displayName = nameFor(assignment);
               const modelName = assignment.label ? modelNameFor(assignment) : null;
               const isSelected = assignment.id === selectedId;
+              const model = assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined;
+              const isCvr = model?.brand === "CVR";
 
               return (
-                <div
-                  key={assignment.id}
-                  className="group"
-                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}
-                >
-                  <Box style={{ position: "relative" }}>
+                <div key={assignment.id} className="group flex flex-col items-center gap-1.5">
+                  <Box className="relative">
                     <Box
                       w={90}
                       h={90}
                       onClick={() => setSelectedId(assignment.id)}
-                      className="flex items-center justify-center rounded-[var(--mantine-radius-sm)] border transition-colors duration-150 group-hover:border-[var(--mantine-color-amber-filled)] group-hover:bg-[var(--mantine-color-amber-light)]"
-                      style={{
-                        cursor: "pointer",
-                        borderColor: isSelected
-                          ? "var(--mantine-color-amber-filled)"
-                          : "var(--mantine-color-default-border)",
-                        borderWidth: isSelected ? 2 : 1,
-                        borderStyle: "solid",
-                      }}
+                      className={`flex cursor-pointer items-center justify-center rounded-[var(--mantine-radius-sm)] border-solid transition-colors duration-150 group-hover:border-[var(--mantine-color-amber-filled)] group-hover:bg-[var(--mantine-color-amber-light)] ${
+                        isSelected
+                          ? "border-2 border-[var(--mantine-color-amber-filled)]"
+                          : "border border-[var(--mantine-color-default-border)]"
+                      }`}
                     >
-                      <ThemeIcon variant="light" color="gray" size={48}>
-                        <Server size={28} />
-                      </ThemeIcon>
+                      {isCvr ? (
+                        <img
+                          src="/cvr_dsp_amp.png"
+                          alt="CVR amp"
+                          className="max-h-full max-w-full object-contain"
+                        />
+                      ) : (
+                        <ThemeIcon variant="light" color="gray" size={48}>
+                          <Server size={28} />
+                        </ThemeIcon>
+                      )}
                     </Box>
+                    {assignment.firmwareVersion && (
+                      <Badge
+                        size="xs"
+                        radius="sm"
+                        variant="filled"
+                        color="dark"
+                        className="absolute bottom-1 left-1/2 -translate-x-1/2"
+                      >
+                        v{assignment.firmwareVersion}
+                      </Badge>
+                    )}
                     <ActionIcon
-                      className="opacity-0 group-hover:opacity-100 transition-opacity"
+                      className="absolute -top-1.5 -left-1.5 opacity-0 transition-opacity group-hover:opacity-100"
                       size="sm"
                       radius="sm"
                       color="gray"
                       variant="filled"
-                      style={{ position: "absolute", top: -6, left: -6 }}
                       onClick={(e) => {
                         e.stopPropagation();
                         setLabelError(null);
                         setEditLabel(assignment.label ?? "");
+                        setEditFirmwareVersion(assignment.firmwareVersion ?? null);
                         setEditTarget(assignment);
                       }}
-                      aria-label="Rename amp"
+                      aria-label="Edit amp"
                     >
                       <Pencil size={12} />
                     </ActionIcon>
                     <ActionIcon
-                      className="opacity-0 group-hover:opacity-100 transition-opacity"
+                      className="absolute -top-1.5 -right-1.5 opacity-0 transition-opacity group-hover:opacity-100"
                       size="sm"
                       radius="sm"
                       color="red"
                       variant="filled"
-                      style={{ position: "absolute", top: -6, right: -6 }}
                       onClick={(e) => {
                         e.stopPropagation();
                         setDeleteTarget(assignment);
@@ -188,12 +209,12 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       <X size={12} />
                     </ActionIcon>
                   </Box>
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
-                    <Text size="xs" ta="center" lineClamp={2} style={{ maxWidth: 90 }}>
+                  <div className="flex flex-col items-center gap-px">
+                    <Text size="xs" ta="center" lineClamp={2} className="max-w-[90px]">
                       {displayName}
                     </Text>
                     {modelName && (
-                      <Text size="xs" c="dimmed" ta="center" lineClamp={1} fz={10} style={{ maxWidth: 90 }}>
+                      <Text size="xs" c="dimmed" ta="center" lineClamp={1} fz={10} className="max-w-[90px]">
                         {modelName}
                       </Text>
                     )}
@@ -208,11 +229,11 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
       <Divider orientation="vertical" />
 
       {/* Speakers pane — mock only, no real data/functionality yet */}
-      <Stack style={{ flex: 1 }} h="100%" p="md" gap="md">
+      <Stack className="flex-1" h="100%" p="md" gap="md">
         <Text fw={500} size="sm" c="dimmed">
           Speakers
         </Text>
-        <Center style={{ flex: 1 }}>
+        <Center className="flex-1">
           <Text c="dimmed">Speaker assignment — coming soon</Text>
         </Center>
       </Stack>
@@ -225,7 +246,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
         onProjectUpdate={onProjectUpdate}
       />
 
-      <Modal opened={editTarget !== null} onClose={() => setEditTarget(null)} title="Rename Amp" centered size="sm">
+      <Modal opened={editTarget !== null} onClose={() => setEditTarget(null)} title="Edit Amp" centered size="sm">
         <Stack gap="md">
           <TextInput
             label="Label"
@@ -234,6 +255,16 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
             onChange={(e) => setEditLabel(e.currentTarget.value)}
             data-autofocus
           />
+          {editFirmwareOptions.length > 0 && (
+            <Select
+              label="Firmware Version"
+              description="Which parameter ranges/units to plan around — not detected, since there's no live device yet."
+              data={editFirmwareOptions}
+              value={editFirmwareVersion}
+              onChange={setEditFirmwareVersion}
+              allowDeselect={false}
+            />
+          )}
           {labelError && (
             <Text c="red" size="sm">
               {labelError}

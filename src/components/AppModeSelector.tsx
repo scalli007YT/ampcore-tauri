@@ -18,7 +18,7 @@ function ModeCard({
   onClick: () => void;
 }) {
   return (
-    <Card withBorder padding="lg" onClick={onClick} style={{ cursor: "pointer", flex: 1 }}>
+    <Card withBorder padding="lg" onClick={onClick} className="flex-1 cursor-pointer">
       <Stack align="center" gap="xs" ta="center">
         <ThemeIcon variant="light" color="gray" size={48} radius="xl">
           {icon}
@@ -34,7 +34,7 @@ function ModeCard({
 
 export function AppModeSelector({ onSelectLiveControl, onSelectProjectDesign }: AppModeSelectorProps) {
   return (
-    <Center style={{ height: "100%" }}>
+    <Center className="h-full">
       <Stack w={520} gap="xl">
         <Stack gap={4}>
           <Title order={2} ta="center">

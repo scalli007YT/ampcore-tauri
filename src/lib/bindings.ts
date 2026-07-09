@@ -28,7 +28,7 @@ export const commands = {
 	 *  in manually. If `amp_model_id` references a catalog entry, its channel
 	 *  count pre-populates the assignment's channels.
 	 */
-	projectsAddAmpAssignment: (projectId: string, label: string | null, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, label, ampModelId })),
+	projectsAddAmpAssignment: (projectId: string, label: string | null, ampModelId: string | null, firmwareVersion: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_add_amp_assignment", { projectId, label, ampModelId, firmwareVersion })),
 	projectsRemoveAmpAssignment: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_remove_amp_assignment", { projectId, assignmentId })),
 	/**
 	 *  Changes (or clears) an assignment's amp model, reconciling its channel
@@ -76,6 +76,14 @@ export type AmpAssignment = {
 	mac: string | null,
 	label: string | null,
 	ampModelId: string | null,
+	/**
+	 *  Firmware version this slot is being planned for (e.g. "1.1.8",
+	 *  "1.1.9") — declared by the user at planning time, not detected, since
+	 *  offline planning has no live device to sniff it from. Free text
+	 *  (mirrors `DiscoveredDevice.firmware_family`) rather than a closed
+	 *  enum, since it's protocol-specific and protocols are pluggable.
+	 */
+	firmwareVersion?: string | null,
 	channels: AmpChannel[],
 };
 

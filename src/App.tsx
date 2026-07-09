@@ -72,7 +72,7 @@ function App() {
   }, [windowTitle]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+    <div className="flex h-screen flex-col">
       <TitleBar
         title={windowTitle}
         projectName={selectedProject?.name}
@@ -80,7 +80,7 @@ function App() {
         onBackToStart={!selectedProject && mode !== "modeSelect" ? handleBackToStart : undefined}
         onOpenSettings={() => setSettingsOpen(true)}
       />
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div className="min-h-0 flex-1">
         {mode === "modeSelect" && (
           <AppModeSelector
             onSelectLiveControl={() => setMode("liveControl")}
