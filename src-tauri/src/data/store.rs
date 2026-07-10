@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
+use super::capability::cvr::builtin_topology;
 use super::common::EntryOrigin;
 use super::project::Project;
 use super::speaker_library::SpeakerLibraryEntry;
@@ -55,28 +56,45 @@ fn seed_builtin_amp_models(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
     for (model, channel_count) in BUILTIN_AMP_MODELS {
         let id = format!("builtin-{}", model.to_lowercase());
         if !amp_models.iter().any(|m| m.id == id) {
-            amp_models.push(AmpModelCatalogEntry::new_builtin(
-                &id,
-                "CVR",
-                model,
-                *channel_count,
-                false,
-                AmpProtocol::CvrUdp,
-            ));
+            let mut entry =
+                AmpModelCatalogEntry::new_builtin(&id, "CVR", model, *channel_count, false, AmpProtocol::CvrUdp);
+            entry.topology = builtin_topology(model, *channel_count, false);
+            amp_models.push(entry);
             changed = true;
         }
     }
     for (model, channel_count) in dante_builtin_amp_models() {
         let id = format!("builtin-{}", model.to_lowercase());
         if !amp_models.iter().any(|m| m.id == id) {
-            amp_models.push(AmpModelCatalogEntry::new_builtin(
-                &id,
-                "CVR",
-                &model,
-                channel_count,
-                true,
-                AmpProtocol::CvrUdp,
-            ));
+            let mut entry =
+                AmpModelCatalogEntry::new_builtin(&id, "CVR", &model, channel_count, true, AmpProtocol::CvrUdp);
+            entry.topology = builtin_topology(&model, channel_count, true);
+            amp_models.push(entry);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Backfill for installs whose `amp_models.json` predates real topology data
+/// (when `AmpDspTopology` was an always-empty placeholder). Scoped to
+/// `BuiltIn` origin only, same rationale as `migrate_dante_flag` — a
+/// user-defined model's hand-authored topology must never be overwritten.
+/// Recomputed from `builtin_topology` every load (deterministic from
+/// model/channel_count/is_dante), so this is idempotent rather than a
+/// one-time migration.
+fn migrate_builtin_topology(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
+    let mut changed = false;
+    for m in amp_models.iter_mut() {
+        if m.origin != EntryOrigin::BuiltIn {
+            continue;
+        }
+        let expected = builtin_topology(&m.model, m.channel_count, m.is_dante);
+        if m.topology.matrix_input_count != expected.matrix_input_count
+            || m.topology.matrix_output_count != expected.matrix_output_count
+            || m.topology.eq_bands_per_channel != expected.eq_bands_per_channel
+        {
+            m.topology = expected;
             changed = true;
         }
     }
@@ -106,13 +124,20 @@ impl ProjectDataState {
             .join("project-data");
         fs::create_dir_all(data_dir.join("projects")).map_err(|e| e.to_string())?;
 
-        let projects = load_projects(&data_dir)?;
         let speaker_library = load_json_or_default(&data_dir.join("speaker_library.json"))?;
         let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
         let migrated = migrate_dante_flag(&mut amp_models);
         let seeded = seed_builtin_amp_models(&mut amp_models);
-        if migrated || seeded {
+        let topology_migrated = migrate_builtin_topology(&mut amp_models);
+        if migrated || seeded || topology_migrated {
             save_amp_models(&data_dir, &amp_models)?;
+        }
+
+        let mut projects = load_projects(&data_dir)?;
+        for project in projects.iter_mut() {
+            if reconcile_project_matrix_sizes(project, &amp_models) {
+                save_project_file(&data_dir, project)?;
+            }
         }
 
         Ok(Self(Mutex::new(ProjectDataInner {
@@ -122,6 +147,34 @@ impl ProjectDataState {
             amp_models,
         })))
     }
+}
+
+/// Backfill for assignments whose stored `matrix_crosspoints` length no
+/// longer matches their assigned model's current `matrix_input_count` — e.g.
+/// projects saved before a topology formula change (like the Dante
+/// input-doubling fix) or before this field existed at all. Explicit
+/// mutation commands (`projects_set_amp_model` etc.) already reconcile this
+/// going forward; this backfill catches project files that predate that.
+fn reconcile_project_matrix_sizes(project: &mut Project, amp_models: &[AmpModelCatalogEntry]) -> bool {
+    let mut changed = false;
+    for assignment in project.amp_assignments.iter_mut() {
+        let Some(model_id) = &assignment.amp_model_id else {
+            continue;
+        };
+        let Some(model) = amp_models.iter().find(|m| &m.id == model_id) else {
+            continue;
+        };
+        let expected = model.topology.matrix_input_count;
+        let needs_fix = assignment
+            .channels
+            .iter()
+            .any(|c| c.matrix_crosspoints.len() as u32 != expected);
+        if needs_fix {
+            assignment.reconcile_matrix_size(expected);
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {

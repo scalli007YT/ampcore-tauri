@@ -7,11 +7,12 @@ use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
+use commands::capability::amp_capability_resolve;
 use commands::live_control::{live_control_list_devices, live_control_start, live_control_stop};
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
     projects_remove_amp_assignment, projects_set_amp_model, projects_set_channel_ohms,
-    projects_set_channel_speaker, projects_update,
+    projects_set_channel_source, projects_set_channel_speaker, projects_set_matrix_crosspoint, projects_update,
 };
 use commands::speaker_library::{
     speaker_library_archive, speaker_library_create, speaker_library_list, speaker_library_update,
@@ -41,6 +42,9 @@ pub fn run() {
             projects_set_amp_model,
             projects_set_channel_speaker,
             projects_set_channel_ohms,
+            projects_set_channel_source,
+            projects_set_matrix_crosspoint,
+            amp_capability_resolve,
             speaker_library_list,
             speaker_library_create,
             speaker_library_update,

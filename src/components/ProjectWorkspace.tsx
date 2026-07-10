@@ -124,6 +124,8 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
                   ? ampModels?.find((m) => m.id === activeDevice.ampModelId)
                   : undefined
               }
+              project={project}
+              onProjectUpdate={onProjectUpdate}
             />
           )}
         </div>

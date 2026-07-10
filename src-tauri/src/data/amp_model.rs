@@ -1,22 +1,49 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
 
+use super::capability::{PowerMode, SourceKind};
 use super::common::{new_id, now_millis, EntryOrigin};
 
-/// Placeholder DSP-capability schema — all fields intentionally `None` until
-/// real per-model datasheet data is sourced. Exists so the Configure tabs
-/// (Matrix, Input, Output, etc.) have a real place to eventually read
-/// per-model capability from, for any brand, not just channel_count.
+/// Tolerates both a missing field (old schema didn't have it) and an explicit
+/// JSON `null` (old schema's placeholder `Option<u32>` fields, always `None`)
+/// for a field that is no longer optional — installs with pre-existing
+/// `amp_models.json` files predate this real topology data and would
+/// otherwise fail to deserialize entirely. `migrate_builtin_topology` in
+/// `store.rs` then backfills real values for builtin entries on next save.
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Per-model DSP-capability schema — channel/IO topology, EQ structure, and
+/// electrical rating for a catalog entry. Populated at seed time for builtin
+/// CVR models (see `capability::cvr::builtin_topology`); defaults to zeroed/
+/// empty for user-defined models until the user (or a future datasheet
+/// import) fills it in. Combined with a firmware-derived capability delta by
+/// `capability::resolve()` to answer "what can be configured" for a given
+/// (model, firmware) pair — see `AmpCapability`.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AmpDspTopology {
-    pub matrix_input_count: Option<u32>,
-    pub matrix_output_count: Option<u32>,
-    pub eq_band_count: Option<u32>,
-    /// Free-text for now (e.g. "Butterworth", "Linkwitz-Riley") — not an enum
-    /// yet since no real per-model data exists to validate against.
-    pub crossover_types: Option<Vec<String>>,
-    pub limiter_count: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    #[specta(type = u32)]
+    pub matrix_input_count: u32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    #[specta(type = u32)]
+    pub matrix_output_count: u32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    #[specta(type = u32)]
+    pub eq_bands_per_channel: u32,
+    #[serde(default)]
+    pub available_sources: Vec<SourceKind>,
+    #[serde(default)]
+    pub power_modes: Vec<PowerMode>,
+    /// `None` for models with no known electrical datasheet (e.g. user-defined).
+    #[serde(default)]
+    pub rated_rms_voltage: Option<f64>,
 }
 
 /// Identifies which `AmpDriver` controls a catalog model — a brand-protocol-

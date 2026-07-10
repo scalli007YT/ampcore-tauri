@@ -1,6 +1,7 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::data::amp_model::AmpModelCatalogEntry;
+use crate::data::capability::SourceKind;
 use crate::data::project::{AmpAssignment, Project};
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
 use crate::error::AppError;
@@ -87,11 +88,13 @@ pub fn projects_add_amp_assignment(
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
 
-    let channel_count = match &amp_model_id {
-        Some(id) => find_amp_model(&inner.amp_models, id)
-            .map(|m| m.channel_count)
-            .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?,
-        None => 0,
+    let (channel_count, matrix_input_count) = match &amp_model_id {
+        Some(id) => {
+            let model = find_amp_model(&inner.amp_models, id)
+                .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?;
+            (model.channel_count, model.topology.matrix_input_count)
+        }
+        None => (0, 0),
     };
 
     let project = inner
@@ -100,9 +103,9 @@ pub fn projects_add_amp_assignment(
         .find(|p| p.id == project_id)
         .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
 
-    project
-        .amp_assignments
-        .push(AmpAssignment::new(None, label, channel_count, amp_model_id, firmware_version));
+    let mut assignment = AmpAssignment::new(None, label, channel_count, amp_model_id, firmware_version);
+    assignment.reconcile_matrix_size(matrix_input_count);
+    project.amp_assignments.push(assignment);
     project.touch();
 
     let project = project.clone();
@@ -149,11 +152,13 @@ pub fn projects_set_amp_model(
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
 
-    let channel_count = match &amp_model_id {
-        Some(id) => find_amp_model(&inner.amp_models, id)
-            .map(|m| m.channel_count)
-            .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?,
-        None => 0,
+    let (channel_count, matrix_input_count) = match &amp_model_id {
+        Some(id) => {
+            let model = find_amp_model(&inner.amp_models, id)
+                .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?;
+            (model.channel_count, model.topology.matrix_input_count)
+        }
+        None => (0, 0),
     };
 
     let project = inner
@@ -172,6 +177,7 @@ pub fn projects_set_amp_model(
     if channel_count > 0 {
         assignment.reconcile_channel_count(channel_count);
     }
+    assignment.reconcile_matrix_size(matrix_input_count);
     project.touch();
 
     let project = project.clone();
@@ -250,6 +256,103 @@ pub fn projects_set_channel_ohms(
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
 
     channel.ohms = ohms;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Sets (or clears) which physical source feeds a channel's input —
+/// Source Selection tab.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_source(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    source: Option<SourceKind>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.source = source;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of one Matrix-tab crosspoint — only touches the fields the
+/// caller passes (`Some`), matching `projects_set_channel_speaker`'s
+/// per-field-optional convention. Fails if the crosspoint doesn't exist yet
+/// (it should always exist by the time the UI can edit it, since
+/// `reconcile_matrix_size` pre-populates every crosspoint for the model's
+/// `matrix_input_count`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_matrix_crosspoint(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    source_index: u32,
+    gain_db: Option<f64>,
+    active: Option<bool>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    let crosspoint = channel
+        .matrix_crosspoints
+        .iter_mut()
+        .find(|c| c.source_index == source_index)
+        .ok_or_else(|| AppError::from(format!("matrix source {} not found", source_index)))?;
+
+    if let Some(gain_db) = gain_db {
+        crosspoint.gain_db = gain_db;
+    }
+    if let Some(active) = active {
+        crosspoint.active = active;
+    }
     project.touch();
 
     let project = project.clone();

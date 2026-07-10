@@ -38,6 +38,27 @@ export const commands = {
 	projectsSetAmpModel: (projectId: string, assignmentId: string, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_model", { projectId, assignmentId, ampModelId })),
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, speakerLibraryId: string | null, wayIndex: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, speakerLibraryId, wayIndex })),
 	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
+	/**
+	 *  Sets (or clears) which physical source feeds a channel's input —
+	 *  Source Selection tab.
+	 */
+	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, source: "analog" | "dante" | "aes3" | "backup" | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, source })),
+	/**
+	 *  Partial update of one Matrix-tab crosspoint — only touches the fields the
+	 *  caller passes (`Some`), matching `projects_set_channel_speaker`'s
+	 *  per-field-optional convention. Fails if the crosspoint doesn't exist yet
+	 *  (it should always exist by the time the UI can edit it, since
+	 *  `reconcile_matrix_size` pre-populates every crosspoint for the model's
+	 *  `matrix_input_count`).
+	 */
+	projectsSetMatrixCrosspoint: (projectId: string, assignmentId: string, channelIndex: number, sourceIndex: number, gainDb: number | null, active: boolean | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_matrix_crosspoint", { projectId, assignmentId, channelIndex, sourceIndex, gainDb, active })),
+	/**
+	 *  Resolves what can be configured, and within what ranges, for a given amp
+	 *  model + firmware version — purely offline, no live device involved.
+	 *  Nothing here is persisted independently: it's always recomputed from the
+	 *  catalog entry's topology and the (free-text) firmware version string.
+	 */
+	ampCapabilityResolve: (ampModelId: string, firmwareVersion: string | null) => typedError<AmpCapability_Serialize, AppError>(__TAURI_INVOKE("amp_capability_resolve", { ampModelId, firmwareVersion })),
 	speakerLibraryList: () => typedError<SpeakerLibraryEntry_Serialize[], AppError>(__TAURI_INVOKE("speaker_library_list")),
 	speakerLibraryCreate: (brand: string, model: string, family: string | null, application: string | null, ways: SpeakerWay[]) => typedError<SpeakerLibraryEntry_Serialize, AppError>(__TAURI_INVOKE("speaker_library_create", { brand, model, family, application, ways })),
 	/**  Full-entry replace, mirroring `projects_update`'s pattern. */
@@ -47,15 +68,15 @@ export const commands = {
 	 *  references but are hidden from pickers for new assignments.
 	 */
 	speakerLibraryArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_archive", { id })),
-	ampModelsList: () => typedError<AmpModelCatalogEntry[], AppError>(__TAURI_INVOKE("amp_models_list")),
-	ampModelsCreate: (brand: string, model: string, channelCount: number, isDante: boolean, protocol: AmpProtocol) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount, isDante, protocol })),
+	ampModelsList: () => typedError<AmpModelCatalogEntry_Serialize[], AppError>(__TAURI_INVOKE("amp_models_list")),
+	ampModelsCreate: (brand: string, model: string, channelCount: number, isDante: boolean, protocol: AmpProtocol) => typedError<AmpModelCatalogEntry_Serialize, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount, isDante, protocol })),
 	/**
 	 *  Full-entry replace, mirroring `projects_update`'s pattern. Changing
 	 *  `channel_count` here does NOT retroactively touch any Project's
 	 *  assignments — reconciliation only happens explicitly via
 	 *  `projects_set_amp_model`.
 	 */
-	ampModelsUpdate: (entry: AmpModelCatalogEntry) => typedError<AmpModelCatalogEntry, AppError>(__TAURI_INVOKE("amp_models_update", { entry })),
+	ampModelsUpdate: (entry: AmpModelCatalogEntry_Deserialize) => typedError<AmpModelCatalogEntry_Serialize, AppError>(__TAURI_INVOKE("amp_models_update", { entry })),
 	/**  Soft-delete — see SpeakerLibraryEntry.archived for rationale. */
 	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
 	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
@@ -88,6 +109,38 @@ export type AmpAssignment = {
 };
 
 /**
+ *  Combined, resolved answer to "what can be configured, and within what
+ *  ranges" for one (amp model, firmware version) pair. Never persisted
+ *  independently — always recomputed by `resolve()` from an
+ *  `AmpModelCatalogEntry` and an `AmpAssignment.firmware_version`.
+ */
+export type AmpCapability = AmpCapability_Serialize | AmpCapability_Deserialize;
+
+/**
+ *  Combined, resolved answer to "what can be configured, and within what
+ *  ranges" for one (amp model, firmware version) pair. Never persisted
+ *  independently — always recomputed by `resolve()` from an
+ *  `AmpModelCatalogEntry` and an `AmpAssignment.firmware_version`.
+ */
+export type AmpCapability_Deserialize = {
+	topology: AmpDspTopology_Deserialize,
+	firmware: CvrFirmwareCapability,
+	paramRanges: AmpParamRanges,
+};
+
+/**
+ *  Combined, resolved answer to "what can be configured, and within what
+ *  ranges" for one (amp model, firmware version) pair. Never persisted
+ *  independently — always recomputed by `resolve()` from an
+ *  `AmpModelCatalogEntry` and an `AmpAssignment.firmware_version`.
+ */
+export type AmpCapability_Serialize = {
+	topology: AmpDspTopology_Serialize,
+	firmware: CvrFirmwareCapability,
+	paramRanges: AmpParamRanges,
+};
+
+/**
  *  Per-channel config on an amp assignment. `ohms` is independently authored
  *  (never derived from the assigned speaker's nominal spec — real wiring can
  *  legitimately diverge) and `speaker_library_id` is a reference, never an
@@ -103,24 +156,66 @@ export type AmpChannel = {
 	 *  `speaker_library_id` is set; `None`/`0` for a single-way speaker.
 	 */
 	wayIndex: number | null,
+	/**
+	 *  Which physical source feeds this channel's input — Source Selection
+	 *  tab. `None` until the user picks one.
+	 */
+	source?: SourceKind | null,
+	/**
+	 *  One crosspoint per possible matrix source (0..matrix_input_count) —
+	 *  Matrix tab. Grown/shrunk alongside `channels` whenever the assigned
+	 *  model (hence its topology) changes; see `reconcile_matrix_size`.
+	 */
+	matrixCrosspoints?: MatrixCrosspoint[],
 };
 
 /**
- *  Placeholder DSP-capability schema — all fields intentionally `None` until
- *  real per-model datasheet data is sourced. Exists so the Configure tabs
- *  (Matrix, Input, Output, etc.) have a real place to eventually read
- *  per-model capability from, for any brand, not just channel_count.
+ *  Per-model DSP-capability schema — channel/IO topology, EQ structure, and
+ *  electrical rating for a catalog entry. Populated at seed time for builtin
+ *  CVR models (see `capability::cvr::builtin_topology`); defaults to zeroed/
+ *  empty for user-defined models until the user (or a future datasheet
+ *  import) fills it in. Combined with a firmware-derived capability delta by
+ *  `capability::resolve()` to answer "what can be configured" for a given
+ *  (model, firmware) pair — see `AmpCapability`.
  */
-export type AmpDspTopology = {
-	matrixInputCount: number | null,
-	matrixOutputCount: number | null,
-	eqBandCount: number | null,
-	/**
-	 *  Free-text for now (e.g. "Butterworth", "Linkwitz-Riley") — not an enum
-	 *  yet since no real per-model data exists to validate against.
-	 */
-	crossoverTypes: string[] | null,
-	limiterCount: number | null,
+export type AmpDspTopology = AmpDspTopology_Serialize | AmpDspTopology_Deserialize;
+
+/**
+ *  Per-model DSP-capability schema — channel/IO topology, EQ structure, and
+ *  electrical rating for a catalog entry. Populated at seed time for builtin
+ *  CVR models (see `capability::cvr::builtin_topology`); defaults to zeroed/
+ *  empty for user-defined models until the user (or a future datasheet
+ *  import) fills it in. Combined with a firmware-derived capability delta by
+ *  `capability::resolve()` to answer "what can be configured" for a given
+ *  (model, firmware) pair — see `AmpCapability`.
+ */
+export type AmpDspTopology_Deserialize = {
+	matrixInputCount?: number,
+	matrixOutputCount?: number,
+	eqBandsPerChannel?: number,
+	availableSources?: SourceKind[],
+	powerModes?: PowerMode[],
+	/**  `None` for models with no known electrical datasheet (e.g. user-defined). */
+	ratedRmsVoltage?: number | null,
+};
+
+/**
+ *  Per-model DSP-capability schema — channel/IO topology, EQ structure, and
+ *  electrical rating for a catalog entry. Populated at seed time for builtin
+ *  CVR models (see `capability::cvr::builtin_topology`); defaults to zeroed/
+ *  empty for user-defined models until the user (or a future datasheet
+ *  import) fills it in. Combined with a firmware-derived capability delta by
+ *  `capability::resolve()` to answer "what can be configured" for a given
+ *  (model, firmware) pair — see `AmpCapability`.
+ */
+export type AmpDspTopology_Serialize = {
+	matrixInputCount: number,
+	matrixOutputCount: number,
+	eqBandsPerChannel: number,
+	availableSources: SourceKind[],
+	powerModes: PowerMode[],
+	/**  `None` for models with no known electrical datasheet (e.g. user-defined). */
+	ratedRmsVoltage: number | null,
 };
 
 /**
@@ -128,7 +223,14 @@ export type AmpDspTopology = {
  *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
  */
-export type AmpModelCatalogEntry = {
+export type AmpModelCatalogEntry = AmpModelCatalogEntry_Serialize | AmpModelCatalogEntry_Deserialize;
+
+/**
+ *  A reusable, project-independent amp hardware model — mirrors the Speaker
+ *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+ *  an assignment's channel count during offline planning.
+ */
+export type AmpModelCatalogEntry_Deserialize = {
 	id: string,
 	brand: string,
 	model: string,
@@ -139,13 +241,54 @@ export type AmpModelCatalogEntry = {
 	 */
 	isDante?: boolean,
 	protocol?: AmpProtocol,
-	topology?: AmpDspTopology,
+	topology?: AmpDspTopology_Deserialize,
 	notes: string | null,
 	origin: EntryOrigin,
 	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
 	archived: boolean,
 	createdAt: number | null,
 	updatedAt: number | null,
+};
+
+/**
+ *  A reusable, project-independent amp hardware model — mirrors the Speaker
+ *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+ *  an assignment's channel count during offline planning.
+ */
+export type AmpModelCatalogEntry_Serialize = {
+	id: string,
+	brand: string,
+	model: string,
+	channelCount: number,
+	/**
+	 *  Authoritative Dante-variant flag — replaces string-matching on the
+	 *  model name (e.g. a trailing "D") in the frontend.
+	 */
+	isDante: boolean,
+	protocol: AmpProtocol,
+	topology: AmpDspTopology_Serialize,
+	notes: string | null,
+	origin: EntryOrigin,
+	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
+	archived: boolean,
+	createdAt: number | null,
+	updatedAt: number | null,
+};
+
+/**
+ *  Global CVR DSP parameter ranges/units — ported 1:1 from the old app's
+ *  `lib/constants.ts`.
+ */
+export type AmpParamRanges = {
+	matrixGainDb: ParamRange,
+	outputTrimDb: ParamRange,
+	outputVolumeDb: ParamRange,
+	delayInMs: ParamRange,
+	delayOutMs: ParamRange,
+	crossoverFreqHz: ParamRange,
+	eqBandGainDb: ParamRange,
+	eqBandQ: ParamRange,
+	presetSlots: ParamRange,
 };
 
 /**
@@ -157,6 +300,22 @@ export type AmpProtocol = "cvrUdp";
 
 export type AppError = {
 	message: string,
+};
+
+/**
+ *  Numeric firmware "generation" (vNum) and the feature deltas it gates —
+ *  ported 1:1 from the old app's `lib/amp-version.ts`. Computed fresh from a
+ *  firmware version string every time; never persisted independently.
+ */
+export type CvrFirmwareCapability = {
+	vNum: number | null,
+	extendedEq: boolean,
+	phonicVariant: boolean,
+	speakerManagement: boolean,
+	firFilters: boolean,
+	noiseGateThreshold: boolean,
+	extendedDelay: boolean,
+	splitTrimVolume: boolean,
 };
 
 export type DiscoveredDevice = {
@@ -190,6 +349,28 @@ export type DiscoveredDevice = {
  */
 export type EntryOrigin = "userDefined" | "builtIn";
 
+/**
+ *  One crosspoint in a channel's row of the input matrix — the gain/active
+ *  state for a single source position. `source_index` is positional (0..
+ *  `AmpDspTopology.matrix_input_count`), not a `SourceKind` itself, since a
+ *  model can have multiple sources of the same kind (e.g. 4 analog + 4 Dante
+ *  inputs on a Dante-equipped model).
+ */
+export type MatrixCrosspoint = {
+	sourceIndex: number,
+	gainDb: number | null,
+	active: boolean,
+};
+
+/**  An inclusive min/max bound for a numeric parameter. */
+export type ParamRange = {
+	min: number | null,
+	max: number | null,
+};
+
+/**  Output power/impedance mode — ported from the old app's `POWER_MODE_NAMES`. */
+export type PowerMode = "lowOhm" | "v70" | "v100";
+
 export type Project = {
 	id: string,
 	name: string,
@@ -199,6 +380,13 @@ export type Project = {
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
 };
+
+/**
+ *  Which physical input can feed a channel — the generic, protocol-agnostic
+ *  source vocabulary. Which variants a given model actually offers is
+ *  `AmpDspTopology.available_sources`, not this enum itself.
+ */
+export type SourceKind = "analog" | "dante" | "aes3" | "backup";
 
 /**
  *  A reusable, project-independent speaker profile. Projects reference
