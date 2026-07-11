@@ -6,8 +6,9 @@ use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 pub mod cvr;
 
 /// Which physical input can feed a channel — the generic, protocol-agnostic
-/// source vocabulary. Which variants a given model actually offers is
-/// `AmpDspTopology.available_sources`, not this enum itself.
+/// source vocabulary. Which variants a given model actually offers, and how
+/// many physical channels each variant has, is `AmpDspTopology.source_counts`,
+/// not this enum itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceKind {
@@ -84,6 +85,25 @@ pub struct FilterCapabilities {
 }
 
 impl EqFilterType {
+    /// Every variant, in declaration order — used to build
+    /// `eq_filter_capabilities()`'s full table. Rust has no automatic enum
+    /// iteration without a crate dependency (e.g. `strum`); a manual const
+    /// array is the plain-code equivalent for a fixed 11-variant enum like
+    /// this one.
+    pub const ALL: [EqFilterType; 11] = [
+        EqFilterType::Peaking,
+        EqFilterType::LowShelf,
+        EqFilterType::HighShelf,
+        EqFilterType::AllPass1st,
+        EqFilterType::AllPass2nd,
+        EqFilterType::GeneralLow,
+        EqFilterType::GeneralHigh,
+        EqFilterType::ButterworthLow,
+        EqFilterType::ButterworthHigh,
+        EqFilterType::BesselLow,
+        EqFilterType::BesselHigh,
+    ];
+
     pub fn capabilities(self) -> FilterCapabilities {
         use EqFilterType::*;
         match self {
@@ -99,6 +119,37 @@ impl EqFilterType {
     }
 }
 
+/// One `EqFilterType` variant's resolved capabilities — pairs the type with
+/// its `FilterCapabilities` so the frontend can gate a band's gain/Q inputs
+/// from `AmpCapability.eq_filter_capabilities` instead of hardcoding a copy
+/// of `EqFilterType::capabilities()`'s table in TypeScript. Keeps this
+/// genuinely capability-driven: if a future model or firmware ever needs a
+/// *different* gain/Q table, `eq_filter_capabilities()` is the one place
+/// that changes — no frontend edit required, same as `paramRanges`/
+/// `topology`/firmware flags.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EqFilterCapabilityEntry {
+    pub filter_type: EqFilterType,
+    pub supports_gain: bool,
+    pub supports_q: bool,
+}
+
+/// The full `EqFilterType` -> `FilterCapabilities` table, resolved once per
+/// `AmpCapability`. Currently identical across every model/firmware (matches
+/// `EqFilterType::capabilities()`, which isn't model-parameterized either),
+/// but living here — not inlined at each call site — is what makes it a
+/// single seam to change later.
+pub fn eq_filter_capabilities() -> Vec<EqFilterCapabilityEntry> {
+    EqFilterType::ALL
+        .iter()
+        .map(|&filter_type| {
+            let caps = filter_type.capabilities();
+            EqFilterCapabilityEntry { filter_type, supports_gain: caps.supports_gain, supports_q: caps.supports_q }
+        })
+        .collect()
+}
+
 /// Combined, resolved answer to "what can be configured, and within what
 /// ranges" for one (amp model, firmware version) pair. Never persisted
 /// independently — always recomputed by `resolve()` from an
@@ -109,6 +160,9 @@ pub struct AmpCapability {
     pub topology: super::amp_model::AmpDspTopology,
     pub firmware: cvr::CvrFirmwareCapability,
     pub param_ranges: cvr::AmpParamRanges,
+    /// Which `EqFilterType`s expose gain/Q — EQ tab's band editor. See
+    /// `eq_filter_capabilities()`.
+    pub eq_filter_capabilities: Vec<EqFilterCapabilityEntry>,
 }
 
 /// Single dispatch point across protocols. Currently just one arm — a plain

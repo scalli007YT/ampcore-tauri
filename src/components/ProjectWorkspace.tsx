@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActionIcon, Box, Stack, Tabs, Text, ThemeIcon, UnstyledButton } from "@mantine/core";
+import { ActionIcon, Box, Stack, Text, ThemeIcon, UnstyledButton } from "@mantine/core";
 import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { OperatorView } from "./OperatorView";
@@ -10,12 +10,15 @@ import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project }
 interface ProjectWorkspaceProps {
   project: Project;
   onProjectUpdate: (project: Project) => void;
+  /** Workspace/Operator View/Speaker Library selection — owned by `App`
+   * since the tab selector itself now renders in the title bar, not here. */
+  activeTab: string | null;
+  onActiveTabChange: (tab: string | null) => void;
 }
 
 const deviceTabValue = (assignmentId: string) => `device:${assignmentId}`;
 
-export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceProps) {
-  const [activeTab, setActiveTab] = useState<string | null>("workspace");
+export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActiveTabChange }: ProjectWorkspaceProps) {
   const [openDeviceIds, setOpenDeviceIds] = useState<string[]>([]);
   const [ampModels, setAmpModels] = useState<AmpModelCatalogEntry[] | null>(null);
 
@@ -29,12 +32,14 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
 
   function openDevice(assignment: AmpAssignment) {
     setOpenDeviceIds((prev) => (prev.includes(assignment.id) ? prev : [...prev, assignment.id]));
-    setActiveTab(deviceTabValue(assignment.id));
+    onActiveTabChange(deviceTabValue(assignment.id));
   }
 
   function closeDevice(assignmentId: string) {
     setOpenDeviceIds((prev) => prev.filter((id) => id !== assignmentId));
-    setActiveTab((current) => (current === deviceTabValue(assignmentId) ? "workspace" : current));
+    if (activeTab === deviceTabValue(assignmentId)) {
+      onActiveTabChange("workspace");
+    }
   }
 
   const openAssignments = openDeviceIds
@@ -45,13 +50,6 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
 
   return (
     <div className="flex h-full flex-col">
-      <Tabs value={activeTab} onChange={setActiveTab}>
-        <Tabs.List justify="center">
-          <Tabs.Tab value="workspace">Workspace</Tabs.Tab>
-          <Tabs.Tab value="operator">Operator View</Tabs.Tab>
-          <Tabs.Tab value="speakerLibrary">Speaker Library</Tabs.Tab>
-        </Tabs.List>
-      </Tabs>
 
       <div className="flex min-h-0 flex-1">
         {/* Vertical device rail — Armonia-style, persists across Workspace/Operator View */}
@@ -68,7 +66,7 @@ export function ProjectWorkspace({ project, onProjectUpdate }: ProjectWorkspaceP
               return (
                 <Box key={assignment.id} className="relative">
                   <UnstyledButton
-                    onClick={() => setActiveTab(tabValue)}
+                    onClick={() => onActiveTabChange(tabValue)}
                     p={4}
                     className={`w-full rounded-[var(--mantine-radius-sm)] border ${
                       isActive

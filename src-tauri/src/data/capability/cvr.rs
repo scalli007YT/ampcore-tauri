@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::super::amp_model::{AmpDspTopology, AmpModelCatalogEntry};
+use super::super::amp_model::{AmpDspTopology, AmpModelCatalogEntry, SourceChannelCount};
 use super::{AmpCapability, ParamRange, PowerMode, SourceKind};
 
 /// Fixed EQ structure on every CVR channel, both directions (input/output):
@@ -121,6 +121,16 @@ pub struct AmpParamRanges {
     pub eq_band_gain_db: ParamRange,
     pub eq_band_q: ParamRange,
     pub preset_slots: ParamRange,
+    pub rms_limiter_threshold_vrms: ParamRange,
+    pub rms_limiter_attack_ms: ParamRange,
+    pub rms_limiter_release_multiplier: ParamRange,
+    pub peak_limiter_threshold_vp: ParamRange,
+    pub peak_limiter_hold_ms: ParamRange,
+    pub peak_limiter_release_ms: ParamRange,
+    pub noise_gate_threshold_dbu: ParamRange,
+    /// Max byte length for `AmpChannel.input_name`/`output_name` — a plain
+    /// scalar, not a `ParamRange`, since it's a single bound, not a min/max.
+    pub channel_name_max_length: u32,
 }
 
 /// Constant across the whole CVR product line today (the old app didn't vary
@@ -129,15 +139,76 @@ pub struct AmpParamRanges {
 /// doesn't change `AmpCapability`'s shape.
 pub fn cvr_param_ranges() -> AmpParamRanges {
     AmpParamRanges {
-        matrix_gain_db: ParamRange { min: -80.0, max: 18.0 },
-        output_trim_db: ParamRange { min: -18.0, max: 18.0 },
-        output_volume_db: ParamRange { min: -80.0, max: 18.0 },
-        delay_in_ms: ParamRange { min: 0.0, max: 100.0 },
-        delay_out_ms: ParamRange { min: 0.0, max: 20.0 },
-        crossover_freq_hz: ParamRange { min: 20.0, max: 20000.0 },
-        eq_band_gain_db: ParamRange { min: -18.0, max: 18.0 },
-        eq_band_q: ParamRange { min: 0.1, max: 32.0 },
-        preset_slots: ParamRange { min: 1.0, max: 40.0 },
+        matrix_gain_db: ParamRange {
+            min: -80.0,
+            max: 18.0,
+        },
+        output_trim_db: ParamRange {
+            min: -18.0,
+            max: 18.0,
+        },
+        output_volume_db: ParamRange {
+            min: -80.0,
+            max: 18.0,
+        },
+        delay_in_ms: ParamRange {
+            min: 0.0,
+            max: 100.0,
+        },
+        delay_out_ms: ParamRange {
+            min: 0.0,
+            max: 20.0,
+        },
+        crossover_freq_hz: ParamRange {
+            min: 20.0,
+            max: 20000.0,
+        },
+        eq_band_gain_db: ParamRange {
+            min: -18.0,
+            max: 18.0,
+        },
+        eq_band_q: ParamRange {
+            min: 0.1,
+            max: 32.0,
+        },
+        preset_slots: ParamRange {
+            min: 1.0,
+            max: 40.0,
+        },
+        rms_limiter_threshold_vrms: ParamRange {
+            min: 1.0,
+            max: 200.0,
+        },
+        rms_limiter_attack_ms: ParamRange {
+            min: 0.0,
+            max: 2000.0,
+        },
+        rms_limiter_release_multiplier: ParamRange {
+            min: 1.0,
+            max: 32.0,
+        },
+        // Max kept at >= 2x rms_limiter_threshold_vrms's max (400.0) so the
+        // frontend's "peak threshold must be at least double the RMS
+        // threshold" floor (LimiterEditor.tsx) stays reachable across the
+        // whole RMS range, even for user-defined models with no per-model
+        // rated RMS voltage to derive a tighter cap from.
+        peak_limiter_threshold_vp: ParamRange {
+            min: 1.4,
+            max: 400.0,
+        },
+        peak_limiter_hold_ms: ParamRange {
+            min: 0.0,
+            max: 2000.0,
+        },
+        peak_limiter_release_ms: ParamRange {
+            min: 0.0,
+            max: 1000.0,
+        },
+        noise_gate_threshold_dbu: ParamRange {
+            min: -50.0,
+            max: 20.0,
+        },
+        channel_name_max_length: 16,
     }
 }
 
@@ -171,19 +242,38 @@ fn rated_rms_voltage(model: &str) -> Option<f64> {
 ///
 /// Matrix input count is always `channel_count`, regardless of Dante — analog
 /// vs. Dante is a per-channel Source Selection choice (`AmpChannel.source`),
-/// not a doubling of the matrix's input columns. AES3/backup source
-/// availability has no offline equivalent in this catalog yet (the old app
-/// derived it from a live "line mode" digit) — deliberately not fabricated
-/// here.
+/// not a doubling of the matrix's input columns. Each source kind offered
+/// has `channel_count` physical inputs of its own (a 4-channel amp has 4
+/// analog inputs *and*, if Dante-equipped, 4 Dante inputs — not a combined
+/// pool), but only Analog is freely patchable to any digital input — Dante
+/// channel N always feeds digital input N (see `SourceChannelCount`).
+/// AES3/backup source availability has no offline equivalent in this catalog
+/// yet (the old app derived it from a live "line mode" digit) — deliberately
+/// not fabricated here.
 pub fn builtin_topology(model: &str, channel_count: u32, is_dante: bool) -> AmpDspTopology {
     AmpDspTopology {
         matrix_input_count: channel_count,
         matrix_output_count: channel_count,
         eq_bands_per_channel: EQ_BANDS_PER_CHANNEL,
-        available_sources: if is_dante {
-            vec![SourceKind::Analog, SourceKind::Dante]
+        source_counts: if is_dante {
+            vec![
+                SourceChannelCount {
+                    kind: SourceKind::Analog,
+                    channel_count,
+                    patchable: true,
+                },
+                SourceChannelCount {
+                    kind: SourceKind::Dante,
+                    channel_count,
+                    patchable: false,
+                },
+            ]
         } else {
-            vec![SourceKind::Analog]
+            vec![SourceChannelCount {
+                kind: SourceKind::Analog,
+                channel_count,
+                patchable: true,
+            }]
         },
         power_modes: vec![PowerMode::LowOhm, PowerMode::V70, PowerMode::V100],
         rated_rms_voltage: rated_rms_voltage(model),
@@ -195,5 +285,6 @@ pub fn resolve(model: &AmpModelCatalogEntry, firmware_version: Option<&str>) -> 
         topology: model.topology.clone(),
         firmware: CvrFirmwareCapability::from_version(firmware_version),
         param_ranges: cvr_param_ranges(),
+        eq_filter_capabilities: super::eq_filter_capabilities(),
     }
 }

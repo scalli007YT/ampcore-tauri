@@ -2,7 +2,10 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::data::amp_model::AmpModelCatalogEntry;
 use crate::data::capability::SourceKind;
-use crate::data::project::{AmpAssignment, Project};
+use crate::data::project::{
+    AmpAssignment, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
+    Project,
+};
 use crate::data::store::{delete_project_file, save_project_file, ProjectDataState};
 use crate::error::AppError;
 
@@ -88,13 +91,17 @@ pub fn projects_add_amp_assignment(
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
 
-    let (channel_count, matrix_input_count) = match &amp_model_id {
+    let (channel_count, matrix_input_count, eq_bands_per_channel) = match &amp_model_id {
         Some(id) => {
             let model = find_amp_model(&inner.amp_models, id)
                 .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?;
-            (model.channel_count, model.topology.matrix_input_count)
+            (
+                model.channel_count,
+                model.topology.matrix_input_count,
+                model.topology.eq_bands_per_channel,
+            )
         }
-        None => (0, 0),
+        None => (0, 0, 0),
     };
 
     let project = inner
@@ -105,6 +112,7 @@ pub fn projects_add_amp_assignment(
 
     let mut assignment = AmpAssignment::new(None, label, channel_count, amp_model_id, firmware_version);
     assignment.reconcile_matrix_size(matrix_input_count);
+    assignment.reconcile_eq_bands(eq_bands_per_channel);
     project.amp_assignments.push(assignment);
     project.touch();
 
@@ -152,13 +160,17 @@ pub fn projects_set_amp_model(
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
 
-    let (channel_count, matrix_input_count) = match &amp_model_id {
+    let (channel_count, matrix_input_count, eq_bands_per_channel) = match &amp_model_id {
         Some(id) => {
             let model = find_amp_model(&inner.amp_models, id)
                 .ok_or_else(|| AppError::from(format!("amp model {} not found", id)))?;
-            (model.channel_count, model.topology.matrix_input_count)
+            (
+                model.channel_count,
+                model.topology.matrix_input_count,
+                model.topology.eq_bands_per_channel,
+            )
         }
-        None => (0, 0),
+        None => (0, 0, 0),
     };
 
     let project = inner
@@ -178,6 +190,7 @@ pub fn projects_set_amp_model(
         assignment.reconcile_channel_count(channel_count);
     }
     assignment.reconcile_matrix_size(matrix_input_count);
+    assignment.reconcile_eq_bands(eq_bands_per_channel);
     project.touch();
 
     let project = project.clone();
@@ -264,8 +277,9 @@ pub fn projects_set_channel_ohms(
     Ok(project)
 }
 
-/// Sets (or clears) which physical source feeds a channel's input —
-/// Source Selection tab.
+/// Sets (or clears) which physical source feeds a channel's input — Routing
+/// tab. `kind: None` clears the source entirely (`index` is ignored). A
+/// `kind` with no `index` defaults to physical input 0 of that kind.
 #[tauri::command]
 #[specta::specta]
 pub fn projects_set_channel_source(
@@ -274,7 +288,8 @@ pub fn projects_set_channel_source(
     project_id: String,
     assignment_id: String,
     channel_index: u32,
-    source: Option<SourceKind>,
+    kind: Option<SourceKind>,
+    index: Option<u32>,
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
     let project = inner
@@ -295,7 +310,7 @@ pub fn projects_set_channel_source(
         .find(|c| c.channel_index == channel_index)
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
 
-    channel.source = source;
+    channel.source = kind.map(|kind| ChannelSource { kind, index: index.unwrap_or(0) });
     project.touch();
 
     let project = project.clone();
@@ -352,6 +367,458 @@ pub fn projects_set_matrix_crosspoint(
     }
     if let Some(active) = active {
         crosspoint.active = active;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Sets a channel's input delay — Input tab.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_delay_in(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    delay_in_ms: f64,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.delay_in_ms = delay_in_ms;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Sets whether a channel's input is muted — Input tab.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_input_mute(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    muted: bool,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.input_muted = muted;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of a channel's output trim/volume/delay — Output tab. Only
+/// touches the fields the caller passes (`Some`), matching
+/// `projects_set_matrix_crosspoint`'s per-field-optional convention.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_output(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    trim_db: Option<f64>,
+    volume_db: Option<f64>,
+    delay_out_ms: Option<f64>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    if let Some(trim_db) = trim_db {
+        channel.output_trim_db = trim_db;
+    }
+    if let Some(volume_db) = volume_db {
+        channel.output_volume_db = volume_db;
+    }
+    if let Some(delay_out_ms) = delay_out_ms {
+        channel.delay_out_ms = delay_out_ms;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of a channel's HP or LP crossover slot (band 0 / band 9 of
+/// its `input_eq`/`output_eq` chain) — EQ sub-tab. Only touches the fields
+/// the caller passes (`Some`), matching `projects_set_matrix_crosspoint`'s
+/// per-field-optional convention.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_crossover_slot(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    direction: EqDirection,
+    slot: CrossoverSlotKind,
+    patch: CrossoverSlotPatch,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    let eq = match direction {
+        EqDirection::Input => &mut channel.input_eq,
+        EqDirection::Output => &mut channel.output_eq,
+    };
+    let crossover = match slot {
+        CrossoverSlotKind::Hp => &mut eq.hp,
+        CrossoverSlotKind::Lp => &mut eq.lp,
+    };
+
+    if let Some(filter_type) = patch.filter_type {
+        crossover.filter_type = filter_type;
+    }
+    if let Some(freq_hz) = patch.freq_hz {
+        crossover.freq_hz = freq_hz;
+    }
+    if let Some(active) = patch.active {
+        crossover.active = active;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of one parametric EQ band (bands 1-8 of the `input_eq`/
+/// `output_eq` chain) — EQ sub-tab. Only touches the fields the caller
+/// passes (`Some`). Fails if `band_index` is out of range (it should always
+/// exist by the time the UI can edit it, since `reconcile_eq_bands`
+/// pre-populates every band for the model's `eq_bands_per_channel`).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_eq_band(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    direction: EqDirection,
+    band_index: u32,
+    patch: EqBandPatch,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    let eq = match direction {
+        EqDirection::Input => &mut channel.input_eq,
+        EqDirection::Output => &mut channel.output_eq,
+    };
+    let band = eq
+        .bands
+        .get_mut(band_index as usize)
+        .ok_or_else(|| AppError::from(format!("eq band {} not found", band_index)))?;
+
+    if let Some(filter_type) = patch.filter_type {
+        band.filter_type = filter_type;
+    }
+    if let Some(freq_hz) = patch.freq_hz {
+        band.freq_hz = freq_hz;
+    }
+    if let Some(gain_db) = patch.gain_db {
+        band.gain_db = gain_db;
+    }
+    if let Some(q) = patch.q {
+        band.q = q;
+    }
+    if let Some(active) = patch.active {
+        band.active = active;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of a channel's output protection (RMS + Peak limiter
+/// stages) — Output tab's Limiter sub-tab.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_limiter(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    patch: LimiterPatch,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    if let Some(enabled) = patch.rms_enabled {
+        channel.limiter.rms.enabled = enabled;
+    }
+    if let Some(threshold_vrms) = patch.rms_threshold_vrms {
+        channel.limiter.rms.threshold_vrms = threshold_vrms;
+    }
+    if let Some(attack_ms) = patch.rms_attack_ms {
+        channel.limiter.rms.attack_ms = attack_ms;
+    }
+    if let Some(release_multiplier) = patch.rms_release_multiplier {
+        channel.limiter.rms.release_multiplier = release_multiplier;
+    }
+    if let Some(enabled) = patch.peak_enabled {
+        channel.limiter.peak.enabled = enabled;
+    }
+    if let Some(threshold_vp) = patch.peak_threshold_vp {
+        channel.limiter.peak.threshold_vp = threshold_vp;
+    }
+    if let Some(hold_ms) = patch.peak_hold_ms {
+        channel.limiter.peak.hold_ms = hold_ms;
+    }
+    if let Some(release_ms) = patch.peak_release_ms {
+        channel.limiter.peak.release_ms = release_ms;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Partial update of a channel's noise gate — Output tab. The threshold is
+/// always persisted regardless of firmware; the frontend only shows it as
+/// user-adjustable when `CvrFirmwareCapability.noise_gate_threshold` is true.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_noise_gate(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    enabled: Option<bool>,
+    threshold_dbu: Option<f64>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    if let Some(enabled) = enabled {
+        channel.noise_gate_enabled = enabled;
+    }
+    if let Some(threshold_dbu) = threshold_dbu {
+        channel.noise_gate_threshold_dbu = threshold_dbu;
+    }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Toggles a channel's output polarity/phase invert — Output tab.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_phase_invert(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    inverted: bool,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.output_phase_inverted = inverted;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Renames a channel's input or output label, overriding the default
+/// numbered/lettered label — Input/Output tabs. `name: None` clears back to
+/// the default.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_name(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    direction: EqDirection,
+    name: Option<String>,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    match direction {
+        EqDirection::Input => channel.input_name = name,
+        EqDirection::Output => channel.output_name = name,
     }
     project.touch();
 

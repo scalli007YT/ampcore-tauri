@@ -18,6 +18,26 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// How many physical channels of one `SourceKind` a model exposes, and
+/// whether any of them can feed any digital input (`patchable`) or each one
+/// is hard-wired to the matching digital input only. Analog is patchable —
+/// e.g. a 4-channel amp's Analog-3 jack can feed digital input 1. Dante is
+/// not: Dante channel N only ever feeds digital input N (Dante routing
+/// happens upstream, at the network/Dante Controller level, not on this
+/// amp's input matrix), so digital input N's only Dante option is "Dante-N".
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceChannelCount {
+    pub kind: SourceKind,
+    pub channel_count: u32,
+    /// `#[serde(default)]` so `sourceCounts` entries saved before this field
+    /// existed still deserialize (as `false`) instead of hard-failing store
+    /// load entirely — `migrate_builtin_topology` immediately recomputes the
+    /// real value for `BuiltIn` entries on the very next load either way.
+    #[serde(default)]
+    pub patchable: bool,
+}
+
 /// Per-model DSP-capability schema — channel/IO topology, EQ structure, and
 /// electrical rating for a catalog entry. Populated at seed time for builtin
 /// CVR models (see `capability::cvr::builtin_topology`); defaults to zeroed/
@@ -25,7 +45,7 @@ where
 /// import) fills it in. Combined with a firmware-derived capability delta by
 /// `capability::resolve()` to answer "what can be configured" for a given
 /// (model, firmware) pair — see `AmpCapability`.
-#[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AmpDspTopology {
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -38,7 +58,7 @@ pub struct AmpDspTopology {
     #[specta(type = u32)]
     pub eq_bands_per_channel: u32,
     #[serde(default)]
-    pub available_sources: Vec<SourceKind>,
+    pub source_counts: Vec<SourceChannelCount>,
     #[serde(default)]
     pub power_modes: Vec<PowerMode>,
     /// `None` for models with no known electrical datasheet (e.g. user-defined).

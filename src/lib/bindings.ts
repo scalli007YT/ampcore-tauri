@@ -39,10 +39,11 @@ export const commands = {
 	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, speakerLibraryId: string | null, wayIndex: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, speakerLibraryId, wayIndex })),
 	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
 	/**
-	 *  Sets (or clears) which physical source feeds a channel's input —
-	 *  Source Selection tab.
+	 *  Sets (or clears) which physical source feeds a channel's input — Routing
+	 *  tab. `kind: None` clears the source entirely (`index` is ignored). A
+	 *  `kind` with no `index` defaults to physical input 0 of that kind.
 	 */
-	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, source: "analog" | "dante" | "aes3" | "backup" | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, source })),
+	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, kind: "analog" | "dante" | "aes3" | "backup" | null, index: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, kind, index })),
 	/**
 	 *  Partial update of one Matrix-tab crosspoint — only touches the fields the
 	 *  caller passes (`Some`), matching `projects_set_channel_speaker`'s
@@ -52,6 +53,50 @@ export const commands = {
 	 *  `matrix_input_count`).
 	 */
 	projectsSetMatrixCrosspoint: (projectId: string, assignmentId: string, channelIndex: number, sourceIndex: number, gainDb: number | null, active: boolean | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_matrix_crosspoint", { projectId, assignmentId, channelIndex, sourceIndex, gainDb, active })),
+	/**  Sets a channel's input delay — Input tab. */
+	projectsSetChannelDelayIn: (projectId: string, assignmentId: string, channelIndex: number, delayInMs: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_delay_in", { projectId, assignmentId, channelIndex, delayInMs })),
+	/**  Sets whether a channel's input is muted — Input tab. */
+	projectsSetChannelInputMute: (projectId: string, assignmentId: string, channelIndex: number, muted: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_input_mute", { projectId, assignmentId, channelIndex, muted })),
+	/**
+	 *  Partial update of a channel's output trim/volume/delay — Output tab. Only
+	 *  touches the fields the caller passes (`Some`), matching
+	 *  `projects_set_matrix_crosspoint`'s per-field-optional convention.
+	 */
+	projectsSetChannelOutput: (projectId: string, assignmentId: string, channelIndex: number, trimDb: number | null, volumeDb: number | null, delayOutMs: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_output", { projectId, assignmentId, channelIndex, trimDb, volumeDb, delayOutMs })),
+	/**
+	 *  Partial update of a channel's HP or LP crossover slot (band 0 / band 9 of
+	 *  its `input_eq`/`output_eq` chain) — EQ sub-tab. Only touches the fields
+	 *  the caller passes (`Some`), matching `projects_set_matrix_crosspoint`'s
+	 *  per-field-optional convention.
+	 */
+	projectsSetCrossoverSlot: (projectId: string, assignmentId: string, channelIndex: number, direction: EqDirection, slot: CrossoverSlotKind, patch: CrossoverSlotPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_crossover_slot", { projectId, assignmentId, channelIndex, direction, slot, patch })),
+	/**
+	 *  Partial update of one parametric EQ band (bands 1-8 of the `input_eq`/
+	 *  `output_eq` chain) — EQ sub-tab. Only touches the fields the caller
+	 *  passes (`Some`). Fails if `band_index` is out of range (it should always
+	 *  exist by the time the UI can edit it, since `reconcile_eq_bands`
+	 *  pre-populates every band for the model's `eq_bands_per_channel`).
+	 */
+	projectsSetEqBand: (projectId: string, assignmentId: string, channelIndex: number, direction: EqDirection, bandIndex: number, patch: EqBandPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_eq_band", { projectId, assignmentId, channelIndex, direction, bandIndex, patch })),
+	/**
+	 *  Partial update of a channel's output protection (RMS + Peak limiter
+	 *  stages) — Output tab's Limiter sub-tab.
+	 */
+	projectsSetChannelLimiter: (projectId: string, assignmentId: string, channelIndex: number, patch: LimiterPatch) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_limiter", { projectId, assignmentId, channelIndex, patch })),
+	/**
+	 *  Partial update of a channel's noise gate — Output tab. The threshold is
+	 *  always persisted regardless of firmware; the frontend only shows it as
+	 *  user-adjustable when `CvrFirmwareCapability.noise_gate_threshold` is true.
+	 */
+	projectsSetChannelNoiseGate: (projectId: string, assignmentId: string, channelIndex: number, enabled: boolean | null, thresholdDbu: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_noise_gate", { projectId, assignmentId, channelIndex, enabled, thresholdDbu })),
+	/**  Toggles a channel's output polarity/phase invert — Output tab. */
+	projectsSetChannelPhaseInvert: (projectId: string, assignmentId: string, channelIndex: number, inverted: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_phase_invert", { projectId, assignmentId, channelIndex, inverted })),
+	/**
+	 *  Renames a channel's input or output label, overriding the default
+	 *  numbered/lettered label — Input/Output tabs. `name: None` clears back to
+	 *  the default.
+	 */
+	projectsSetChannelName: (projectId: string, assignmentId: string, channelIndex: number, direction: EqDirection, name: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_name", { projectId, assignmentId, channelIndex, direction, name })),
 	/**
 	 *  Resolves what can be configured, and within what ranges, for a given amp
 	 *  model + firmware version — purely offline, no live device involved.
@@ -126,6 +171,11 @@ export type AmpCapability_Deserialize = {
 	topology: AmpDspTopology_Deserialize,
 	firmware: CvrFirmwareCapability,
 	paramRanges: AmpParamRanges,
+	/**
+	 *  Which `EqFilterType`s expose gain/Q — EQ tab's band editor. See
+	 *  `eq_filter_capabilities()`.
+	 */
+	eqFilterCapabilities: EqFilterCapabilityEntry[],
 };
 
 /**
@@ -138,6 +188,11 @@ export type AmpCapability_Serialize = {
 	topology: AmpDspTopology_Serialize,
 	firmware: CvrFirmwareCapability,
 	paramRanges: AmpParamRanges,
+	/**
+	 *  Which `EqFilterType`s expose gain/Q — EQ tab's band editor. See
+	 *  `eq_filter_capabilities()`.
+	 */
+	eqFilterCapabilities: EqFilterCapabilityEntry[],
 };
 
 /**
@@ -157,16 +212,64 @@ export type AmpChannel = {
 	 */
 	wayIndex: number | null,
 	/**
-	 *  Which physical source feeds this channel's input — Source Selection
-	 *  tab. `None` until the user picks one.
+	 *  Which physical source feeds this channel's input — Routing tab.
+	 *  `None` until the user picks one.
 	 */
-	source?: SourceKind | null,
+	source?: ChannelSource | null,
 	/**
 	 *  One crosspoint per possible matrix source (0..matrix_input_count) —
 	 *  Matrix tab. Grown/shrunk alongside `channels` whenever the assigned
 	 *  model (hence its topology) changes; see `reconcile_matrix_size`.
 	 */
 	matrixCrosspoints?: MatrixCrosspoint[],
+	/**  Input delay, ranged by `AmpParamRanges.delay_in_ms` — Input tab. */
+	delayInMs?: number | null,
+	/**  Whether this channel's input is muted — Input tab. */
+	inputMuted?: boolean,
+	/**
+	 *  Output trim, ranged by `AmpParamRanges.output_trim_db` — Output tab.
+	 *  Persisted even on firmware where `CvrFirmwareCapability.split_trim_volume`
+	 *  is `false`, though the UI hides the control in that case.
+	 */
+	outputTrimDb?: number | null,
+	/**  Output volume, ranged by `AmpParamRanges.output_volume_db` — Output tab. */
+	outputVolumeDb?: number | null,
+	/**  Output delay, ranged by `AmpParamRanges.delay_out_ms` — Output tab. */
+	delayOutMs?: number | null,
+	/**  Input EQ tab's 10-band chain (pre-matrix). */
+	inputEq?: ChannelEq,
+	/**  Output EQ tab's 10-band chain (post-matrix), independent of `input_eq`. */
+	outputEq?: ChannelEq,
+	/**
+	 *  Output protection — RMS + Peak limiter stages, Output tab's Limiter
+	 *  sub-tab.
+	 */
+	limiter?: Limiter,
+	/**
+	 *  Whether the output noise gate is engaged — Output tab. Threshold is
+	 *  only user-adjustable in the UI when
+	 *  `CvrFirmwareCapability.noise_gate_threshold` is true, but is always
+	 *  persisted regardless of firmware.
+	 */
+	noiseGateEnabled?: boolean,
+	/**
+	 *  Noise gate threshold in dBu, ranged by
+	 *  `AmpParamRanges.noise_gate_threshold_dbu` — Output tab.
+	 */
+	noiseGateThresholdDbu?: number | null,
+	/**  Output polarity/phase invert — Output tab. */
+	outputPhaseInverted?: boolean,
+	/**
+	 *  User-assigned label for this channel's input side, overriding the
+	 *  default "In{n}" label. `None` uses the default. Max length ranged by
+	 *  `AmpParamRanges.channel_name_max_length`.
+	 */
+	inputName?: string | null,
+	/**
+	 *  User-assigned label for this channel's output side, overriding the
+	 *  default "Out{letter}" label. `None` uses the default.
+	 */
+	outputName?: string | null,
 };
 
 /**
@@ -193,7 +296,7 @@ export type AmpDspTopology_Deserialize = {
 	matrixInputCount?: number,
 	matrixOutputCount?: number,
 	eqBandsPerChannel?: number,
-	availableSources?: SourceKind[],
+	sourceCounts?: SourceChannelCount[],
 	powerModes?: PowerMode[],
 	/**  `None` for models with no known electrical datasheet (e.g. user-defined). */
 	ratedRmsVoltage?: number | null,
@@ -212,7 +315,7 @@ export type AmpDspTopology_Serialize = {
 	matrixInputCount: number,
 	matrixOutputCount: number,
 	eqBandsPerChannel: number,
-	availableSources: SourceKind[],
+	sourceCounts: SourceChannelCount[],
 	powerModes: PowerMode[],
 	/**  `None` for models with no known electrical datasheet (e.g. user-defined). */
 	ratedRmsVoltage: number | null,
@@ -289,6 +392,18 @@ export type AmpParamRanges = {
 	eqBandGainDb: ParamRange,
 	eqBandQ: ParamRange,
 	presetSlots: ParamRange,
+	rmsLimiterThresholdVrms: ParamRange,
+	rmsLimiterAttackMs: ParamRange,
+	rmsLimiterReleaseMultiplier: ParamRange,
+	peakLimiterThresholdVp: ParamRange,
+	peakLimiterHoldMs: ParamRange,
+	peakLimiterReleaseMs: ParamRange,
+	noiseGateThresholdDbu: ParamRange,
+	/**
+	 *  Max byte length for `AmpChannel.input_name`/`output_name` — a plain
+	 *  scalar, not a `ParamRange`, since it's a single bound, not a min/max.
+	 */
+	channelNameMaxLength: number,
 };
 
 /**
@@ -300,6 +415,64 @@ export type AmpProtocol = "cvrUdp";
 
 export type AppError = {
 	message: string,
+};
+
+/**
+ *  A full 10-band EQ chain (HP crossover + 8 parametric bands + LP
+ *  crossover) for one channel, one direction. `AmpChannel` holds two of
+ *  these (`input_eq`/`output_eq`) — Input/Output tabs' EQ sub-tabs.
+ *  `bands.len()` == `AmpDspTopology.eq_bands_per_channel - 2`; grown/shrunk
+ *  alongside `channels` whenever the assigned model's topology changes, see
+ *  `reconcile_eq_bands`.
+ */
+export type ChannelEq = {
+	hp: CrossoverSlot,
+	bands: EqBand[],
+	lp: CrossoverSlot,
+};
+
+/**
+ *  Which physical input feeds a channel — a `SourceKind` alone isn't enough
+ *  to identify one, since a model typically exposes several physical inputs
+ *  per kind (e.g. 4 analog inputs on a 4-channel amp); `index` picks which
+ *  one (0.. the kind's `SourceChannelCount.channel_count`).
+ */
+export type ChannelSource = {
+	kind: SourceKind,
+	index: number,
+};
+
+/**
+ *  Numeric filter-type identifiers for the HP (band 0) / LP (band 9) crossover
+ *  slots — ported 1:1 from the old app's `HPLP_FILTER_TYPE_NAMES`. Scaffolding
+ *  only, same status as `EqFilterType`.
+ */
+export type CrossoverFilterType = "butterworth12" | "bessel12" | "linkwitzRiley12" | "butterworth18" | "butterworth24" | "bessel24" | "linkwitzRiley24" | "butterworth36" | "butterworth48" | "bessel48" | "linkwitzRiley48";
+
+/**
+ *  One HP or LP crossover slot (band 0 / band 9 of the fixed 10-band chain —
+ *  see `EQ_BANDS_PER_CHANNEL`). No `q` field: Q is implied entirely by
+ *  `filter_type` (e.g. "BW-12" always means Q=1/sqrt(2), never a
+ *  user-settable independent value), confirmed against the old app's
+ *  reference UI. Has `active` — HP/LP slots are independently bypassable.
+ */
+export type CrossoverSlot = {
+	filterType: CrossoverFilterType,
+	freqHz: number | null,
+	active: boolean,
+};
+
+/**  Which crossover slot (band 0 or band 9) a command targets. */
+export type CrossoverSlotKind = "hp" | "lp";
+
+/**
+ *  Partial update for a `CrossoverSlot` — same bundling rationale as
+ *  `EqBandPatch`.
+ */
+export type CrossoverSlotPatch = {
+	filterType: CrossoverFilterType | null,
+	freqHz: number | null,
+	active: boolean | null,
 };
 
 /**
@@ -350,6 +523,86 @@ export type DiscoveredDevice = {
 export type EntryOrigin = "userDefined" | "builtIn";
 
 /**
+ *  One of the 8 parametric bands (bands 1-8 of the fixed 10-band chain).
+ *  `active` mirrors `MatrixCrosspoint.active` — lets a band be fully
+ *  disengaged independent of its stored gain/freq/Q.
+ */
+export type EqBand = {
+	filterType: EqFilterType,
+	freqHz: number | null,
+	gainDb: number | null,
+	q: number | null,
+	active: boolean,
+};
+
+/**
+ *  Partial update for one `EqBand` — bundled into a single struct param
+ *  (rather than 5 separate `Option<T>` params) because `projects_set_eq_band`
+ *  otherwise exceeds `tauri-specta`'s `SpectaFn` 10-parameter limit. Every
+ *  field `None` means "leave unchanged", same semantics as the flat
+ *  `Option<T>` params every other partial-update command uses.
+ */
+export type EqBandPatch = {
+	filterType: EqFilterType | null,
+	freqHz: number | null,
+	gainDb: number | null,
+	q: number | null,
+	active: boolean | null,
+};
+
+/**  Which of a channel's two independent 10-band EQ chains a command targets. */
+export type EqDirection = "input" | "output";
+
+/**
+ *  One `EqFilterType` variant's resolved capabilities — pairs the type with
+ *  its `FilterCapabilities` so the frontend can gate a band's gain/Q inputs
+ *  from `AmpCapability.eq_filter_capabilities` instead of hardcoding a copy
+ *  of `EqFilterType::capabilities()`'s table in TypeScript. Keeps this
+ *  genuinely capability-driven: if a future model or firmware ever needs a
+ *  *different* gain/Q table, `eq_filter_capabilities()` is the one place
+ *  that changes — no frontend edit required, same as `paramRanges`/
+ *  `topology`/firmware flags.
+ */
+export type EqFilterCapabilityEntry = {
+	filterType: EqFilterType,
+	supportsGain: boolean,
+	supportsQ: boolean,
+};
+
+/**
+ *  Numeric filter-type identifiers for the 8 parametric EQ bands (bands 1-8 of
+ *  the fixed 10-band-per-direction structure) — ported 1:1 from the old app's
+ *  `EQ_FILTER_TYPE_NAMES`/`getEqFilterTypeCapabilities`. Scaffolding only: not
+ *  yet consumed by any UI or persisted field this phase.
+ */
+export type EqFilterType = "peaking" | "lowShelf" | "highShelf" | "allPass1st" | "allPass2nd" | "generalLow" | "generalHigh" | "butterworthLow" | "butterworthHigh" | "besselLow" | "besselHigh";
+
+/**
+ *  A channel's output protection: independent RMS and Peak limiter stages,
+ *  ported from the old app's `limiter-panel.tsx` (both stages can be engaged
+ *  simultaneously, each with its own enable flag).
+ */
+export type Limiter = {
+	rms: RmsLimiter,
+	peak: PeakLimiter,
+};
+
+/**
+ *  Partial update for a `Limiter` — bundled into a single struct param for
+ *  the same `SpectaFn` 10-parameter reason as `EqBandPatch`/`CrossoverSlotPatch`.
+ */
+export type LimiterPatch = {
+	rmsEnabled: boolean | null,
+	rmsThresholdVrms: number | null,
+	rmsAttackMs: number | null,
+	rmsReleaseMultiplier: number | null,
+	peakEnabled: boolean | null,
+	peakThresholdVp: number | null,
+	peakHoldMs: number | null,
+	peakReleaseMs: number | null,
+};
+
+/**
  *  One crosspoint in a channel's row of the input matrix — the gain/active
  *  state for a single source position. `source_index` is positional (0..
  *  `AmpDspTopology.matrix_input_count`), not a `SourceKind` itself, since a
@@ -368,6 +621,14 @@ export type ParamRange = {
 	max: number | null,
 };
 
+/**  Instantaneous peak limiter stage — ranged by `AmpParamRanges.peak_limiter_*`. */
+export type PeakLimiter = {
+	enabled: boolean,
+	thresholdVp: number | null,
+	holdMs: number | null,
+	releaseMs: number | null,
+};
+
 /**  Output power/impedance mode — ported from the old app's `POWER_MODE_NAMES`. */
 export type PowerMode = "lowOhm" | "v70" | "v100";
 
@@ -381,10 +642,40 @@ export type Project = {
 	ampAssignments: AmpAssignment[],
 };
 
+/**  RMS-window limiter stage — ranged by `AmpParamRanges.rms_limiter_*`. */
+export type RmsLimiter = {
+	enabled: boolean,
+	thresholdVrms: number | null,
+	attackMs: number | null,
+	releaseMultiplier: number | null,
+};
+
+/**
+ *  How many physical channels of one `SourceKind` a model exposes, and
+ *  whether any of them can feed any digital input (`patchable`) or each one
+ *  is hard-wired to the matching digital input only. Analog is patchable —
+ *  e.g. a 4-channel amp's Analog-3 jack can feed digital input 1. Dante is
+ *  not: Dante channel N only ever feeds digital input N (Dante routing
+ *  happens upstream, at the network/Dante Controller level, not on this
+ *  amp's input matrix), so digital input N's only Dante option is "Dante-N".
+ */
+export type SourceChannelCount = {
+	kind: SourceKind,
+	channelCount: number,
+	/**
+	 *  `#[serde(default)]` so `sourceCounts` entries saved before this field
+	 *  existed still deserialize (as `false`) instead of hard-failing store
+	 *  load entirely — `migrate_builtin_topology` immediately recomputes the
+	 *  real value for `BuiltIn` entries on the very next load either way.
+	 */
+	patchable?: boolean,
+};
+
 /**
  *  Which physical input can feed a channel — the generic, protocol-agnostic
- *  source vocabulary. Which variants a given model actually offers is
- *  `AmpDspTopology.available_sources`, not this enum itself.
+ *  source vocabulary. Which variants a given model actually offers, and how
+ *  many physical channels each variant has, is `AmpDspTopology.source_counts`,
+ *  not this enum itself.
  */
 export type SourceKind = "analog" | "dante" | "aes3" | "backup";
 

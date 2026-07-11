@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { Tabs } from "@mantine/core";
 import { AppModeSelector } from "./components/AppModeSelector";
 import { LiveControlView } from "./components/LiveControlView";
 import { ProjectSelector } from "./components/ProjectSelector";
@@ -22,6 +23,13 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  /** Owned here (not inside ProjectWorkspace) so the tab selector can live in
+   * the title bar instead of its own row — saves vertical space. */
+  const [workspaceTab, setWorkspaceTab] = useState<string | null>("workspace");
+
+  useEffect(() => {
+    setWorkspaceTab("workspace");
+  }, [selectedProject?.id]);
 
   useEffect(() => {
     getVersion().then(setVersion);
@@ -79,6 +87,17 @@ function App() {
         onCloseProject={handleBackToStart}
         onBackToStart={!selectedProject && mode !== "modeSelect" ? handleBackToStart : undefined}
         onOpenSettings={() => setSettingsOpen(true)}
+        centerContent={
+          mode === "projectDesign" && selectedProject ? (
+            <Tabs value={workspaceTab} onChange={setWorkspaceTab} variant="pills" radius="sm">
+              <Tabs.List>
+                <Tabs.Tab value="workspace">Workspace</Tabs.Tab>
+                <Tabs.Tab value="operator">Operator View</Tabs.Tab>
+                <Tabs.Tab value="speakerLibrary">Speaker Library</Tabs.Tab>
+              </Tabs.List>
+            </Tabs>
+          ) : undefined
+        }
       />
       <div className="min-h-0 flex-1">
         {mode === "modeSelect" && (
@@ -92,7 +111,12 @@ function App() {
           (!selectedProject ? (
             <ProjectSelector onSelect={setSelectedProject} />
           ) : (
-            <ProjectWorkspace project={selectedProject} onProjectUpdate={setSelectedProject} />
+            <ProjectWorkspace
+              project={selectedProject}
+              onProjectUpdate={setSelectedProject}
+              activeTab={workspaceTab}
+              onActiveTabChange={setWorkspaceTab}
+            />
           ))}
       </div>
       <SettingsModal opened={settingsOpen} onClose={() => setSettingsOpen(false)} />

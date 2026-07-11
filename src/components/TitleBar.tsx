@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ActionIcon, Button, Group, Menu, Text } from "@mantine/core";
 import { Copy, Minus, Square, X } from "lucide-react";
@@ -11,9 +11,20 @@ interface TitleBarProps {
   onCloseProject?: () => void;
   onBackToStart?: () => void;
   onOpenSettings: () => void;
+  /** Rendered centered in the title bar — e.g. the Workspace/Operator
+   * View/Speaker Library tabs when a project is open, saving the vertical
+   * space a separate tab-bar row would otherwise cost. */
+  centerContent?: ReactNode;
 }
 
-export function TitleBar({ title, projectName, onCloseProject, onBackToStart, onOpenSettings }: TitleBarProps) {
+export function TitleBar({
+  title,
+  projectName,
+  onCloseProject,
+  onBackToStart,
+  onOpenSettings,
+  centerContent,
+}: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -27,15 +38,11 @@ export function TitleBar({ title, projectName, onCloseProject, onBackToStart, on
   }, []);
 
   return (
-    <Group
+    <div
       data-tauri-drag-region
-      justify="space-between"
-      wrap="nowrap"
-      h={36}
-      px="xs"
-      className="select-none border-b border-b-[light-dark(var(--mantine-color-gray-2),var(--mantine-color-dark-6))]"
+      className="grid h-9 select-none grid-cols-[1fr_auto_1fr] items-center border-b border-b-[light-dark(var(--mantine-color-gray-2),var(--mantine-color-dark-6))] px-[var(--mantine-spacing-xs)]"
     >
-      <Group gap="xs" wrap="nowrap" className="min-w-0 flex-1">
+      <Group data-tauri-drag-region gap="xs" wrap="nowrap" className="min-w-0">
         <Menu shadow="md" width={180} position="bottom-start">
           <Menu.Target>
             <Button variant="subtle" color="gray" size="compact-sm">
@@ -58,12 +65,16 @@ export function TitleBar({ title, projectName, onCloseProject, onBackToStart, on
             )}
           </Menu.Dropdown>
         </Menu>
-        <Text data-tauri-drag-region size="sm" fw={500} truncate className="flex-1">
+        <Text data-tauri-drag-region size="sm" fw={500} truncate className="min-w-0 flex-1">
           {title}
         </Text>
       </Group>
 
-      <Group gap={4} wrap="nowrap">
+      <Group data-tauri-drag-region gap={4} wrap="nowrap" justify="center" className="min-w-0">
+        {centerContent}
+      </Group>
+
+      <Group data-tauri-drag-region gap={4} wrap="nowrap" justify="flex-end">
         <ActionIcon
           variant="subtle"
           color="gray"
@@ -92,6 +103,6 @@ export function TitleBar({ title, projectName, onCloseProject, onBackToStart, on
           <X size={16} />
         </ActionIcon>
       </Group>
-    </Group>
+    </div>
   );
 }

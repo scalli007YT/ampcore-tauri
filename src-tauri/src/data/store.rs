@@ -77,12 +77,15 @@ fn seed_builtin_amp_models(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
 }
 
 /// Backfill for installs whose `amp_models.json` predates real topology data
-/// (when `AmpDspTopology` was an always-empty placeholder). Scoped to
-/// `BuiltIn` origin only, same rationale as `migrate_dante_flag` — a
-/// user-defined model's hand-authored topology must never be overwritten.
-/// Recomputed from `builtin_topology` every load (deterministic from
-/// model/channel_count/is_dante), so this is idempotent rather than a
-/// one-time migration.
+/// (when `AmpDspTopology` was an always-empty placeholder), or predates a
+/// field later added to `AmpDspTopology` (e.g. `source_counts` replacing
+/// `available_sources`). Scoped to `BuiltIn` origin only, same rationale as
+/// `migrate_dante_flag` — a user-defined model's hand-authored topology must
+/// never be overwritten. Recomputed from `builtin_topology` every load
+/// (deterministic from model/channel_count/is_dante) and compared
+/// field-for-field via `PartialEq`, so this is idempotent rather than a
+/// one-time migration, and self-updating — no per-field staleness check to
+/// remember to extend the next time `AmpDspTopology` grows a field.
 fn migrate_builtin_topology(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool {
     let mut changed = false;
     for m in amp_models.iter_mut() {
@@ -90,10 +93,7 @@ fn migrate_builtin_topology(amp_models: &mut Vec<AmpModelCatalogEntry>) -> bool 
             continue;
         }
         let expected = builtin_topology(&m.model, m.channel_count, m.is_dante);
-        if m.topology.matrix_input_count != expected.matrix_input_count
-            || m.topology.matrix_output_count != expected.matrix_output_count
-            || m.topology.eq_bands_per_channel != expected.eq_bands_per_channel
-        {
+        if m.topology != expected {
             m.topology = expected;
             changed = true;
         }
@@ -135,7 +135,9 @@ impl ProjectDataState {
 
         let mut projects = load_projects(&data_dir)?;
         for project in projects.iter_mut() {
-            if reconcile_project_matrix_sizes(project, &amp_models) {
+            let matrix_changed = reconcile_project_matrix_sizes(project, &amp_models);
+            let eq_changed = reconcile_project_eq_band_sizes(project, &amp_models);
+            if matrix_changed || eq_changed {
                 save_project_file(&data_dir, project)?;
             }
         }
@@ -171,6 +173,35 @@ fn reconcile_project_matrix_sizes(project: &mut Project, amp_models: &[AmpModelC
             .any(|c| c.matrix_crosspoints.len() as u32 != expected);
         if needs_fix {
             assignment.reconcile_matrix_size(expected);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Backfill for assignments whose stored `input_eq.bands`/`output_eq.bands`
+/// length no longer matches their assigned model's current
+/// `eq_bands_per_channel - 2` — same rationale as
+/// `reconcile_project_matrix_sizes`. A no-op for every project today (CVR's
+/// `eq_bands_per_channel` is a constant 10, and `#[serde(default = ...)]`
+/// already backfills a full 8-band chain for files that predate this field
+/// entirely), but kept as the mechanical parallel for when that changes.
+fn reconcile_project_eq_band_sizes(project: &mut Project, amp_models: &[AmpModelCatalogEntry]) -> bool {
+    let mut changed = false;
+    for assignment in project.amp_assignments.iter_mut() {
+        let Some(model_id) = &assignment.amp_model_id else {
+            continue;
+        };
+        let Some(model) = amp_models.iter().find(|m| &m.id == model_id) else {
+            continue;
+        };
+        let expected = model.topology.eq_bands_per_channel.saturating_sub(2);
+        let needs_fix = assignment
+            .channels
+            .iter()
+            .any(|c| c.input_eq.bands.len() as u32 != expected || c.output_eq.bands.len() as u32 != expected);
+        if needs_fix {
+            assignment.reconcile_eq_bands(model.topology.eq_bands_per_channel);
             changed = true;
         }
     }

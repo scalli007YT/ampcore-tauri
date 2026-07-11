@@ -11,8 +11,11 @@ use commands::capability::amp_capability_resolve;
 use commands::live_control::{live_control_list_devices, live_control_start, live_control_stop};
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
-    projects_remove_amp_assignment, projects_set_amp_model, projects_set_channel_ohms,
-    projects_set_channel_source, projects_set_channel_speaker, projects_set_matrix_crosspoint, projects_update,
+    projects_remove_amp_assignment, projects_set_amp_model, projects_set_channel_delay_in,
+    projects_set_channel_input_mute, projects_set_channel_limiter, projects_set_channel_name,
+    projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
+    projects_set_channel_phase_invert, projects_set_channel_source, projects_set_channel_speaker,
+    projects_set_crossover_slot, projects_set_eq_band, projects_set_matrix_crosspoint, projects_update,
 };
 use commands::speaker_library::{
     speaker_library_archive, speaker_library_create, speaker_library_list, speaker_library_update,
@@ -44,6 +47,15 @@ pub fn run() {
             projects_set_channel_ohms,
             projects_set_channel_source,
             projects_set_matrix_crosspoint,
+            projects_set_channel_delay_in,
+            projects_set_channel_input_mute,
+            projects_set_channel_output,
+            projects_set_crossover_slot,
+            projects_set_eq_band,
+            projects_set_channel_limiter,
+            projects_set_channel_noise_gate,
+            projects_set_channel_phase_invert,
+            projects_set_channel_name,
             amp_capability_resolve,
             speaker_library_list,
             speaker_library_create,
