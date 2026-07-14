@@ -93,7 +93,6 @@ function App() {
               <Tabs.List>
                 <Tabs.Tab value="workspace">Workspace</Tabs.Tab>
                 <Tabs.Tab value="operator">Operator View</Tabs.Tab>
-                <Tabs.Tab value="speakerLibrary">Speaker Library</Tabs.Tab>
               </Tabs.List>
             </Tabs>
           ) : undefined

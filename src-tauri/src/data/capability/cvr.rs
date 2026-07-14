@@ -214,25 +214,50 @@ pub fn cvr_param_ranges() -> AmpParamRanges {
 
 /// Per-model rated RMS voltage — ported from the old app's `lib/amp-model.ts`.
 /// Proxy for electrical/gain limits; `None` for anything outside this 12-SKU
-/// product line (e.g. user-defined models). Dante variants share their base
-/// model's electrical rating, so the trailing "D" is stripped before lookup.
+/// product line (e.g. user-defined models). Shared by both lookup styles
+/// below rather than duplicated — a single source of truth for the datasheet
+/// numbers.
+const RATED_RMS_VOLTAGE_TABLE: &[(&str, f64)] = &[
+    ("DSP-654", 72.1),
+    ("DSP-802", 80.0),
+    ("DSP-1002", 89.4),
+    ("DSP-1004", 89.4),
+    ("DSP-1502", 109.5),
+    ("DSP-2002", 126.5),
+    ("DSP-1504", 109.5),
+    ("DSP-2004", 126.5),
+    ("DSP-3002", 154.9),
+    ("DSP-3004", 154.9),
+    ("DSP-3302", 162.5),
+    ("DSP-4302", 185.5),
+];
+
+/// Exact-match lookup keyed off a catalog entry's `model` field. Dante
+/// variants share their base model's electrical rating, so the trailing "D"
+/// is stripped before lookup.
 fn rated_rms_voltage(model: &str) -> Option<f64> {
     let base = model.strip_suffix('D').unwrap_or(model);
-    match base {
-        "DSP-654" => Some(72.1),
-        "DSP-802" => Some(80.0),
-        "DSP-1002" => Some(89.4),
-        "DSP-1004" => Some(89.4),
-        "DSP-1502" => Some(109.5),
-        "DSP-2002" => Some(126.5),
-        "DSP-1504" => Some(109.5),
-        "DSP-2004" => Some(126.5),
-        "DSP-3002" => Some(154.9),
-        "DSP-3004" => Some(154.9),
-        "DSP-3302" => Some(162.5),
-        "DSP-4302" => Some(185.5),
-        _ => None,
-    }
+    RATED_RMS_VOLTAGE_TABLE.iter().find(|(m, _)| *m == base).map(|(_, v)| *v)
+}
+
+/// Derives a rated RMS output voltage from a device's raw, factory-set
+/// firmware version string (e.g. "42404B06-006118-DSP-2004") by matching the
+/// known model designation embedded in it — ported from the old app's
+/// `ratedRmsVFromDeviceName`, but matched against `firmware_version`
+/// (`DiscoveredDevice.firmwareVersion`), not the user-editable device
+/// *name*, since the reference app itself actually prioritizes matching the
+/// firmware string first (`version ?? name`) — the firmware string is baked
+/// in at the factory and can't be renamed, so a match here is real identity,
+/// not a guess.
+///
+/// Unlike the reference implementation, this returns `None` (not a
+/// default/average voltage like its `DEFAULT_RATED_RMS = 80.0` fallback)
+/// when no known designation is found: a wrong-but-confident dB reading is
+/// worse than an honestly missing one, and this app's whole telemetry
+/// pipeline is built on that rule (see `live/dsp.rs`).
+pub fn rated_rms_voltage_from_firmware_string(firmware_version: &str) -> Option<f64> {
+    let upper = firmware_version.to_uppercase();
+    RATED_RMS_VOLTAGE_TABLE.iter().find(|(m, _)| upper.contains(m)).map(|(_, v)| *v)
 }
 
 /// Builds the real per-model `AmpDspTopology` for a builtin CVR catalog entry

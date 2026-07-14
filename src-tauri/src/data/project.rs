@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-use super::capability::{CrossoverFilterType, EqFilterType, SourceKind};
+use super::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
 use super::common::{new_id, now_millis};
 
 /// Which physical input feeds a channel — a `SourceKind` alone isn't enough
@@ -226,6 +226,25 @@ pub struct AmpChannel {
     /// default "Out{letter}" label. `None` uses the default.
     #[serde(default)]
     pub output_name: Option<String>,
+    /// Whether this channel's output is muted — Output tab. Mirrors
+    /// `input_muted`.
+    #[serde(default)]
+    pub output_muted: bool,
+    /// Whether this channel is mono-bridged with the next channel (fixed
+    /// adjacent pairing: `floor(channel_index / 2)` — (0,1), (2,3), …) —
+    /// Output tab. **Only meaningful on an even-indexed (pair-leader)
+    /// channel with a following odd-indexed partner**; ignored/never read
+    /// on odd (follower) channels or on a leader with no partner (e.g. the
+    /// trailing channel of an odd-count assignment). Ported from the old
+    /// app's per-pair `BridgeReadback`, adapted to a plain persisted field
+    /// since this is offline planning, not a live device readback.
+    #[serde(default)]
+    pub output_bridged: bool,
+    /// Output power/impedance mode — Output tab. Ranged by
+    /// `AmpDspTopology.power_modes` (which modes the assigned model actually
+    /// offers), though CVR currently offers all three unconditionally.
+    #[serde(default = "default_power_mode")]
+    pub power_mode: PowerMode,
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
@@ -262,13 +281,11 @@ pub struct Project {
     pub amp_assignments: Vec<AmpAssignment>,
 }
 
-/// Bumped to 7 when `AmpChannel.limiter` (`#[serde(default = "default_limiter")]`,
-/// both stages disabled), `noise_gate_enabled`/`noise_gate_threshold_dbu`
-/// (`#[serde(default)]`, gate off at 0.0 dBu), `output_phase_inverted`
-/// (`#[serde(default)]`, not inverted), and `input_name`/`output_name`
-/// (`#[serde(default)]`, `None` = default label) were added — older project
-/// files still load unchanged and need no separate migration code.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 7;
+/// Bumped to 9 when `AmpChannel.power_mode`
+/// (`#[serde(default = "default_power_mode")]`, defaults to `LowOhm`) was
+/// added — older project files still load unchanged and need no separate
+/// migration code.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 9;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -378,7 +395,14 @@ fn new_channel(channel_index: u32) -> AmpChannel {
         output_phase_inverted: false,
         input_name: None,
         output_name: None,
+        output_muted: false,
+        output_bridged: false,
+        power_mode: default_power_mode(),
     }
+}
+
+fn default_power_mode() -> PowerMode {
+    PowerMode::LowOhm
 }
 
 /// Both stages disabled by default, with in-range starting values so the

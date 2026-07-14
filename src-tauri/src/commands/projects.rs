@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::data::amp_model::AmpModelCatalogEntry;
-use crate::data::capability::SourceKind;
+use crate::data::capability::{PowerMode, SourceKind};
 use crate::data::project::{
     AmpAssignment, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
     Project,
@@ -783,6 +783,45 @@ pub fn projects_set_channel_phase_invert(
     Ok(project)
 }
 
+/// Sets a channel's output power/impedance mode — Output tab.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_power_mode(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    power_mode: PowerMode,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.power_mode = power_mode;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
 /// Renames a channel's input or output label, overriding the default
 /// numbered/lettered label — Input/Output tabs. `name: None` clears back to
 /// the default.
@@ -820,6 +859,106 @@ pub fn projects_set_channel_name(
         EqDirection::Input => channel.input_name = name,
         EqDirection::Output => channel.output_name = name,
     }
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Toggles a channel's output mute — Output tab. Mirrors
+/// `projects_set_channel_input_mute`.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_channel_output_mute(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_index: u32,
+    muted: bool,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
+
+    channel.output_muted = muted;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
+/// must be even and have a following odd-indexed partner in the same
+/// assignment; the flag itself lives only on the leader (see
+/// `AmpChannel.output_bridged`'s doc comment).
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_output_bridge(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    pair_leader_channel_index: u32,
+    bridged: bool,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    if pair_leader_channel_index % 2 != 0 {
+        return Err(AppError::from(format!(
+            "channel {} is not a pair leader (must be even-indexed)",
+            pair_leader_channel_index
+        )));
+    }
+    let has_partner = assignment
+        .channels
+        .iter()
+        .any(|c| c.channel_index == pair_leader_channel_index + 1);
+    if !has_partner {
+        return Err(AppError::from(format!(
+            "channel {} has no partner channel {} to bridge with",
+            pair_leader_channel_index,
+            pair_leader_channel_index + 1
+        )));
+    }
+
+    let channel = assignment
+        .channels
+        .iter_mut()
+        .find(|c| c.channel_index == pair_leader_channel_index)
+        .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
+
+    channel.output_bridged = bridged;
     project.touch();
 
     let project = project.clone();

@@ -4,9 +4,13 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::mpsc;
 
 use crate::data::common::now_millis;
 
+use super::cvr::channel_config::ChannelConfigSnapshot;
+use super::cvr::request::RequestSpec;
+use super::cvr::telemetry::Telemetry;
 use super::driver::DriverHandle;
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -37,6 +41,22 @@ pub struct DiscoveredDevice {
 pub struct LiveDeviceInner {
     pub devices: HashMap<String, DiscoveredDevice>,
     pub handles: Vec<DriverHandle>,
+    /// Latest parsed heartbeat telemetry per device id. Kept separate from
+    /// `devices` (and emitted via its own event) rather than as a field on
+    /// `DiscoveredDevice` — that struct's own upsert/touch/mark-offline paths
+    /// all emit a full-list snapshot, and heartbeats land per-device every
+    /// couple of seconds, so folding telemetry into it would re-broadcast
+    /// every device's identity data on every single device's heartbeat.
+    /// Deliberately never cleared on offline — the UI dims the last reading
+    /// via `DiscoveredDevice.online` instead of blanking it.
+    pub telemetry: HashMap<String, Telemetry>,
+    /// Latest FC=27 channel-config snapshot per device id — same
+    /// never-cleared-on-offline, separately-emitted pattern as `telemetry`.
+    pub channel_config: HashMap<String, ChannelConfigSnapshot>,
+    /// Reaches into the running CVR driver's request engine from outside its
+    /// task (e.g. a future Tauri command) — `None` whenever no driver is
+    /// running. `Some` while `CvrDriver::start`'s spawned task is alive.
+    pub request_tx: Option<mpsc::UnboundedSender<RequestSpec>>,
 }
 
 /// Arc-wrapped (unlike `ProjectDataState`'s bare `Mutex<T>`) because a clone
@@ -49,6 +69,9 @@ impl LiveDeviceState {
         Self(Arc::new(Mutex::new(LiveDeviceInner {
             devices: HashMap::new(),
             handles: Vec::new(),
+            telemetry: HashMap::new(),
+            channel_config: HashMap::new(),
+            request_tx: None,
         })))
     }
 }
@@ -59,6 +82,26 @@ impl Default for LiveDeviceState {
     }
 }
 
+/// Event/command payload pairing a device id with its latest telemetry —
+/// the shape `live_telemetry:updated` emits and `live_control_get_telemetry`
+/// returns a snapshot `Vec` of.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceTelemetry {
+    pub device_id: String,
+    pub telemetry: Telemetry,
+}
+
+/// Event/command payload pairing a device id with its latest channel-config
+/// snapshot — the shape `live_channel_config:updated` emits and
+/// `live_control_get_channel_config` returns a snapshot `Vec` of.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceChannelConfig {
+    pub device_id: String,
+    pub config: ChannelConfigSnapshot,
+}
+
 #[derive(Clone)]
 pub struct LiveEventSink {
     pub app: AppHandle,
@@ -66,6 +109,27 @@ pub struct LiveEventSink {
 }
 
 impl LiveEventSink {
+    /// Records one device's freshly parsed heartbeat telemetry and emits it
+    /// alone — not the full device snapshot `upsert`/`touch_by_ip` emit.
+    pub fn set_telemetry(&self, device_id: String, telemetry: Telemetry) {
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.telemetry.insert(device_id.clone(), telemetry.clone());
+        }
+        self.app.emit("live_telemetry:updated", &DeviceTelemetry { device_id, telemetry }).ok();
+    }
+
+    /// Records one device's freshly parsed FC=27 channel config and emits it
+    /// alone — same rationale as `set_telemetry`: a separate, targeted event
+    /// rather than folding into the full device-list broadcast.
+    pub fn set_channel_config(&self, device_id: String, config: ChannelConfigSnapshot) {
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.channel_config.insert(device_id.clone(), config.clone());
+        }
+        self.app.emit("live_channel_config:updated", &DeviceChannelConfig { device_id, config }).ok();
+    }
+
     pub fn upsert(&self, mut device: DiscoveredDevice) {
         device.online = true;
         device.last_seen_at = now_millis();

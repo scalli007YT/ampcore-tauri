@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import {
+  ActionIcon,
   Button,
   Center,
   Group,
@@ -9,10 +10,12 @@ import {
   Paper,
   Popover,
   ScrollArea,
+  Select,
   SimpleGrid,
   Skeleton,
   Stack,
   Switch,
+  Table,
   Tabs,
   Text,
   TextInput,
@@ -27,6 +30,7 @@ import {
   ChevronRight,
   CircuitBoard,
   FlipVertical2,
+  Link2,
   Route,
   Speaker,
   ShieldAlert,
@@ -34,18 +38,23 @@ import {
   Volume2,
   VolumeX,
   Waves,
+  X,
 } from "lucide-react";
 import { EqEditor } from "./EqEditor";
 import { LimiterEditor } from "./LimiterEditor";
+import { SpeakerFormModal } from "./SpeakerFormModal";
+import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import {
   commands,
   type AmpAssignment,
   type AmpCapability_Serialize as AmpCapability,
   type AmpModelCatalogEntry,
   type ChannelSource,
+  type PowerMode,
   type Project,
   type SourceChannelCount,
   type SourceKind,
+  type SpeakerLibraryEntry_Serialize as SpeakerLibraryEntry,
 } from "../lib/bindings";
 
 interface AmpConfigureViewProps {
@@ -73,7 +82,7 @@ const TABS = [
     value: "speakerConfiguration",
     label: "Speaker Configuration",
     icon: Speaker,
-    skeleton: "grid",
+    skeleton: "list",
   },
   {
     value: "presetConfiguration",
@@ -90,7 +99,7 @@ const TABS = [
 
 /** Tabs wired to real capability + persisted values this phase — every other
  * tab keeps rendering `TabSkeleton` as before. */
-const CONFIGURABLE_TABS = new Set(["scheme", "routing", "input", "output"]);
+const CONFIGURABLE_TABS = new Set(["scheme", "routing", "input", "output", "speakerConfiguration"]);
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
@@ -247,28 +256,101 @@ interface ConfigurableTabProps {
   assignment: AmpAssignment;
   project: Project;
   capability: AmpCapability;
+  /** Every Speaker Library entry (including archived ones — see
+   * `formatSpeakerAssignment`), fetched once by `AmpConfigureView` and
+   * shared across every tab rather than each tab re-fetching its own copy
+   * (mirrors how `capability` is fetched once and shared). */
+  speakers: SpeakerLibraryEntry[];
+  /** Refreshes the shared `speakers` list — used by the Speaker
+   * Configuration tab's Library panel (Add/Edit/Archive/Refresh), which
+   * absorbs full Speaker Library CRUD now that the standalone top-level
+   * Speaker Library tab is gone. */
+  onSpeakersUpdate: (speakers: SpeakerLibraryEntry[]) => void;
   onProjectUpdate: (project: Project) => void;
 }
 
-/** Decorative dBFS bar — a visual stand-in for the old app's live input
- * meter. No live device exists in this offline phase, so it's always shown
- * empty (never fabricates a signal level), matching `MockLevelMeter`'s
- * "decorative only" rule. */
-function MockInputMeter() {
+/** "Brand Model — WayLabel" for a channel's speaker assignment — shared by
+ * the Speaker Configuration tab's own tile and the Scheme tab's read-only
+ * summary so the resolution logic (including the single-way-speaker
+ * suffix-omission rule) isn't duplicated. Resolves against the *full*
+ * speaker list (archived included) so an assignment made before a speaker
+ * was archived still displays correctly instead of going blank. */
+function formatSpeakerAssignment(
+  speakers: SpeakerLibraryEntry[],
+  speakerLibraryId: string | null | undefined,
+  wayIndex: number | null | undefined,
+): string {
+  if (!speakerLibraryId) return "No speaker";
+  const speaker = speakers.find((s) => s.id === speakerLibraryId);
+  if (!speaker) return "No speaker";
+  const name = `${speaker.brand} ${speaker.model}`;
+  if (speaker.ways.length <= 1) return name;
+  const way = speaker.ways[wayIndex ?? 0];
+  return way ? `${name} — ${way.label}` : name;
+}
+
+/** One row of the Speaker Configuration tab's Physical Outputs panel — a
+ * single unassigned/unjoined channel, or a "joined" multi-way group. */
+interface SpeakerOutputGroup {
+  leaderChannelIndex: number;
+  channelIndexes: number[];
+  speaker: SpeakerLibraryEntry | null;
+}
+
+/** Derives `SpeakerOutputGroup`s from `assignment.channels` — no group is
+ * ever persisted; a "joined" multi-way speaker is just N consecutive
+ * channels sharing the same `speakerLibraryId` with sequential `wayIndex`
+ * (0, 1, 2…), detected fresh on every render. A channel only continues the
+ * previous group when both conditions hold; a coincidentally-matching
+ * non-adjacent assignment (or an out-of-order `wayIndex`) is never grouped,
+ * it just renders as its own single-channel row. */
+function computeSpeakerGroups(
+  channels: AmpAssignment["channels"],
+  speakers: SpeakerLibraryEntry[],
+): SpeakerOutputGroup[] {
+  const groups: SpeakerOutputGroup[] = [];
+  for (const channel of channels) {
+    const speaker = speakers.find((s) => s.id === channel.speakerLibraryId) ?? null;
+    const previous = groups[groups.length - 1];
+    // Continues the previous group only if this channel shares the same
+    // speaker and its wayIndex is exactly the next sequential one (0, 1, 2…)
+    // — a coincidentally-matching non-adjacent or out-of-order assignment
+    // never merges into a group.
+    const continuesPrevious =
+      previous !== undefined &&
+      speaker !== null &&
+      previous.speaker?.id === speaker.id &&
+      channel.wayIndex === previous.channelIndexes.length;
+    if (continuesPrevious) {
+      previous.channelIndexes.push(channel.channelIndex);
+    } else {
+      groups.push({ leaderChannelIndex: channel.channelIndex, channelIndexes: [channel.channelIndex], speaker });
+    }
+  }
+  return groups;
+}
+
+/** dBFS scale for the Input/Output row meters — no live device exists in
+ * this offline phase, so every caller passes `value={-60}` (fully unlit),
+ * matching the old `MockInputMeter`'s "decorative only" rule. */
+const DBFS_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
+
+/** `wide` drops the usual `maxWidth` cap — the Output tab's row layout wants
+ * the meter to fill most of the row's width (matching the reference
+ * hardware view), unlike the Input tab's compact fixed-width meter. */
+function InputDbfsMeter({ disabled, wide }: { disabled?: boolean; wide?: boolean }) {
   return (
-    <Stack gap={2} miw={160} maw={260} className="min-w-0 flex-1">
-      <div
-        className="h-6 w-full rounded-[var(--mantine-radius-sm)]"
-        style={{ backgroundColor: "var(--mantine-color-dark-6)" }}
+    <div className="min-w-0 flex-1" style={{ minWidth: 160, maxWidth: wide ? undefined : 260 }}>
+      <VuMeter
+        orientation="horizontal"
+        min={-60}
+        max={0}
+        value={-60}
+        thickness={24}
+        marks={DBFS_MARKS}
+        disabled={disabled}
       />
-      <Group gap={0} justify="space-between">
-        {[-60, -48, -36, -24, -12, 0].map((value) => (
-          <Text key={value} fz={8} c="dimmed">
-            {value}
-          </Text>
-        ))}
-      </Group>
-    </Stack>
+    </div>
   );
 }
 
@@ -425,7 +507,7 @@ function InputChannelRow({
         onRename={onRename}
       />
       <Group gap="xs" wrap="nowrap" align="center">
-        <MockInputMeter />
+        <InputDbfsMeter disabled={muted} />
         <InputStatTile value="---" label="dBFS" />
         <InputStatTile
           value=""
@@ -610,6 +692,12 @@ function InputTab({ assignment, project, capability, onProjectUpdate }: Configur
   );
 }
 
+const POWER_MODE_LABELS: Record<PowerMode, string> = {
+  lowOhm: "Low-Ω",
+  v70: "70V",
+  v100: "100V",
+};
+
 function OutputChannelRow({
   channel,
   trimMin,
@@ -623,12 +711,15 @@ function OutputChannelRow({
   noiseGateThresholdAdjustable,
   nameMaxLength,
   splitTrimVolume,
+  powerModes,
   onChange,
   onOpenFir,
   onOpenEq,
   onOpenLimiter,
   onNoiseGateChange,
   onPhaseInvertToggle,
+  onPowerModeChange,
+  onMuteToggle,
   onRename,
 }: {
   channel: AmpAssignment["channels"][number];
@@ -643,21 +734,29 @@ function OutputChannelRow({
   noiseGateThresholdAdjustable: boolean;
   nameMaxLength: number;
   splitTrimVolume: boolean;
+  /** Which power/impedance modes the assigned model actually offers — read
+   * from `capability.topology.powerModes`, not hardcoded, so a future model
+   * that restricts modes is respected automatically. */
+  powerModes: PowerMode[];
   onChange: (field: "trim" | "volume" | "delay", value: number) => void;
   onOpenFir: () => void;
   onOpenEq: () => void;
   onOpenLimiter: () => void;
   onNoiseGateChange: (enabled: boolean, thresholdDbu: number) => void;
   onPhaseInvertToggle: () => void;
+  onPowerModeChange: (mode: PowerMode) => void;
+  onMuteToggle: () => void;
   onRename: (name: string | null) => void;
 }) {
-  const [openPopover, setOpenPopover] = useState<"trim" | "volume" | "delay" | "gate" | null>(null);
+  const [openPopover, setOpenPopover] = useState<"trim" | "volume" | "delay" | "gate" | "mode" | null>(null);
   const trimDb = channel.outputTrimDb ?? 0;
   const volumeDb = channel.outputVolumeDb ?? 0;
   const delayMs = channel.delayOutMs ?? 0;
   const noiseGateEnabled = channel.noiseGateEnabled ?? false;
   const noiseGateThresholdDbu = channel.noiseGateThresholdDbu ?? 0;
   const phaseInverted = channel.outputPhaseInverted ?? false;
+  const muted = channel.outputMuted ?? false;
+  const powerMode = channel.powerMode ?? "lowOhm";
 
   return (
     <div>
@@ -667,14 +766,121 @@ function OutputChannelRow({
         maxLength={nameMaxLength}
         onRename={onRename}
       />
-      <Group gap="xs" wrap="nowrap" align="center">
-        <MockInputMeter />
+      <Group gap="xs" wrap="nowrap" align="center" className="overflow-x-auto">
+        <InputDbfsMeter disabled={muted} wide />
+        <InputStatTile value="" label="LIM" onClick={onOpenLimiter} icon={<SlidersHorizontal size={16} />} />
+        <InputStatTile value="0" label="V" />
+        <InputStatTile value="0" label="A" />
+        <InputStatTile value="0" label="°C" />
         <InputStatTile value="" label="FIR" onClick={onOpenFir} icon={<Waves size={16} />} />
         <InputStatTile value="" label="EQ Out" onClick={onOpenEq} icon={<Activity size={16} />} />
-        <InputStatTile value="" label="Limiter" onClick={onOpenLimiter} icon={<SlidersHorizontal size={16} />} />
+        <Popover
+          opened={openPopover === "volume"}
+          onChange={(o) => setOpenPopover(o ? "volume" : null)}
+          position="bottom"
+          withArrow
+          shadow="md"
+          width={200}
+        >
+          <Popover.Target>
+            <div>
+              <InputStatTile
+                value={volumeDb.toFixed(1)}
+                label={splitTrimVolume ? "Vol dB" : "Level dB"}
+                onClick={() => setOpenPopover((o) => (o === "volume" ? null : "volume"))}
+                active
+              />
+            </div>
+          </Popover.Target>
+          <Popover.Dropdown>
+            <Stack gap="sm">
+              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
+                {splitTrimVolume ? "Output Volume" : "Output Level"}
+              </Text>
+              <NumberInput
+                value={volumeDb}
+                min={volumeMin ?? undefined}
+                max={volumeMax ?? undefined}
+                step={0.5}
+                suffix=" dB"
+                onChange={(value) => typeof value === "number" && onChange("volume", value)}
+              />
+            </Stack>
+          </Popover.Dropdown>
+        </Popover>
+        {splitTrimVolume && (
+          <Popover
+            opened={openPopover === "trim"}
+            onChange={(o) => setOpenPopover(o ? "trim" : null)}
+            position="bottom"
+            withArrow
+            shadow="md"
+            width={200}
+          >
+            <Popover.Target>
+              <div>
+                <InputStatTile
+                  value={trimDb.toFixed(1)}
+                  label="Trim dB"
+                  onClick={() => setOpenPopover((o) => (o === "trim" ? null : "trim"))}
+                  active
+                />
+              </div>
+            </Popover.Target>
+            <Popover.Dropdown>
+              <Stack gap="sm">
+                <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
+                  Output Trim
+                </Text>
+                <NumberInput
+                  value={trimDb}
+                  min={trimMin ?? undefined}
+                  max={trimMax ?? undefined}
+                  step={0.5}
+                  suffix=" dB"
+                  onChange={(value) => typeof value === "number" && onChange("trim", value)}
+                />
+              </Stack>
+            </Popover.Dropdown>
+          </Popover>
+        )}
+        <Popover
+          opened={openPopover === "delay"}
+          onChange={(o) => setOpenPopover(o ? "delay" : null)}
+          position="bottom"
+          withArrow
+          shadow="md"
+          width={200}
+        >
+          <Popover.Target>
+            <div>
+              <InputStatTile
+                value={delayMs.toFixed(1)}
+                label="ms out"
+                onClick={() => setOpenPopover((o) => (o === "delay" ? null : "delay"))}
+                active
+              />
+            </div>
+          </Popover.Target>
+          <Popover.Dropdown>
+            <Stack gap="sm">
+              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
+                Output Delay
+              </Text>
+              <NumberInput
+                value={delayMs}
+                min={delayMin ?? undefined}
+                max={delayMax ?? undefined}
+                step={0.5}
+                suffix=" ms"
+                onChange={(value) => typeof value === "number" && onChange("delay", value)}
+              />
+            </Stack>
+          </Popover.Dropdown>
+        </Popover>
         <InputStatTile
           value=""
-          label="Phase"
+          label="Pol"
           onClick={onPhaseInvertToggle}
           active={phaseInverted}
           activeColor="var(--mantine-color-red-6)"
@@ -685,6 +891,39 @@ function OutputChannelRow({
             />
           }
         />
+        <Popover
+          opened={openPopover === "mode"}
+          onChange={(o) => setOpenPopover(o ? "mode" : null)}
+          position="bottom"
+          withArrow
+          shadow="md"
+          width={180}
+        >
+          <Popover.Target>
+            <div>
+              <InputStatTile
+                value={POWER_MODE_LABELS[powerMode]}
+                label="Mode"
+                onClick={() => setOpenPopover((o) => (o === "mode" ? null : "mode"))}
+                active
+              />
+            </div>
+          </Popover.Target>
+          <Popover.Dropdown>
+            <Stack gap="sm">
+              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
+                Power Mode
+              </Text>
+              <Select
+                size="sm"
+                data={powerModes.map((mode) => ({ value: mode, label: POWER_MODE_LABELS[mode] }))}
+                value={powerMode}
+                allowDeselect={false}
+                onChange={(value) => value && onPowerModeChange(value as PowerMode)}
+              />
+            </Stack>
+          </Popover.Dropdown>
+        </Popover>
         <Popover
           opened={openPopover === "gate"}
           onChange={(o) => setOpenPopover(o ? "gate" : null)}
@@ -735,112 +974,87 @@ function OutputChannelRow({
             </Stack>
           </Popover.Dropdown>
         </Popover>
-        {splitTrimVolume && (
-          <Popover
-            opened={openPopover === "trim"}
-            onChange={(o) => setOpenPopover(o ? "trim" : null)}
-            position="bottom"
-            withArrow
-            shadow="md"
-            width={200}
-          >
-            <Popover.Target>
-              <div>
-                <InputStatTile
-                  value={trimDb.toFixed(1)}
-                  label="Trim dB"
-                  onClick={() => setOpenPopover((o) => (o === "trim" ? null : "trim"))}
-                  active
-                />
-              </div>
-            </Popover.Target>
-            <Popover.Dropdown>
-              <Stack gap="sm">
-                <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
-                  Output Trim
-                </Text>
-                <NumberInput
-                  value={trimDb}
-                  min={trimMin ?? undefined}
-                  max={trimMax ?? undefined}
-                  step={0.5}
-                  suffix=" dB"
-                  onChange={(value) => typeof value === "number" && onChange("trim", value)}
-                />
-              </Stack>
-            </Popover.Dropdown>
-          </Popover>
-        )}
-        <Popover
-          opened={openPopover === "volume"}
-          onChange={(o) => setOpenPopover(o ? "volume" : null)}
-          position="bottom"
-          withArrow
-          shadow="md"
-          width={200}
-        >
-          <Popover.Target>
-            <div>
-              <InputStatTile
-                value={volumeDb.toFixed(1)}
-                label={splitTrimVolume ? "Vol dB" : "Level dB"}
-                onClick={() => setOpenPopover((o) => (o === "volume" ? null : "volume"))}
-                active
-              />
-            </div>
-          </Popover.Target>
-          <Popover.Dropdown>
-            <Stack gap="sm">
-              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
-                {splitTrimVolume ? "Output Volume" : "Output Level"}
-              </Text>
-              <NumberInput
-                value={volumeDb}
-                min={volumeMin ?? undefined}
-                max={volumeMax ?? undefined}
-                step={0.5}
-                suffix=" dB"
-                onChange={(value) => typeof value === "number" && onChange("volume", value)}
-              />
-            </Stack>
-          </Popover.Dropdown>
-        </Popover>
-        <Popover
-          opened={openPopover === "delay"}
-          onChange={(o) => setOpenPopover(o ? "delay" : null)}
-          position="bottom"
-          withArrow
-          shadow="md"
-          width={200}
-        >
-          <Popover.Target>
-            <div>
-              <InputStatTile
-                value={delayMs.toFixed(1)}
-                label="ms out"
-                onClick={() => setOpenPopover((o) => (o === "delay" ? null : "delay"))}
-                active
-              />
-            </div>
-          </Popover.Target>
-          <Popover.Dropdown>
-            <Stack gap="sm">
-              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
-                Output Delay
-              </Text>
-              <NumberInput
-                value={delayMs}
-                min={delayMin ?? undefined}
-                max={delayMax ?? undefined}
-                step={0.5}
-                suffix=" ms"
-                onChange={(value) => typeof value === "number" && onChange("delay", value)}
-              />
-            </Stack>
-          </Popover.Dropdown>
-        </Popover>
+        <InputStatTile
+          value=""
+          label="Mute"
+          onClick={onMuteToggle}
+          active={muted}
+          activeColor="var(--mantine-color-red-6)"
+          icon={
+            muted ? (
+              <VolumeX size={16} color="var(--mantine-color-red-6)" />
+            ) : (
+              <Volume2 size={16} color="var(--mantine-color-dimmed)" />
+            )
+          }
+        />
       </Group>
     </div>
+  );
+}
+
+/** Per-pair bridge toggle, shown between an output channel pair's leader and
+ * follower rows. Same halved-green-tint active-state convention as
+ * `ActiveStateButton` (EqEditor.tsx) / `OnOffButton` (LimiterEditor.tsx),
+ * rather than inventing a third "on" visual language. */
+function BridgeToggle({ label, bridged, onClick }: { label: string; bridged: boolean; onClick: () => void }) {
+  return (
+    <UnstyledButton
+      onClick={onClick}
+      w="100%"
+      py={6}
+      bdrs="sm"
+      bd={`1px solid ${bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : "var(--mantine-color-default-border)"}`}
+      style={{
+        backgroundColor: bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : undefined,
+      }}
+    >
+      <Text size="xs" fw={700} ta="center" c={bridged ? "green" : "dimmed"}>
+        {label} — {bridged ? "Bridged" : "Bridge"}
+      </Text>
+    </UnstyledButton>
+  );
+}
+
+/** Colored sidebar spanning a bridged output pair's two rows — matches the
+ * reference hardware view's rotated `{A}/{B}` `ON`/`OFF` bar. This app has
+ * no live status distinct from planned config the way real hardware does,
+ * so the sidebar doubles as the toggle control itself (click to flip
+ * `output_bridged`) as well as the status display, unlike the reference
+ * where the equivalent control lives elsewhere. */
+function BridgePairSidebar({
+  leaderLetter,
+  followerLetter,
+  bridged,
+  onClick,
+}: {
+  leaderLetter: string;
+  followerLetter: string;
+  bridged: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <UnstyledButton
+      onClick={onClick}
+      w={28}
+      bdrs="sm"
+      bd={`1px solid ${bridged ? "var(--mantine-color-green-6)" : "var(--mantine-color-default-border)"}`}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : undefined,
+      }}
+    >
+      <Text
+        size="xs"
+        fw={700}
+        c={bridged ? "green" : "dimmed"}
+        style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap" }}
+      >
+        {leaderLetter}/{followerLetter} {bridged ? "ON" : "OFF"}
+      </Text>
+    </UnstyledButton>
   );
 }
 
@@ -852,6 +1066,7 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
   const nameMaxLength = capability.paramRanges.channelNameMaxLength;
   const splitTrimVolume = capability.firmware.splitTrimVolume;
   const noiseGateThresholdAdjustable = capability.firmware.noiseGateThreshold;
+  const powerModes = capability.topology.powerModes;
   const [subChannelIndex, setSubChannelIndex] = useState(0);
   const [view, setView] = useState<string | null>("output");
   const subChannel =
@@ -898,12 +1113,47 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
     }
   }
 
+  async function handleMuteToggle(channelIndex: number, muted: boolean) {
+    const result = await commands.projectsSetChannelOutputMute(project.id, assignment.id, channelIndex, muted);
+    if (result.status === "ok") {
+      onProjectUpdate(result.data);
+    }
+  }
+
+  async function handlePowerModeChange(channelIndex: number, mode: PowerMode) {
+    const result = await commands.projectsSetChannelPowerMode(project.id, assignment.id, channelIndex, mode);
+    if (result.status === "ok") {
+      onProjectUpdate(result.data);
+    }
+  }
+
+  async function handleBridgeToggle(pairLeaderChannelIndex: number, bridged: boolean) {
+    const result = await commands.projectsSetOutputBridge(
+      project.id,
+      assignment.id,
+      pairLeaderChannelIndex,
+      bridged,
+    );
+    if (result.status === "ok") {
+      onProjectUpdate(result.data);
+    }
+  }
+
   function openSubTab(channelIndex: number, target: "fir" | "eq" | "limiter") {
     setSubChannelIndex(channelIndex);
     setView(target);
   }
 
   const letterLabel = (c: AmpAssignment["channels"][number]) => String.fromCharCode(65 + c.channelIndex);
+
+  // Fixed adjacent pairing (0,1), (2,3), … — mirrors the old app's bridging
+  // convention. A trailing unpaired channel (odd total count) has no
+  // partner and no bridge option, per `AmpChannel.output_bridged`'s doc
+  // comment.
+  const channelPairs: Array<[AmpAssignment["channels"][number], AmpAssignment["channels"][number] | undefined]> = [];
+  for (let i = 0; i < assignment.channels.length; i += 2) {
+    channelPairs.push([assignment.channels[i], assignment.channels[i + 1]]);
+  }
 
   return (
     <div className="flex h-full">
@@ -957,34 +1207,65 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
           ) : (
             <Center h="100%" p="xl" className="overflow-y-auto">
               <Stack gap="md">
-                {assignment.channels.map((channel) => (
-                  <OutputChannelRow
-                    key={channel.channelIndex}
-                    channel={channel}
-                    trimMin={trimRange.min}
-                    trimMax={trimRange.max}
-                    volumeMin={volumeRange.min}
-                    volumeMax={volumeRange.max}
-                    delayMin={delayRange.min}
-                    delayMax={delayRange.max}
-                    noiseGateThresholdMin={noiseGateThresholdRange.min}
-                    noiseGateThresholdMax={noiseGateThresholdRange.max}
-                    noiseGateThresholdAdjustable={noiseGateThresholdAdjustable}
-                    nameMaxLength={nameMaxLength}
-                    splitTrimVolume={splitTrimVolume}
-                    onChange={(field, value) => handleChange(channel.channelIndex, field, value)}
-                    onOpenFir={() => openSubTab(channel.channelIndex, "fir")}
-                    onOpenEq={() => openSubTab(channel.channelIndex, "eq")}
-                    onOpenLimiter={() => openSubTab(channel.channelIndex, "limiter")}
-                    onNoiseGateChange={(enabled, thresholdDbu) =>
-                      handleNoiseGateChange(channel.channelIndex, enabled, thresholdDbu)
-                    }
-                    onPhaseInvertToggle={() =>
-                      handlePhaseInvertToggle(channel.channelIndex, !(channel.outputPhaseInverted ?? false))
-                    }
-                    onRename={(name) => handleRename(channel.channelIndex, name)}
-                  />
-                ))}
+                {channelPairs.map(([leader, follower]) => {
+                  const bridged = Boolean(follower && (leader.outputBridged ?? false));
+                  const row = (channel: AmpAssignment["channels"][number]) => (
+                    <OutputChannelRow
+                      key={channel.channelIndex}
+                      channel={channel}
+                      trimMin={trimRange.min}
+                      trimMax={trimRange.max}
+                      volumeMin={volumeRange.min}
+                      volumeMax={volumeRange.max}
+                      delayMin={delayRange.min}
+                      delayMax={delayRange.max}
+                      noiseGateThresholdMin={noiseGateThresholdRange.min}
+                      noiseGateThresholdMax={noiseGateThresholdRange.max}
+                      noiseGateThresholdAdjustable={noiseGateThresholdAdjustable}
+                      nameMaxLength={nameMaxLength}
+                      splitTrimVolume={splitTrimVolume}
+                      powerModes={powerModes}
+                      onChange={(field, value) => handleChange(channel.channelIndex, field, value)}
+                      onOpenFir={() => openSubTab(channel.channelIndex, "fir")}
+                      onOpenEq={() => openSubTab(channel.channelIndex, "eq")}
+                      onOpenLimiter={() => openSubTab(channel.channelIndex, "limiter")}
+                      onNoiseGateChange={(enabled, thresholdDbu) =>
+                        handleNoiseGateChange(channel.channelIndex, enabled, thresholdDbu)
+                      }
+                      onPhaseInvertToggle={() =>
+                        handlePhaseInvertToggle(channel.channelIndex, !(channel.outputPhaseInverted ?? false))
+                      }
+                      onPowerModeChange={(mode) => handlePowerModeChange(channel.channelIndex, mode)}
+                      onMuteToggle={() => handleMuteToggle(channel.channelIndex, !(channel.outputMuted ?? false))}
+                      onRename={(name) => handleRename(channel.channelIndex, name)}
+                    />
+                  );
+                  if (!follower) {
+                    return <Fragment key={leader.channelIndex}>{row(leader)}</Fragment>;
+                  }
+                  return (
+                    <Group key={leader.channelIndex} align="stretch" wrap="nowrap" gap="xs">
+                      <BridgePairSidebar
+                        leaderLetter={letterLabel(leader)}
+                        followerLetter={letterLabel(follower)}
+                        bridged={bridged}
+                        onClick={() => handleBridgeToggle(leader.channelIndex, !bridged)}
+                      />
+                      <Stack gap="md" className="flex-1 min-w-0">
+                        {row(leader)}
+                        <div
+                          style={{
+                            opacity: bridged ? 0.4 : 1,
+                            pointerEvents: bridged ? "none" : "auto",
+                            filter: bridged ? "grayscale(1)" : "none",
+                          }}
+                        >
+                          {row(follower)}
+                        </div>
+                      </Stack>
+                    </Group>
+                  );
+                })}
               </Stack>
             </Center>
           )}
@@ -994,31 +1275,29 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
   );
 }
 
-/** Decorative scale + gradient track — a visual stand-in for the old app's
- * live per-output level meter. No live device exists in this offline phase,
- * so this never reflects a real signal; it exists purely to match the
- * reference layout. */
-const METER_SCALE_DB = [
-  -60, -54, -48, -42, -36, -30, -24, -18, -12, -6, 0, 6, 12, 18,
-];
-const METER_GRADIENT =
-  "linear-gradient(to right, #0f6e5c 0%, #2f9e6a 35%, #d4c94a 65%, #e0793a 82%, #d64545 100%)";
+/** Level scale for the Scheme/Routing per-channel meters — no live device
+ * exists in this offline phase, so every caller passes `value={-60}`
+ * (fully unlit), matching the old `MockLevelMeter`'s "decorative only"
+ * rule. */
+const LEVEL_MARKS: VuMeterMark[] = [-60, -54, -48, -42, -36, -30, -24, -18, -12, -6, 0, 6, 12, 18].map((value) => ({
+  value,
+  label: String(value),
+}));
 
-function MockLevelMeter() {
+function LevelMeter() {
   return (
-    <Stack gap={2} miw={160} maw={200} w="100%">
-      <Group gap={0} justify="space-between">
-        {METER_SCALE_DB.map((value) => (
-          <Text key={value} fz={8} c="dimmed">
-            {value}
-          </Text>
-        ))}
-      </Group>
-      <div
-        className="h-2 w-full rounded-sm opacity-60"
-        style={{ background: METER_GRADIENT }}
+    <div style={{ minWidth: 160, maxWidth: 200, width: "100%" }}>
+      <VuMeter
+        orientation="horizontal"
+        min={-60}
+        max={18}
+        value={-60}
+        gradient={DEFAULT_LEVEL_GRADIENT}
+        backdropOpacity={0.6}
+        thickness={8}
+        marks={LEVEL_MARKS}
       />
-    </Stack>
+    </div>
   );
 }
 
@@ -1028,10 +1307,13 @@ function MockLevelMeter() {
  * Purely a read-only overview: nothing here is directly editable. */
 function SchemeRow({
   channel,
+  speakers,
 }: {
   channel: AmpAssignment["channels"][number];
+  speakers: SpeakerLibraryEntry[];
 }) {
   const sourceLabel = formatSourceLabel(channel.source);
+  const speakerLabel = formatSpeakerAssignment(speakers, channel.speakerLibraryId, channel.wayIndex);
   const ioSummary = `Delay ${channel.delayInMs ?? 0}ms · Trim ${channel.outputTrimDb ?? 0}dB · Vol ${channel.outputVolumeDb ?? 0}dB`;
 
   return (
@@ -1056,34 +1338,454 @@ function SchemeRow({
       <Center>
         <ArrowRight size={14} />
       </Center>
-      {/* TODO: speaker assignment once Speaker Configuration ships */}
       <Paper withBorder radius="sm" h={60} className="flex-1">
-        <Center h="100%" p={4}>
-          <Text size="xs" c="dimmed" ta="center">
+        <Stack h="100%" gap={2} justify="center" p={4}>
+          <Text size="sm" fw={600} ta="center" lineClamp={1}>
+            {speakerLabel}
+          </Text>
+          <Text size="xs" c="dimmed" ta="center" lineClamp={1}>
             {ioSummary}
           </Text>
-        </Center>
+        </Stack>
       </Paper>
       <Center>
         <ArrowRight size={14} />
       </Center>
       <Center w={160}>
-        <MockLevelMeter />
+        <LevelMeter />
       </Center>
     </Group>
   );
 }
 
-function SchemeTab({ assignment }: ConfigurableTabProps) {
+function SchemeTab({ assignment, speakers }: ConfigurableTabProps) {
   return (
     <Stack h="100%" p="xl" gap="md">
       <Text fw={600}>Scheme</Text>
       <Stack gap="lg" className="flex-1" justify="center">
         {assignment.channels.map((channel) => (
-          <SchemeRow key={channel.channelIndex} channel={channel} />
+          <SchemeRow key={channel.channelIndex} channel={channel} speakers={speakers} />
         ))}
       </Stack>
     </Stack>
+  );
+}
+
+const SPEAKER_OUTPUT_LETTER = (channelIndex: number) => String.fromCharCode(65 + channelIndex);
+
+/** One channel's row in the Physical Outputs panel. Every channel gets its
+ * own row (not one collapsed row per group) — a group's resolved speaker
+ * name renders only on its leader row (blank on continuation rows, a
+ * visual rowspan), while each row still shows its own way label. A thin
+ * connector renders between two rows belonging to the same joined group
+ * (see the caller). Click-to-select (for Split/Reset and Bridge, which act
+ * on "the selected row"); a Library row can also be dragged directly onto
+ * this row to assign it (native HTML5 drag-and-drop, matching the old
+ * software), highlighted via the same amber-accent convention `ChannelRail`
+ * uses for its active entry — drag-over uses the same highlight so the
+ * drop target is unambiguous. */
+function PhysicalOutputChannelRow({
+  channel,
+  group,
+  selected,
+  dragOver,
+  onSelect,
+  onEject,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+}: {
+  channel: AmpAssignment["channels"][number];
+  group: SpeakerOutputGroup;
+  selected: boolean;
+  dragOver: boolean;
+  onSelect: () => void;
+  onEject: () => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDragLeave: () => void;
+  onDrop: (e: React.DragEvent) => void;
+}) {
+  const isLeader = group.leaderChannelIndex === channel.channelIndex;
+  const positionInGroup = group.channelIndexes.indexOf(channel.channelIndex);
+  const wayLabel = group.speaker?.ways[positionInGroup]?.label ?? group.speaker?.ways[0]?.label ?? null;
+  const speakerLabel = isLeader && group.speaker ? `${group.speaker.brand} ${group.speaker.model}` : null;
+  const highlighted = selected || dragOver;
+
+  return (
+    <UnstyledButton
+      onClick={onSelect}
+      onDragOver={(e) => {
+        e.preventDefault();
+        onDragOver(e);
+      }}
+      onDragLeave={onDragLeave}
+      onDrop={(e) => {
+        e.preventDefault();
+        onDrop(e);
+      }}
+      w="100%"
+      p={8}
+      bdrs="sm"
+      bd={`1px solid ${highlighted ? "var(--mantine-color-amber-filled)" : "var(--mantine-color-default-border)"}`}
+      style={{ backgroundColor: highlighted ? "var(--mantine-color-amber-light)" : undefined }}
+    >
+      <Group justify="space-between" wrap="nowrap" gap="xs">
+        <Text size="sm" c={speakerLabel ? undefined : "dimmed"} lineClamp={1} className="flex-1">
+          {speakerLabel ?? (isLeader ? "Speaker Model" : "")}
+        </Text>
+        <Text size="xs" c="dimmed" lineClamp={1} className="flex-1" ta="center">
+          {wayLabel ?? "-"}
+        </Text>
+        <Center w={22} h={22} bdrs="xl" bd="1px solid var(--mantine-color-default-border)" className="shrink-0">
+          <Text fz={10} fw={700}>
+            {SPEAKER_OUTPUT_LETTER(channel.channelIndex)}
+          </Text>
+        </Center>
+        {isLeader && group.speaker ? (
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="red"
+            onClick={(e) => {
+              e.stopPropagation();
+              onEject();
+            }}
+            aria-label={`Clear Out${SPEAKER_OUTPUT_LETTER(channel.channelIndex)}`}
+          >
+            <X size={12} />
+          </ActionIcon>
+        ) : (
+          <div style={{ width: 28 }} />
+        )}
+      </Group>
+    </UnstyledButton>
+  );
+}
+
+/** Drag payload MIME type used to drag a Library row onto a Physical
+ * Outputs row — plain text carrying the speaker's id. */
+const SPEAKER_DRAG_MIME = "application/x-ampcore-speaker-id";
+
+function SpeakerConfigurationTab({
+  assignment,
+  project,
+  speakers,
+  onSpeakersUpdate,
+  onProjectUpdate,
+}: ConfigurableTabProps) {
+  const [selectedLeaderIndex, setSelectedLeaderIndex] = useState<number | null>(null);
+  const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
+  const [dragOverLeaderIndex, setDragOverLeaderIndex] = useState<number | null>(null);
+  const [brandFilter, setBrandFilter] = useState("");
+  const [familyFilter, setFamilyFilter] = useState("");
+  const [modelFilter, setModelFilter] = useState("");
+  const [waysFilter, setWaysFilter] = useState<string | null>("any");
+  const [formEntry, setFormEntry] = useState<SpeakerLibraryEntry | "new" | null>(null);
+
+  const groups = computeSpeakerGroups(assignment.channels, speakers);
+  const selectedGroup = groups.find((g) => g.leaderChannelIndex === selectedLeaderIndex) ?? null;
+  const selectedLibraryEntry = speakers.find((s) => s.id === selectedLibraryId) ?? null;
+
+  async function refreshLibrary() {
+    const result = await commands.speakerLibraryList();
+    if (result.status === "ok") {
+      onSpeakersUpdate(result.data);
+    }
+  }
+
+  /** Runs channel patches one at a time (awaited, not concurrent) — a
+   * flood of concurrent per-channel calls was the root cause of a real
+   * race-condition bug in the Limiter panel's sliders earlier this session
+   * (Peak's floor getting stomped by a stale intermediate value). Only the
+   * final successful result is applied to `onProjectUpdate`, so Apply/Split
+   * don't flicker through intermediate partially-applied states. */
+  async function applyChannelPatches(
+    patches: { channelIndex: number; speakerLibraryId: string | null; wayIndex: number | null }[],
+  ) {
+    let latest: Project | null = null;
+    for (const patch of patches) {
+      const result = await commands.projectsSetChannelSpeaker(
+        project.id,
+        assignment.id,
+        patch.channelIndex,
+        patch.speakerLibraryId,
+        patch.wayIndex,
+      );
+      if (result.status !== "ok") break;
+      latest = result.data;
+    }
+    if (latest) {
+      onProjectUpdate(latest);
+    }
+  }
+
+  /** Writes `speaker` across as many consecutive channels as it has ways,
+   * starting at `group`'s leader — dropped directly onto a Physical
+   * Outputs row (native HTML5 drag-and-drop from the Library table,
+   * matching the old software), no separate Load/Apply step. Also clears
+   * any leftover channels from the group being dropped onto that fall
+   * outside the new speaker's span, so replacing e.g. a 3-way with a 1-way
+   * doesn't leave orphaned way indices behind. */
+  function handleDropOnGroup(group: SpeakerOutputGroup, speaker: SpeakerLibraryEntry) {
+    const wayCount = Math.max(1, speaker.ways.length);
+    const leader = group.leaderChannelIndex;
+    if (leader + wayCount > assignment.channels.length) return;
+    const newIndexes = Array.from({ length: wayCount }, (_, i) => leader + i);
+    const patches = newIndexes.map((channelIndex, i) => ({
+      channelIndex,
+      speakerLibraryId: speaker.id,
+      wayIndex: wayCount > 1 ? i : null,
+    }));
+    const leftover = group.channelIndexes.filter((idx) => !newIndexes.includes(idx));
+    const clearPatches = leftover.map((channelIndex) => ({ channelIndex, speakerLibraryId: null, wayIndex: null }));
+    applyChannelPatches([...patches, ...clearPatches]);
+  }
+
+  function handleDropEvent(group: SpeakerOutputGroup, e: React.DragEvent) {
+    setDragOverLeaderIndex(null);
+    const speakerId = e.dataTransfer.getData(SPEAKER_DRAG_MIME);
+    const speaker = speakers.find((s) => s.id === speakerId);
+    if (speaker) handleDropOnGroup(group, speaker);
+  }
+
+  function handleSplit() {
+    if (!selectedGroup) return;
+    ejectGroup(selectedGroup);
+  }
+
+  function ejectGroup(group: SpeakerOutputGroup) {
+    const patches = group.channelIndexes.map((channelIndex) => ({
+      channelIndex,
+      speakerLibraryId: null,
+      wayIndex: null,
+    }));
+    applyChannelPatches(patches);
+  }
+
+  async function handleBridgeToggle() {
+    if (!selectedGroup) return;
+    const leaderChannel = assignment.channels.find((c) => c.channelIndex === selectedGroup.leaderChannelIndex);
+    const result = await commands.projectsSetOutputBridge(
+      project.id,
+      assignment.id,
+      selectedGroup.leaderChannelIndex,
+      !(leaderChannel?.outputBridged ?? false),
+    );
+    if (result.status === "ok") {
+      onProjectUpdate(result.data);
+    }
+  }
+
+  async function handleArchive(id: string) {
+    const result = await commands.speakerLibraryArchive(id);
+    if (result.status === "ok") {
+      if (selectedLibraryId === id) setSelectedLibraryId(null);
+      refreshLibrary();
+    }
+  }
+
+  function handleFormSaved(entry: SpeakerLibraryEntry) {
+    onSpeakersUpdate(
+      speakers.some((s) => s.id === entry.id)
+        ? speakers.map((s) => (s.id === entry.id ? entry : s))
+        : [...speakers, entry],
+    );
+  }
+
+  const canBridge = Boolean(
+    selectedGroup &&
+      selectedGroup.channelIndexes.length === 1 &&
+      selectedGroup.leaderChannelIndex % 2 === 0 &&
+      assignment.channels.some((c) => c.channelIndex === selectedGroup.leaderChannelIndex + 1),
+  );
+  const isBridged = selectedGroup
+    ? (assignment.channels.find((c) => c.channelIndex === selectedGroup.leaderChannelIndex)?.outputBridged ?? false)
+    : false;
+  const assignedGroups = groups.filter((g) => g.speaker !== null);
+
+  const waysFilterOptions = [
+    { value: "any", label: "Any" },
+    { value: "1", label: "1" },
+    { value: "2", label: "2" },
+    { value: "3", label: "3" },
+    { value: "4", label: "4+" },
+  ];
+  const filteredSpeakers = speakers.filter((s) => {
+    if (s.archived) return false;
+    if (brandFilter && !s.brand.toLowerCase().includes(brandFilter.toLowerCase())) return false;
+    if (familyFilter && !(s.family ?? "").toLowerCase().includes(familyFilter.toLowerCase())) return false;
+    if (modelFilter && !s.model.toLowerCase().includes(modelFilter.toLowerCase())) return false;
+    if (waysFilter && waysFilter !== "any") {
+      const n = Number(waysFilter);
+      if (n === 4 ? s.ways.length < 4 : s.ways.length !== n) return false;
+    }
+    return true;
+  });
+
+  return (
+    <div className="flex h-full" style={{ gap: 16, padding: 24 }}>
+      <Stack gap="sm" h="100%" justify="center" className="flex-1" style={{ flexGrow: 2 }}>
+        <Text size="sm" fw={600}>
+          Physical Outputs
+        </Text>
+        <Stack gap={4} className="overflow-y-auto">
+          {assignment.channels.map((channel, i) => {
+            const group = groups.find((g) => g.channelIndexes.includes(channel.channelIndex))!;
+            const nextChannel = assignment.channels[i + 1];
+            const connectsToNext = Boolean(nextChannel && group.channelIndexes.includes(nextChannel.channelIndex));
+            return (
+              <Fragment key={channel.channelIndex}>
+                <PhysicalOutputChannelRow
+                  channel={channel}
+                  group={group}
+                  selected={selectedGroup?.leaderChannelIndex === group.leaderChannelIndex}
+                  dragOver={dragOverLeaderIndex === group.leaderChannelIndex}
+                  onSelect={() => setSelectedLeaderIndex(group.leaderChannelIndex)}
+                  onEject={() => ejectGroup(group)}
+                  onDragOver={() => setDragOverLeaderIndex(group.leaderChannelIndex)}
+                  onDragLeave={() => setDragOverLeaderIndex((current) => (current === group.leaderChannelIndex ? null : current))}
+                  onDrop={(e) => handleDropEvent(group, e)}
+                />
+                {connectsToNext && (
+                  <Center h={10}>
+                    <Link2 size={10} color="var(--mantine-color-dimmed)" />
+                  </Center>
+                )}
+              </Fragment>
+            );
+          })}
+        </Stack>
+      </Stack>
+
+      <Stack gap="lg" w={150} h="100%" justify="center" className="shrink-0">
+        <Stack gap="xs">
+          <Text size="sm" fw={600}>
+            Controls
+          </Text>
+          <Text size="xs" c="dimmed">
+            Drag a Library entry onto a Physical Outputs row to assign it.
+          </Text>
+          <Button size="sm" variant="default" disabled={!selectedGroup?.speaker} onClick={handleSplit}>
+            Split/Reset
+          </Button>
+          <div style={{ opacity: canBridge ? 1 : 0.45, pointerEvents: canBridge ? "auto" : "none" }}>
+            <BridgeToggle label="Bridge" bridged={isBridged} onClick={handleBridgeToggle} />
+          </div>
+        </Stack>
+
+        <Stack gap={2}>
+          <Text size="xs" fw={700} c="dimmed" tt="uppercase">
+            Status
+          </Text>
+          {assignedGroups.length === 0 ? (
+            <Text size="xs" c="dimmed">
+              No outputs assigned
+            </Text>
+          ) : (
+            assignedGroups.map((g) => (
+              <Group key={g.leaderChannelIndex} gap={6} justify="space-between">
+                <Text size="xs" fw={600}>
+                  Out{SPEAKER_OUTPUT_LETTER(g.leaderChannelIndex)}
+                </Text>
+                <Text size="xs" c="dimmed">
+                  NO CHECKSUM
+                </Text>
+              </Group>
+            ))
+          )}
+        </Stack>
+
+        <Stack gap="xs">
+          <Text size="xs" fw={700} c="dimmed" tt="uppercase">
+            Library Actions
+          </Text>
+          <Button size="xs" variant="default" onClick={() => setFormEntry("new")}>
+            Add
+          </Button>
+          <Button
+            size="xs"
+            variant="default"
+            disabled={!selectedLibraryEntry}
+            onClick={() => selectedLibraryEntry && setFormEntry(selectedLibraryEntry)}
+          >
+            Save
+          </Button>
+          <Button
+            size="xs"
+            variant="default"
+            color="red"
+            disabled={!selectedLibraryEntry}
+            onClick={() => selectedLibraryEntry && handleArchive(selectedLibraryEntry.id)}
+          >
+            Delete from library
+          </Button>
+          <Button size="xs" variant="default" onClick={refreshLibrary}>
+            Refresh
+          </Button>
+        </Stack>
+      </Stack>
+
+      <Stack gap="sm" className="flex-1 min-w-0" style={{ flexGrow: 3 }}>
+        <Text size="sm" fw={600}>
+          Library
+        </Text>
+        <Group gap="xs" grow>
+          <TextInput size="xs" placeholder="Filter brand" value={brandFilter} onChange={(e) => setBrandFilter(e.currentTarget.value)} />
+          <TextInput
+            size="xs"
+            placeholder="Filter family"
+            value={familyFilter}
+            onChange={(e) => setFamilyFilter(e.currentTarget.value)}
+          />
+          <TextInput size="xs" placeholder="Filter model" value={modelFilter} onChange={(e) => setModelFilter(e.currentTarget.value)} />
+          <Select size="xs" label="Ways°" data={waysFilterOptions} value={waysFilter} onChange={setWaysFilter} allowDeselect={false} />
+        </Group>
+        <Table.ScrollContainer minWidth={420} className="flex-1 overflow-y-auto">
+          <Table highlightOnHover verticalSpacing="xs" stickyHeader>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>Brand</Table.Th>
+                <Table.Th>Family</Table.Th>
+                <Table.Th>Model</Table.Th>
+                <Table.Th>Application</Table.Th>
+                <Table.Th>Ways</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {filteredSpeakers.map((speaker) => (
+                <Table.Tr
+                  key={speaker.id}
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData(SPEAKER_DRAG_MIME, speaker.id);
+                    e.dataTransfer.effectAllowed = "copy";
+                  }}
+                  onClick={() => setSelectedLibraryId(speaker.id)}
+                  className="cursor-pointer"
+                  style={{
+                    backgroundColor: selectedLibraryId === speaker.id ? "var(--mantine-color-amber-light)" : undefined,
+                    cursor: "grab",
+                  }}
+                >
+                  <Table.Td>{speaker.brand}</Table.Td>
+                  <Table.Td>{speaker.family ?? <Text component="span" c="dimmed">—</Text>}</Table.Td>
+                  <Table.Td>{speaker.model}</Table.Td>
+                  <Table.Td>{speaker.application ?? <Text component="span" c="dimmed">—</Text>}</Table.Td>
+                  <Table.Td>{speaker.ways.map((w) => w.label).join(", ") || <Text component="span" c="dimmed">—</Text>}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+      </Stack>
+
+      <SpeakerFormModal
+        opened={formEntry !== null}
+        onClose={() => setFormEntry(null)}
+        editEntry={formEntry === "new" ? null : formEntry}
+        onSaved={handleFormSaved}
+      />
+    </div>
   );
 }
 
@@ -1401,7 +2103,7 @@ function RoutingTab({
                         {String.fromCharCode(65 + channel.channelIndex)}
                       </Text>
                     </Group>
-                    <MockLevelMeter />
+                    <LevelMeter />
                   </Group>
                 </Fragment>
               );
@@ -1421,6 +2123,7 @@ const TAB_COMPONENTS: Record<
   routing: RoutingTab,
   input: InputTab,
   output: OutputTab,
+  speakerConfiguration: SpeakerConfigurationTab,
 };
 
 export function AmpConfigureView({
@@ -1433,6 +2136,7 @@ export function AmpConfigureView({
     assignment?.channels.length ?? DEFAULT_SCHEME_CHANNEL_COUNT;
   const [capability, setCapability] = useState<AmpCapability | null>(null);
   const [capabilityLoading, setCapabilityLoading] = useState(false);
+  const [speakers, setSpeakers] = useState<SpeakerLibraryEntry[]>([]);
 
   useEffect(() => {
     if (!ampModel) {
@@ -1454,6 +2158,14 @@ export function AmpConfigureView({
       cancelled = true;
     };
   }, [ampModel, assignment?.firmwareVersion]);
+
+  useEffect(() => {
+    commands.speakerLibraryList().then((result) => {
+      if (result.status === "ok") {
+        setSpeakers(result.data);
+      }
+    });
+  }, []);
 
   return (
     <Tabs defaultValue="scheme" orientation="vertical" className="h-full">
@@ -1510,6 +2222,8 @@ export function AmpConfigureView({
               assignment={assignment}
               project={project}
               capability={capability}
+              speakers={speakers}
+              onSpeakersUpdate={setSpeakers}
               onProjectUpdate={onProjectUpdate}
             />
           );

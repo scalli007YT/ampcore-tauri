@@ -98,6 +98,20 @@ export const commands = {
 	 */
 	projectsSetChannelName: (projectId: string, assignmentId: string, channelIndex: number, direction: EqDirection, name: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_name", { projectId, assignmentId, channelIndex, direction, name })),
 	/**
+	 *  Toggles a channel's output mute — Output tab. Mirrors
+	 *  `projects_set_channel_input_mute`.
+	 */
+	projectsSetChannelOutputMute: (projectId: string, assignmentId: string, channelIndex: number, muted: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_output_mute", { projectId, assignmentId, channelIndex, muted })),
+	/**
+	 *  Toggles mono-bridging for a channel pair — Output tab. `pair_leader_channel_index`
+	 *  must be even and have a following odd-indexed partner in the same
+	 *  assignment; the flag itself lives only on the leader (see
+	 *  `AmpChannel.output_bridged`'s doc comment).
+	 */
+	projectsSetOutputBridge: (projectId: string, assignmentId: string, pairLeaderChannelIndex: number, bridged: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_bridge", { projectId, assignmentId, pairLeaderChannelIndex, bridged })),
+	/**  Sets a channel's output power/impedance mode — Output tab. */
+	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
+	/**
 	 *  Resolves what can be configured, and within what ranges, for a given amp
 	 *  model + firmware version — purely offline, no live device involved.
 	 *  Nothing here is persisted independently: it's always recomputed from the
@@ -127,6 +141,8 @@ export const commands = {
 	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
 	liveControlStop: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_stop")),
 	liveControlListDevices: () => typedError<DiscoveredDevice[], AppError>(__TAURI_INVOKE("live_control_list_devices")),
+	liveControlGetTelemetry: () => typedError<DeviceTelemetry[], AppError>(__TAURI_INVOKE("live_control_get_telemetry")),
+	liveControlGetChannelConfig: () => typedError<DeviceChannelConfig[], AppError>(__TAURI_INVOKE("live_control_get_channel_config")),
 };
 
 /* Types */
@@ -270,6 +286,28 @@ export type AmpChannel = {
 	 *  default "Out{letter}" label. `None` uses the default.
 	 */
 	outputName?: string | null,
+	/**
+	 *  Whether this channel's output is muted — Output tab. Mirrors
+	 *  `input_muted`.
+	 */
+	outputMuted?: boolean,
+	/**
+	 *  Whether this channel is mono-bridged with the next channel (fixed
+	 *  adjacent pairing: `floor(channel_index / 2)` — (0,1), (2,3), …) —
+	 *  Output tab. **Only meaningful on an even-indexed (pair-leader)
+	 *  channel with a following odd-indexed partner**; ignored/never read
+	 *  on odd (follower) channels or on a leader with no partner (e.g. the
+	 *  trailing channel of an odd-count assignment). Ported from the old
+	 *  app's per-pair `BridgeReadback`, adapted to a plain persisted field
+	 *  since this is offline planning, not a live device readback.
+	 */
+	outputBridged?: boolean,
+	/**
+	 *  Output power/impedance mode — Output tab. Ranged by
+	 *  `AmpDspTopology.power_modes` (which modes the assigned model actually
+	 *  offers), though CVR currently offers all three unconditionally.
+	 */
+	powerMode?: PowerMode,
 };
 
 /**
@@ -417,6 +455,62 @@ export type AppError = {
 	message: string,
 };
 
+export type ChannelConfig = {
+	channelIndex: number,
+	gainIn: number,
+	delayInMs: number | null,
+	/**
+	 *  Sourced from the trailer's `muteIn` block, NOT any channel-body byte
+	 *  — see `channel_config_v118.rs`.
+	 */
+	inputMuted: boolean,
+	matrixCrosspoints: MatrixCrosspoint[],
+	inputEq: ChannelEq,
+	outputEq: ChannelEq,
+	outputTrimDb: number | null,
+	outputVolumeDb: number | null,
+	outputMuted: boolean,
+	delayOutMs: number | null,
+	outputPhaseInverted: boolean,
+	noiseGateEnabled: boolean,
+	limiter: Limiter,
+	firBypassed: boolean,
+	/**
+	 *  `None` when the raw byte doesn't match a confirmed mapping — no
+	 *  mapping table for this exists anywhere in this codebase yet, so an
+	 *  unconfirmed guess is never substituted (see `channel_config_v118.rs`).
+	 */
+	powerMode: PowerMode | null,
+	/**
+	 *  `None` when the raw source-selector byte doesn't match a confirmed
+	 *  mapping — same honesty rule as `power_mode`.
+	 */
+	source: ChannelSource | null,
+	inputName: string | null,
+	outputName: string | null,
+	analogTrimDb: number | null,
+	analogDelayMs: number | null,
+	danteTrimDb: number | null,
+	danteDelayMs: number | null,
+	aes3TrimDb: number | null,
+	aes3DelayMs: number | null,
+};
+
+export type ChannelConfigSnapshot = {
+	channels: ChannelConfig[],
+	/**
+	 *  `None` when the payload shape doesn't match the variant this parser
+	 *  implements — a known gap, not a guess (see `channel_config_v118.rs`).
+	 */
+	backupPriority: number[][] | null,
+	/**
+	 *  `None` for payload shapes this parser doesn't special-case (e.g. the
+	 *  reference's 2-channel `DP_1` layout) — known gap, not a guess.
+	 */
+	rotaryLocked: boolean | null,
+	receivedAt: number | null,
+};
+
 /**
  *  A full 10-band EQ chain (HP crossover + 8 parametric bands + LP
  *  crossover) for one channel, one direction. `AmpChannel` holds two of
@@ -489,6 +583,26 @@ export type CvrFirmwareCapability = {
 	noiseGateThreshold: boolean,
 	extendedDelay: boolean,
 	splitTrimVolume: boolean,
+};
+
+/**
+ *  Event/command payload pairing a device id with its latest channel-config
+ *  snapshot — the shape `live_channel_config:updated` emits and
+ *  `live_control_get_channel_config` returns a snapshot `Vec` of.
+ */
+export type DeviceChannelConfig = {
+	deviceId: string,
+	config: ChannelConfigSnapshot,
+};
+
+/**
+ *  Event/command payload pairing a device id with its latest telemetry —
+ *  the shape `live_telemetry:updated` emits and `live_control_get_telemetry`
+ *  returns a snapshot `Vec` of.
+ */
+export type DeviceTelemetry = {
+	deviceId: string,
+	telemetry: Telemetry,
 };
 
 export type DiscoveredDevice = {
@@ -762,6 +876,48 @@ export type SpeakerLibraryEntry_Serialize = {
 export type SpeakerWay = {
 	id: string,
 	label: string,
+};
+
+export type Telemetry = {
+	/**  5 readings: [0-3] = per-channel, [4] = PSU. */
+	temperatures: (number | null)[],
+	outputVoltages: (number | null)[],
+	outputCurrents: (number | null)[],
+	outputImpedance: (number | null)[],
+	/**
+	 *  dB relative to the device's rated RMS output voltage (`0dB` = rated
+	 *  max output) — `None` per-channel until `driver.rs` fills it in, since
+	 *  the wire-format adapters (`telemetry_v118`/`telemetry_v119`) only see
+	 *  raw packet bytes, not the device's firmware-version string needed to
+	 *  look up a real reference voltage (see
+	 *  `capability::cvr::rated_rms_voltage_from_firmware_string`). Stays
+	 *  `None` entirely for a model this app doesn't recognize — never a
+	 *  guessed/default reference.
+	 */
+	outputLevelDb: (number | null)[],
+	/**
+	 *  The real reference voltage `output_level_db` was computed against
+	 *  (`0dB` = this voltage) — device-wide, not per-channel. Exposed
+	 *  alongside `output_level_db` so the frontend can scale a meter against
+	 *  the *real* rated voltage instead of an approximate/generic constant.
+	 *  `None` under the same conditions as `output_level_db`.
+	 */
+	ratedRmsVoltage: number | null,
+	outputStates: number[],
+	inputVoltages: (number | null)[],
+	inputDbfs: (number | null)[],
+	limiters: (number | null)[],
+	inputStates: number[],
+	/**
+	 *  `None` on the (common) heartbeat body lengths that don't include this
+	 *  trailing field at all — only the 96-byte `WHOLE118_PLUS` variant
+	 *  carries it. Was previously a bare `f32` that silently defaulted to
+	 *  `0.0` on every shorter body, i.e. real-looking fake data for any
+	 *  device that isn't actually sending the 96-byte variant.
+	 */
+	fanVoltage: number | null,
+	machineMode: number,
+	receivedAt: number | null,
 };
 
 /* Tauri Specta runtime */

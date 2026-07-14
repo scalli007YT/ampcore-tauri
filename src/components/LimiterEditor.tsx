@@ -7,14 +7,18 @@ import {
   type Limiter,
   type Project,
 } from "../lib/bindings";
+import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
-const METER_SCALE_DB = [0, -8, -16, -24, -32, -40];
-/** Vertical analogue of `MockLevelMeter`'s gradient elsewhere in the app —
- * same decorative-only rationale (no live device data exists yet in this
- * offline-planning phase). */
-const METER_GRADIENT = "linear-gradient(to top, #0f6e5c 0%, #2f9e6a 35%, #d4c94a 65%, #e0793a 82%, #d64545 100%)";
+/** Scale for the Out dB/Limit dB columns — no live device data exists yet
+ * in this offline-planning phase, so both meters are always shown at their
+ * minimum (fully unlit), matching the old `MeterColumn`'s decorative-only
+ * rule. */
+const LIMITER_METER_MARKS: VuMeterMark[] = [0, -8, -16, -24, -32, -40].map((value) => ({
+  value,
+  label: String(value),
+}));
 
 /** `AmpChannel.limiter` is typed optional in TS (specta marks any
  * `#[serde(default = ...)]` field optional) even though the backend's
@@ -48,23 +52,30 @@ function voltageForPowerWatts(watts: number, ohms: number): number {
   return Math.sqrt(Math.max(0, watts) * ohms);
 }
 
-/** The Peak threshold's floor: at least double the RMS threshold voltage,
+/** The Peak threshold's floor: at least double the RMS threshold's *power*,
  * capped at `peakMax` so the floor itself never exceeds what the model/range
- * allows. Shared by `patch()`'s async enforcement and the sliders'/fields'
- * `min` props so dragging or typing can't dip below the floor in the first
- * place, rather than only correcting it after the fact. */
+ * allows. Since power scales with voltage squared (`P = V^2 / R`), doubling
+ * power only requires the peak voltage to be `√2×` the RMS voltage, not
+ * `2×` — `Vp = Vrms·√2` gives `Vp^2/R = 2·Vrms^2/R`, i.e. exactly double
+ * the power, at any `R` (the load cancels out of the ratio). Matches the
+ * original reference software's actual behavior (e.g. 63.25 Vrms / 500 W ↔
+ * 89.44 Vpeak / 1000 W — a √2 voltage ratio, 2x power ratio) — an earlier
+ * version of this floor used a literal 2x *voltage* multiplier, which
+ * produces 4x power, not 2x. Shared by `patch()`'s async enforcement and
+ * the sliders'/fields' `min` props so dragging or typing can't dip below
+ * the floor in the first place, rather than only correcting it after the
+ * fact. */
 function requiredPeakFloor(rmsVoltage: number, peakMax: number): number {
-  return Math.min(rmsVoltage * 2, peakMax);
+  return Math.min(rmsVoltage * PEAK_HEADROOM_FACTOR, peakMax);
 }
 
 /** Peak voltage capability assumed relative to an amp's rated RMS voltage —
  * used to auto-derive the Peak stage's max threshold from the same
- * per-model rating that caps the RMS stage. Set to 2 (not the sine-wave
- * √2 crest factor) to stay consistent with the "Peak threshold must be at
- * least double the RMS threshold" floor enforced in `patch()`: if this were
- * smaller than 2, the floor would become unreachable once RMS threshold
- * rises above half of `ratedRmsVoltage`. */
-const PEAK_HEADROOM_FACTOR = 2;
+ * per-model rating that caps the RMS stage, and shared by `requiredPeakFloor`
+ * for the "Peak power must be at least double RMS power" floor (see its own
+ * doc comment for why √2 — not 2 — is the correct voltage-domain factor for
+ * a power-domain doubling). */
+const PEAK_HEADROOM_FACTOR = Math.SQRT2;
 
 /** Threshold sliders operate in the Watt domain (not Volts) so dragging
  * snaps to whole 10 W steps — a voltage-domain step would translate to
@@ -103,12 +114,12 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
     peakHoldMs?: number;
     peakReleaseMs?: number;
   }) {
-    // Peak threshold must always be at least double the RMS threshold
-    // (voltage, not Watts — doubling voltage quadruples power), enforced
-    // centrally here so it holds regardless of which control (slider,
-    // Threshold field, or the interchangeable Prms/Ppeak Wattage fields)
-    // triggered the change. Editing RMS upward bumps Peak up to the new
-    // floor if it's now too low; editing Peak below the current floor
+    // Peak threshold must always be at least double the RMS threshold's
+    // *power* (a √2 voltage ratio — see `requiredPeakFloor`'s doc comment),
+    // enforced centrally here so it holds regardless of which control
+    // (slider, Threshold field, or the interchangeable Prms/Ppeak Wattage
+    // fields) triggered the change. Editing RMS upward bumps Peak up to the
+    // new floor if it's now too low; editing Peak below the current floor
     // clamps it back up to the floor instead of silently rejecting it.
     const effectiveRms = fields.rmsThresholdVrms ?? rmsThresholdVrms;
     const requiredPeak = requiredPeakFloor(effectiveRms, peakThresholdMax);
@@ -125,13 +136,6 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
       peakHoldMs: fields.peakHoldMs ?? null,
       peakReleaseMs: fields.peakReleaseMs ?? null,
     });
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
-  }
-
-  async function handleOhmsChange(value: number) {
-    const result = await commands.projectsSetChannelOhms(project.id, assignment.id, channelIndex, value);
     if (result.status === "ok") {
       onProjectUpdate(result.data);
     }
@@ -160,33 +164,81 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
   // after-the-fact correction in `patch()`.
   const peakThresholdMin = Math.max(peakRange.min ?? 0, requiredPeakFloor(rmsThresholdVrms, peakThresholdMax));
 
+  // Mono-bridging (fixed adjacent pairing: floor(channel/2), e.g. (0,1),
+  // (2,3)…) — Output tab. `output_bridged` lives only on the pair's leader
+  // (even-indexed) channel; ported from the old app's bridging, where a
+  // bridged pair's displayed threshold voltage/power doubles
+  // (`bridgeVoltageMultiplier`) and the Load uses only the leader's ohms.
+  // The *raw* stored threshold never changes across a bridge toggle — only
+  // this display/edit conversion layer does, so un-bridging always reveals
+  // the same per-channel value that was there before.
+  const pairLeaderIndex = channelIndex - (channelIndex % 2);
+  const pairFollowerIndex = pairLeaderIndex + 1;
+  const leaderChannel = assignment.channels.find((c) => c.channelIndex === pairLeaderIndex);
+  const hasFollower = assignment.channels.some((c) => c.channelIndex === pairFollowerIndex);
+  const isBridged = hasFollower && (leaderChannel?.outputBridged ?? false);
+  const voltageMultiplier = isBridged ? 2 : 1;
+  const effectiveOhms = isBridged ? (leaderChannel?.ohms ?? 8) : ohms;
+  const partnerIndex = channelIndex === pairLeaderIndex ? pairFollowerIndex : pairLeaderIndex;
+  const partnerLetter = String.fromCharCode(65 + partnerIndex);
+
+  function toDisplay(raw: number) {
+    return raw * voltageMultiplier;
+  }
+  function fromDisplay(display: number) {
+    return display / voltageMultiplier;
+  }
+
+  const rmsThresholdVrmsDisplay = toDisplay(rmsThresholdVrms);
+  const peakThresholdVpDisplay = toDisplay(peakThresholdVp);
+  const rmsThresholdMaxDisplay = toDisplay(rmsThresholdMax);
+  const peakThresholdMaxDisplay = toDisplay(peakThresholdMax);
+  const peakThresholdMinDisplay = toDisplay(peakThresholdMin);
+  const rmsRangeMinDisplay = rmsRange.min != null ? toDisplay(rmsRange.min) : null;
+  const peakRangeMinDisplay = peakRange.min != null ? toDisplay(peakRange.min) : null;
+
+  async function handleOhmsChange(value: number) {
+    const targetChannelIndex = isBridged ? pairLeaderIndex : channelIndex;
+    const result = await commands.projectsSetChannelOhms(project.id, assignment.id, targetChannelIndex, value);
+    if (result.status === "ok") {
+      onProjectUpdate(result.data);
+    }
+  }
+
   return (
     <Stack gap="md" p="md" align="center" style={{ maxWidth: EDITOR_MAX_WIDTH, margin: "0 auto" }}>
+      {isBridged && (
+        <Text size="xs" fw={700} c="green" ta="center">
+          Bridged with Out{partnerLetter} — showing combined values
+        </Text>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, width: "100%" }}>
         <ThresholdSliderColumn
           label="RMS"
-          value={rmsPowerWatts(rmsThresholdVrms, ohms)}
-          min={rmsRange.min != null ? rmsPowerWatts(rmsRange.min, ohms) : 0}
-          max={rmsPowerWatts(rmsThresholdMax, ohms)}
+          value={rmsPowerWatts(rmsThresholdVrmsDisplay, effectiveOhms)}
+          min={rmsRangeMinDisplay != null ? rmsPowerWatts(rmsRangeMinDisplay, effectiveOhms) : 0}
+          max={rmsPowerWatts(rmsThresholdMaxDisplay, effectiveOhms)}
           step={SLIDER_WATT_STEP}
           disabled={!limiter.rms.enabled}
-          onChangeEnd={(watts) =>
-            patch({ rmsThresholdVrms: Math.min(voltageForPowerWatts(watts, ohms), rmsThresholdMax) })
-          }
+          onChangeEnd={(watts) => {
+            const rawVoltage = fromDisplay(voltageForPowerWatts(watts, effectiveOhms));
+            patch({ rmsThresholdVrms: Math.min(rawVoltage, rmsThresholdMax) });
+          }}
         />
-        <MeterColumn label="Out dB" gradient valueText="---" />
-        <MeterColumn label="Limit dB" valueText="0.0 dB" />
+        <LimiterMeterColumn label="Out dB" gradient valueText="---" />
+        <LimiterMeterColumn label="Limit dB" valueText="0.0 dB" />
         <ThresholdSliderColumn
           label="Peak"
-          value={peakPowerWatts(peakThresholdVp, ohms)}
-          min={peakRange.min != null ? peakPowerWatts(peakRange.min, ohms) : 0}
-          max={peakPowerWatts(peakThresholdMax, ohms)}
-          floor={peakPowerWatts(peakThresholdMin, ohms)}
+          value={peakPowerWatts(peakThresholdVpDisplay, effectiveOhms)}
+          min={peakRangeMinDisplay != null ? peakPowerWatts(peakRangeMinDisplay, effectiveOhms) : 0}
+          max={peakPowerWatts(peakThresholdMaxDisplay, effectiveOhms)}
+          floor={peakPowerWatts(peakThresholdMinDisplay, effectiveOhms)}
           step={SLIDER_WATT_STEP}
           disabled={!limiter.peak.enabled}
-          onChangeEnd={(watts) =>
-            patch({ peakThresholdVp: Math.min(voltageForPowerWatts(watts, ohms), peakThresholdMax) })
-          }
+          onChangeEnd={(watts) => {
+            const rawVoltage = fromDisplay(voltageForPowerWatts(watts, effectiveOhms));
+            patch({ peakThresholdVp: Math.min(rawVoltage, peakThresholdMax) });
+          }}
         />
       </div>
 
@@ -197,9 +249,9 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
             size="sm"
             label="Load"
             suffix=" Ω"
-            min={0.5}
+            min={isBridged ? 4 : 0.5}
             step={0.5}
-            value={ohms}
+            value={effectiveOhms}
             onChange={(value) => typeof value === "number" && handleOhmsChange(value)}
           />
         </div>
@@ -213,21 +265,24 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
           <LimiterFieldRow
             label="Threshold"
             unit="Vrms"
-            value={rmsThresholdVrms}
-            min={rmsRange.min ?? undefined}
-            max={rmsThresholdMax}
+            value={rmsThresholdVrmsDisplay}
+            min={rmsRangeMinDisplay ?? undefined}
+            max={rmsThresholdMaxDisplay}
             disabled={!limiter.rms.enabled}
-            onChange={(value) => patch({ rmsThresholdVrms: value })}
+            onChange={(value) => patch({ rmsThresholdVrms: Math.min(fromDisplay(value), rmsThresholdMax) })}
           />
           <LimiterFieldRow
             label="Prms"
             unit="W"
-            value={rmsPowerWatts(rmsThresholdVrms, ohms)}
-            min={rmsRange.min != null ? rmsPowerWatts(rmsRange.min, ohms) : undefined}
-            max={rmsPowerWatts(rmsThresholdMax, ohms)}
+            value={rmsPowerWatts(rmsThresholdVrmsDisplay, effectiveOhms)}
+            min={rmsRangeMinDisplay != null ? rmsPowerWatts(rmsRangeMinDisplay, effectiveOhms) : undefined}
+            max={rmsPowerWatts(rmsThresholdMaxDisplay, effectiveOhms)}
             disabled={!limiter.rms.enabled}
             integer
-            onChange={(watts) => patch({ rmsThresholdVrms: Math.min(voltageForPowerWatts(watts, ohms), rmsThresholdMax) })}
+            onChange={(watts) => {
+              const rawVoltage = fromDisplay(voltageForPowerWatts(watts, effectiveOhms));
+              patch({ rmsThresholdVrms: Math.min(rawVoltage, rmsThresholdMax) });
+            }}
           />
           <LimiterFieldRow
             label="Attack"
@@ -253,21 +308,24 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
           <LimiterFieldRow
             label="Threshold"
             unit="Vpeak"
-            value={peakThresholdVp}
-            min={peakThresholdMin}
-            max={peakThresholdMax}
+            value={peakThresholdVpDisplay}
+            min={peakThresholdMinDisplay}
+            max={peakThresholdMaxDisplay}
             disabled={!limiter.peak.enabled}
-            onChange={(value) => patch({ peakThresholdVp: value })}
+            onChange={(value) => patch({ peakThresholdVp: Math.min(fromDisplay(value), peakThresholdMax) })}
           />
           <LimiterFieldRow
             label="Ppeak"
             unit="W"
-            value={peakPowerWatts(peakThresholdVp, ohms)}
-            min={peakPowerWatts(peakThresholdMin, ohms)}
-            max={peakPowerWatts(peakThresholdMax, ohms)}
+            value={peakPowerWatts(peakThresholdVpDisplay, effectiveOhms)}
+            min={peakPowerWatts(peakThresholdMinDisplay, effectiveOhms)}
+            max={peakPowerWatts(peakThresholdMaxDisplay, effectiveOhms)}
             disabled={!limiter.peak.enabled}
             integer
-            onChange={(watts) => patch({ peakThresholdVp: Math.min(voltageForPowerWatts(watts, ohms), peakThresholdMax) })}
+            onChange={(watts) => {
+              const rawVoltage = fromDisplay(voltageForPowerWatts(watts, effectiveOhms));
+              patch({ peakThresholdVp: Math.min(rawVoltage, peakThresholdMax) });
+            }}
           />
           <LimiterFieldRow
             label="Hold"
@@ -361,34 +419,27 @@ function ThresholdSliderColumn({
   );
 }
 
-/** Decorative vertical meter — `Out dB` shows a static gradient with no
- * marker line (no live device connected in this offline-planning phase);
- * `Limit dB` (gain reduction) shows a plain, unfilled track. Purely visual,
- * mirrors `MockLevelMeter`'s rationale elsewhere in this file. */
-function MeterColumn({ label, gradient, valueText }: { label: string; gradient?: boolean; valueText: string }) {
+/** `Out dB`/`Limit dB` columns — `Out dB` uses the shared level gradient,
+ * `Limit dB` (gain reduction) is a plain flat track. Both always show
+ * `value` at the scale's max (fully unlit/no reduction) since no live
+ * device data exists in this offline-planning phase. */
+function LimiterMeterColumn({ label, gradient, valueText }: { label: string; gradient?: boolean; valueText: string }) {
   return (
     <Stack gap={8} align="center">
       <Text size="sm" fw={700} c="dimmed" tt="uppercase">
         {label}
       </Text>
-      <Group gap={6} wrap="nowrap" align="stretch" h={SLIDER_HEIGHT}>
-        <div
-          className="rounded-[var(--mantine-radius-sm)]"
-          style={{
-            width: 22,
-            height: "100%",
-            background: gradient ? METER_GRADIENT : "var(--mantine-color-dark-6)",
-            opacity: gradient ? 0.25 : 1,
-          }}
-        />
-        <Stack gap={0} justify="space-between" h="100%" py={2}>
-          {METER_SCALE_DB.map((db) => (
-            <Text key={db} fz={9} c="dimmed">
-              {db}
-            </Text>
-          ))}
-        </Stack>
-      </Group>
+      <VuMeter
+        orientation="vertical"
+        min={-40}
+        max={0}
+        value={0}
+        gradient={gradient ? DEFAULT_LEVEL_GRADIENT : undefined}
+        backdropOpacity={gradient ? 0.25 : 1}
+        thickness={22}
+        size={SLIDER_HEIGHT}
+        marks={LIMITER_METER_MARKS}
+      />
       <Text size="xs" c="dimmed">
         {valueText}
       </Text>

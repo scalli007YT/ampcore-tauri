@@ -1,10 +1,14 @@
 import { useState } from "react";
 import { Badge, Card, Center, Divider, Group, Loader, ScrollArea, Stack, Text } from "@mantine/core";
-import { AmpConfigureView } from "./AmpConfigureView";
+import { DeviceTelemetryPanel } from "./DeviceTelemetryPanel";
+import { useLiveChannelConfig } from "../hooks/useLiveChannelConfig";
 import { useLiveDevices } from "../hooks/useLiveDevices";
+import { useLiveTelemetry } from "../hooks/useLiveTelemetry";
 
 export function LiveControlView() {
   const { devices, ready } = useLiveDevices();
+  const telemetryById = useLiveTelemetry();
+  const channelConfigById = useLiveChannelConfig();
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   if (!ready) {
@@ -68,7 +72,11 @@ export function LiveControlView() {
 
       <div className="h-full min-w-0 flex-1">
         {selectedDevice ? (
-          <AmpConfigureView />
+          <DeviceTelemetryPanel
+            device={selectedDevice}
+            telemetry={telemetryById[selectedDevice.id]}
+            channelConfig={channelConfigById[selectedDevice.id]}
+          />
         ) : (
           <Center h="100%">
             <Text c="dimmed">Select an amp from the list</Text>
