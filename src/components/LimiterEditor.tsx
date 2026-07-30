@@ -1,12 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Divider, Group, NumberInput, Slider, Stack, Text } from "@mantine/core";
-import {
-  commands,
-  type AmpAssignment,
-  type AmpCapability_Serialize as AmpCapability,
-  type Limiter,
-  type Project,
-} from "../lib/bindings";
+import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type Limiter } from "../lib/bindings";
+import type { ConfigureActions, ConfigureCapabilities } from "../lib/configureActions";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 
 const EDITOR_MAX_WIDTH = 640;
@@ -84,10 +79,10 @@ const SLIDER_WATT_STEP = 10;
 
 interface LimiterEditorProps {
   assignment: AmpAssignment;
-  project: Project;
   channelIndex: number;
   capability: AmpCapability;
-  onProjectUpdate: (project: Project) => void;
+  actions: ConfigureActions;
+  capabilities: ConfigureCapabilities;
 }
 
 /** Output protection editor for one channel — independent RMS and Peak
@@ -98,7 +93,7 @@ interface LimiterEditorProps {
  * meters are display-only, computed from the channel's existing `ohms`
  * field — never persisted, since no live device data exists in this
  * offline-planning phase. */
-export function LimiterEditor({ assignment, project, channelIndex, capability, onProjectUpdate }: LimiterEditorProps) {
+export function LimiterEditor({ assignment, channelIndex, capability, actions, capabilities }: LimiterEditorProps) {
   const channel = assignment.channels.find((c) => c.channelIndex === channelIndex) ?? assignment.channels[0];
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
   const ohms = channel.ohms ?? 8;
@@ -114,6 +109,7 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
     peakHoldMs?: number;
     peakReleaseMs?: number;
   }) {
+    if (!actions.setChannelLimiter) return;
     // Peak threshold must always be at least double the RMS threshold's
     // *power* (a √2 voltage ratio — see `requiredPeakFloor`'s doc comment),
     // enforced centrally here so it holds regardless of which control
@@ -126,7 +122,7 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
     const effectivePeak = Math.max(fields.peakThresholdVp ?? peakThresholdVp, requiredPeak);
     const peakNeedsUpdate = fields.peakThresholdVp !== undefined || effectivePeak !== peakThresholdVp;
 
-    const result = await commands.projectsSetChannelLimiter(project.id, assignment.id, channelIndex, {
+    await actions.setChannelLimiter(channelIndex, {
       rmsEnabled: fields.rmsEnabled ?? null,
       rmsThresholdVrms: fields.rmsThresholdVrms ?? null,
       rmsAttackMs: fields.rmsAttackMs ?? null,
@@ -136,9 +132,6 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
       peakHoldMs: fields.peakHoldMs ?? null,
       peakReleaseMs: fields.peakReleaseMs ?? null,
     });
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
   }
 
   const rmsThresholdVrms = limiter.rms.thresholdVrms ?? 0;
@@ -198,11 +191,9 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
   const peakRangeMinDisplay = peakRange.min != null ? toDisplay(peakRange.min) : null;
 
   async function handleOhmsChange(value: number) {
+    if (!actions.setChannelOhms) return;
     const targetChannelIndex = isBridged ? pairLeaderIndex : channelIndex;
-    const result = await commands.projectsSetChannelOhms(project.id, assignment.id, targetChannelIndex, value);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    await actions.setChannelOhms(targetChannelIndex, value);
   }
 
   return (
@@ -252,6 +243,7 @@ export function LimiterEditor({ assignment, project, channelIndex, capability, o
             min={isBridged ? 4 : 0.5}
             step={0.5}
             value={effectiveOhms}
+            disabled={!capabilities.ohmsEditable}
             onChange={(value) => typeof value === "number" && handleOhmsChange(value)}
           />
         </div>

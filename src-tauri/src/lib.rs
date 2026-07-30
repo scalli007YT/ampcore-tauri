@@ -8,9 +8,12 @@ use tauri_specta::{collect_commands, Builder};
 
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
 use commands::capability::amp_capability_resolve;
+use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
 use commands::live_control::{
-    live_control_get_channel_config, live_control_get_telemetry, live_control_list_devices, live_control_start,
-    live_control_stop,
+    live_control_get_channel_config, live_control_get_telemetry, live_control_list_devices,
+    live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
+    live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
+    live_control_set_eq_band, live_control_set_output_mute, live_control_start, live_control_stop,
 };
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
@@ -19,10 +22,11 @@ use commands::projects::{
     projects_set_channel_noise_gate, projects_set_channel_ohms, projects_set_channel_output,
     projects_set_channel_output_mute, projects_set_channel_phase_invert, projects_set_channel_power_mode,
     projects_set_channel_source, projects_set_channel_speaker, projects_set_crossover_slot, projects_set_eq_band,
-    projects_set_matrix_crosspoint, projects_set_output_bridge, projects_update,
+    projects_set_matrix_crosspoint, projects_set_output_bridge, projects_set_output_join, projects_update,
 };
 use commands::speaker_library::{
-    speaker_library_archive, speaker_library_create, speaker_library_list, speaker_library_update,
+    speaker_library_archive, speaker_library_create, speaker_library_delete, speaker_library_list,
+    speaker_library_update,
 };
 use data::store::ProjectDataState;
 use live::state::LiveDeviceState;
@@ -62,12 +66,14 @@ pub fn run() {
             projects_set_channel_name,
             projects_set_channel_output_mute,
             projects_set_output_bridge,
+            projects_set_output_join,
             projects_set_channel_power_mode,
             amp_capability_resolve,
             speaker_library_list,
             speaker_library_create,
             speaker_library_update,
             speaker_library_archive,
+            speaker_library_delete,
             amp_models_list,
             amp_models_create,
             amp_models_update,
@@ -77,6 +83,17 @@ pub fn run() {
             live_control_list_devices,
             live_control_get_telemetry,
             live_control_get_channel_config,
+            live_control_set_output_mute,
+            live_control_set_channel_output,
+            live_control_set_channel_delay_in,
+            live_control_set_channel_input_mute,
+            live_control_set_channel_phase_invert,
+            live_control_set_channel_power_mode,
+            live_control_set_eq_band,
+            live_control_set_crossover_slot,
+            device_model_link_auto_match,
+            device_model_link_set,
+            device_model_link_get_all,
         ]);
 
     #[cfg(debug_assertions)]

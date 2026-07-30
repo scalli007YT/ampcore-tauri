@@ -26,14 +26,19 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 const OFFLINE_TIMEOUT_MS: f64 = 8_000.0;
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// FC=27 is far heavier than a 6-byte heartbeat (~2.4KB for a 4-channel amp,
-/// requiring fragmentation + reassembly + a full round trip) and DSP config
-/// is quasi-static at planning time compared to continuously-varying
-/// voltage/current, so sub-second freshness has no value here. Uniform
-/// across all devices — this backend has no notion of "which device the UI
-/// has selected" the way the reference app's dual-tier (250ms/2000ms)
-/// polling does, and plumbing that through would be new coupling not
-/// justified this phase.
-const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// requiring fragmentation + reassembly + a full round trip), but the
+/// config-poll tick's own `has_pending` check (see the tick handler below)
+/// already skips issuing a new request per device while its previous one is
+/// still in flight — so this interval is just an upper bound on cadence, not
+/// a request-pileup risk, however low it's set. 200ms is close to (slightly
+/// under) the reference app's own fast tier for its actively-viewed device
+/// (250ms, see below) — the fastest cadence known to work against real
+/// hardware, chosen so a write (e.g. `live_control_set_output_mute`) is
+/// reflected back to the UI quickly. Uniform across all devices — this
+/// backend has no notion of "which device the UI has selected" the way the
+/// reference app's dual-tier (250ms/2000ms) polling does, and plumbing that
+/// through would be new coupling not justified this phase.
+const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Drives the request registry's settle/hard-timeout checks — finer than
 /// `SETTLE_MS` (20ms) so a settled request resolves promptly.
 const DEADLINE_TICK_INTERVAL: Duration = Duration::from_millis(10);

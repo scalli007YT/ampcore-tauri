@@ -12,8 +12,8 @@ interface TitleBarProps {
   onBackToStart?: () => void;
   onOpenSettings: () => void;
   /** Rendered centered in the title bar — e.g. the Workspace/Operator
-   * View/Speaker Library tabs when a project is open, saving the vertical
-   * space a separate tab-bar row would otherwise cost. */
+   * View tabs when a project is open, saving the vertical space a
+   * separate tab-bar row would otherwise cost. */
   centerContent?: ReactNode;
 }
 

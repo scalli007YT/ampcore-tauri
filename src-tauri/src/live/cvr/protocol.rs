@@ -1,16 +1,19 @@
 //! CVR Pro Audio UDP control protocol, ground-truthed against a working
 //! reverse-engineered reference implementation (firmware v1.1.8 only).
-//! Discovery (FC=0 BASIC_INFO), heartbeat (FC=6), and multi-fragment
-//! request/response (see `request.rs`, used by FC=27 SYNC_DATA) are covered;
-//! per-parameter write commands remain out of scope for this pass.
+//! Discovery (FC=0 BASIC_INFO), heartbeat (FC=6), multi-fragment
+//! request/response (see `request.rs`, used by FC=27 SYNC_DATA), and
+//! per-parameter write commands (see `write.rs`, built on
+//! `build_control_packet` below) are all covered.
 //!
 //! Firmware 1.1.9 is known to differ from 1.1.8 in byte offsets *and*
 //! function codes for at least some commands, but no 1.1.9 reference/spec
-//! exists yet — `detect_firmware_family` below only identifies which family
-//! a device is running (for display), it does not branch parsing behavior.
-//! BASIC_INFO parsing already handles multiple body-length variants
-//! generically and has been verified against real 1.1.8 hardware; whether it
-//! also holds unmodified for 1.1.9 remains unconfirmed.
+//! exists yet — `detect_firmware_family` below buckets a device into the
+//! V118 or V119 wire adapter (used by `channel_config.rs`, `telemetry.rs`,
+//! and `write.rs` to pick which firmware-specific parser/encoder to use),
+//! not just for display. BASIC_INFO parsing already handles multiple
+//! body-length variants generically and has been verified against real
+//! 1.1.8 hardware; whether it also holds unmodified for 1.1.9 remains
+//! unconfirmed.
 
 use std::net::Ipv4Addr;
 
@@ -47,16 +50,26 @@ pub enum CvrFirmwareFamily {
     Unknown,
 }
 
-/// Firmware family is embedded as a "118"/"119" substring somewhere in the
-/// BASIC_INFO version string (e.g. "42404B06-006118-DSP-2004" -> V118) —
-/// confirmed against real hardware, not a fixed-offset field.
+/// `firmware_family` is a *wire-adapter bucket*, not a literal version claim.
+/// Delegates to `capability::cvr::extract_vnum` (its own doc comment already
+/// invites this: "the future live driver can reuse this exact function...
+/// do not duplicate this parsing there") rather than a narrow ad-hoc
+/// substring check, so every CVR-generation firmware gets bucketed instead
+/// of silently dropped. Any detected vNum below 119 — including 116
+/// (`VNUM_EXTENDED_EQ`) and 117 (`VNUM_PHONIC_VARIANT`, confirmed real: the
+/// vendor reference has `FlowChart\PHONIC\...117.xaml` files, i.e.
+/// Phonic-branded amps run CVR firmware v117) — routes to the V118 adapter
+/// as an honest best-effort, the same caveat already applied to
+/// `channel_config_v119.rs`/`telemetry_v119.rs` reusing v118's parser. The
+/// precise raw string is untouched and still fully visible via
+/// `DiscoveredDevice.firmware_version` — this only changes which adapter
+/// file handles a device, not what's displayed.
 pub fn detect_firmware_family(version_string: &str) -> CvrFirmwareFamily {
-    if version_string.contains("119") {
-        CvrFirmwareFamily::V119
-    } else if version_string.contains("118") {
-        CvrFirmwareFamily::V118
-    } else {
-        CvrFirmwareFamily::Unknown
+    use crate::data::capability::cvr::{extract_vnum, VNUM_119};
+    match extract_vnum(version_string) {
+        Some(v) if v >= VNUM_119 => CvrFirmwareFamily::V119,
+        Some(_) => CvrFirmwareFamily::V118,
+        None => CvrFirmwareFamily::Unknown,
     }
 }
 
@@ -144,6 +157,25 @@ pub fn calc_check_code(inner_frame: &[u8]) -> [u8; CHECKSUM_LEN] {
 /// Full packet = NetworkHeader(10) + StructHeader(10) + body + Checksum(3).
 pub fn build_protocol_packet(function_code: u8, status_code: u8, chx: u8, body: &[u8]) -> Vec<u8> {
     let struct_header = build_struct_header(function_code, status_code, chx, 0, 0, 0);
+    let mut inner = Vec::with_capacity(STRUCT_HEADER_LEN + body.len());
+    inner.extend_from_slice(&struct_header);
+    inner.extend_from_slice(body);
+    let checksum = calc_check_code(&inner);
+    inner.extend_from_slice(&checksum);
+    let network_header = build_network_data_header(inner.len() as u16, 0, 0, 1, 1);
+    let mut packet = Vec::with_capacity(NETWORK_HEADER_LEN + inner.len());
+    packet.extend_from_slice(&network_header);
+    packet.extend_from_slice(&inner);
+    packet
+}
+
+/// Full packet for a write/control command — the write-side counterpart to
+/// `build_protocol_packet` (which hardcodes `segment=link=in_out_flag=0` for
+/// the read-only queries it serves). `status_code` is always `1` here,
+/// matching the reference implementation's write/control convention (see
+/// `write.rs`).
+pub fn build_control_packet(function_code: u8, chx: u8, segment: u8, link: i32, in_out_flag: u8, body: &[u8]) -> Vec<u8> {
+    let struct_header = build_struct_header(function_code, 1, chx, segment, link, in_out_flag);
     let mut inner = Vec::with_capacity(STRUCT_HEADER_LEN + body.len());
     inner.extend_from_slice(&struct_header);
     inner.extend_from_slice(body);

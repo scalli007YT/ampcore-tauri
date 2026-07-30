@@ -109,6 +109,20 @@ export const commands = {
 	 *  `AmpChannel.output_bridged`'s doc comment).
 	 */
 	projectsSetOutputBridge: (projectId: string, assignmentId: string, pairLeaderChannelIndex: number, bridged: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_bridge", { projectId, assignmentId, pairLeaderChannelIndex, bridged })),
+	/**
+	 *  Sets (or clears) explicit visual grouping for a run of output channels —
+	 *  Speaker Configuration tab's Join/Split. Purely a grouping toggle; does
+	 *  not touch `speaker_library_id`/`way_index` (see `AmpChannel.join_group_id`'s
+	 *  doc comment) — callers that also want to wipe assignments do so via the
+	 *  existing `projects_set_channel_speaker` path first. When `joined` is
+	 *  true, `channel_indexes` must be at least 2, distinct, and contiguous
+	 *  (sorted, each exactly one more than the last); all listed channels get a
+	 *  freshly generated shared `join_group_id`. When `joined` is false,
+	 *  `join_group_id` is simply cleared on each listed channel — no
+	 *  contiguity requirement, so Split can pass a group's existing
+	 *  `channelIndexes` as-is.
+	 */
+	projectsSetOutputJoin: (projectId: string, assignmentId: string, channelIndexes: number[], joined: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_join", { projectId, assignmentId, channelIndexes, joined })),
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
@@ -127,6 +141,18 @@ export const commands = {
 	 *  references but are hidden from pickers for new assignments.
 	 */
 	speakerLibraryArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_archive", { id })),
+	/**
+	 *  Hard-delete — unlike `speaker_library_archive` (soft-delete, kept for
+	 *  its existing "hide from picker, stay resolvable for old references"
+	 *  use case), this permanently removes the entry and cascades: clears
+	 *  `speaker_library_id`/`way_index` on every channel, in every project,
+	 *  that references it. `join_group_id` is deliberately left untouched —
+	 *  Join grouping is independent of what's assigned, so a group a deleted
+	 *  speaker belonged to stays joined (now showing "No speaker" on those
+	 *  rows) rather than being silently un-joined. Saves only the projects
+	 *  actually touched, matching `reconcile_project_matrix_sizes`'s pattern.
+	 */
+	speakerLibraryDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_delete", { id })),
 	ampModelsList: () => typedError<AmpModelCatalogEntry_Serialize[], AppError>(__TAURI_INVOKE("amp_models_list")),
 	ampModelsCreate: (brand: string, model: string, channelCount: number, isDante: boolean, protocol: AmpProtocol) => typedError<AmpModelCatalogEntry_Serialize, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount, isDante, protocol })),
 	/**
@@ -143,6 +169,93 @@ export const commands = {
 	liveControlListDevices: () => typedError<DiscoveredDevice[], AppError>(__TAURI_INVOKE("live_control_list_devices")),
 	liveControlGetTelemetry: () => typedError<DeviceTelemetry[], AppError>(__TAURI_INVOKE("live_control_get_telemetry")),
 	liveControlGetChannelConfig: () => typedError<DeviceChannelConfig[], AppError>(__TAURI_INVOKE("live_control_get_channel_config")),
+	/**
+	 *  Fire-and-forget: sends the write packet and returns once the datagram is
+	 *  sent, without waiting for the device to apply it. The next FC=27 poll
+	 *  (already running for every discovered device, see `driver.rs`) picks up
+	 *  the real new state and pushes it to the frontend via the existing
+	 *  `live_channel_config:updated` event — no optimistic update here.
+	 */
+	liveControlSetOutputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_output_mute", { deviceId, channelIndex, muted })),
+	/**
+	 *  Partial update of a channel's output trim/volume/delay — mirrors
+	 *  `projects_set_channel_output`'s per-field-optional convention, but unlike
+	 *  that single-struct-mutation command, each populated field here is its own
+	 *  wire write (different FC/`in_out_flag` per field, see `write_v118.rs`) —
+	 *  up to three fire-and-forget UDP sends per call, dispatched concurrently
+	 *  rather than awaited one at a time.
+	 */
+	liveControlSetChannelOutput: (deviceId: string, channelIndex: number, trimDb: number | null, volumeDb: number | null, delayOutMs: number | null) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_output", { deviceId, channelIndex, trimDb, volumeDb, delayOutMs })),
+	liveControlSetChannelDelayIn: (deviceId: string, channelIndex: number, delayInMs: number | null) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_delay_in", { deviceId, channelIndex, delayInMs })),
+	liveControlSetChannelInputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_input_mute", { deviceId, channelIndex, muted })),
+	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
+	liveControlSetChannelPowerMode: (deviceId: string, channelIndex: number, powerMode: PowerMode) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_power_mode", { deviceId, channelIndex, powerMode })),
+	/**
+	 *  Partial update of one parametric EQ band (1-8) — mirrors
+	 *  `projects_set_eq_band`'s shape (`EqBandPatch`, only non-`None` fields
+	 *  applied), but `filter_type`/`active` share one wire byte (FC=30) on this
+	 *  protocol, so touching either one requires merging in the *other's*
+	 *  current value first (see `current_eq_band`) rather than writing a
+	 *  stale/default byte for whichever field wasn't part of this patch.
+	 *  `freq_hz`/`gain_db`/`q` are independent FCs (32/31/34) and each sends its
+	 *  own packet when present in the patch — up to 4 UDP sends per call.
+	 */
+	liveControlSetEqBand: (deviceId: string, channelIndex: number, direction: EqDirection, bandIndex: number, patch: EqBandPatch) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_eq_band", { deviceId, channelIndex, direction, bandIndex, patch })),
+	/**
+	 *  Partial update of the HP or LP crossover slot — same `filter_type`/
+	 *  `active` merge requirement as `live_control_set_eq_band` (see its doc
+	 *  comment), plus a device-required follow-up: any FILTER_TYPE/FILTER_FREQ
+	 *  write to a crossover slot only takes effect once
+	 *  `write::CROSSOVER_COMMIT_PACKET` is sent afterward (reverse-engineered by
+	 *  the reference implementation from real packet captures — see that
+	 *  constant's doc comment). Sent once per call, after whichever field(s)
+	 *  were actually written, not once per field.
+	 */
+	liveControlSetCrossoverSlot: (deviceId: string, channelIndex: number, direction: EqDirection, slot: CrossoverSlotKind, patch: CrossoverSlotPatch) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_crossover_slot", { deviceId, channelIndex, direction, slot, patch })),
+	/**
+	 *  Resolves which catalog model a live device (identified by `mac`) should
+	 *  be configured as. An existing manual pick (`auto_matched: false`) always
+	 *  wins and is returned as-is, never re-matched. Otherwise runs
+	 *  `match_catalog_model`; on a confident match, upserts an `auto_matched:
+	 *  true` link (safe to silently refresh on every reconnect) and returns it;
+	 *  on no confident match, returns `None` rather than guessing.
+	 */
+	deviceModelLinkAutoMatch: (mac: string, firmwareVersion: string, digitalInputChannels: number, outputChannels: number) => typedError<{
+	id: string,
+	brand: string,
+	model: string,
+	channelCount: number,
+	/**
+	 *  Authoritative Dante-variant flag — replaces string-matching on the
+	 *  model name (e.g. a trailing "D") in the frontend.
+	 */
+	isDante: boolean,
+	protocol: AmpProtocol,
+	topology: AmpDspTopology_Serialize,
+	notes: string | null,
+	origin: EntryOrigin,
+	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
+	archived: boolean,
+	createdAt: number | null,
+	updatedAt: number | null,
+} | null, AppError>(__TAURI_INVOKE("device_model_link_auto_match", { mac, firmwareVersion, digitalInputChannels, outputChannels })),
+	/**
+	 *  Explicit manual pick/clear — always `auto_matched: false`, so a later
+	 *  `device_model_link_auto_match` call never silently overrides it.
+	 *  `amp_model_id: None` clears any existing link for this `mac`.
+	 */
+	deviceModelLinkSet: (mac: string, ampModelId: string | null) => typedError<{
+	mac: string,
+	ampModelId: string,
+	/**
+	 *  `true` when produced by `match_catalog_model`, `false` when the user
+	 *  explicitly picked/overrode it — an auto-match is safe to silently
+	 *  re-run and refresh on every reconnect, a manual pick never is.
+	 */
+	autoMatched: boolean,
+	updatedAt: number | null,
+} | null, AppError>(__TAURI_INVOKE("device_model_link_set", { mac, ampModelId })),
+	deviceModelLinkGetAll: () => typedError<DeviceModelLink[], AppError>(__TAURI_INVOKE("device_model_link_get_all")),
 };
 
 /* Types */
@@ -227,6 +340,20 @@ export type AmpChannel = {
 	 *  `speaker_library_id` is set; `None`/`0` for a single-way speaker.
 	 */
 	wayIndex: number | null,
+	/**
+	 *  Explicit visual/logical grouping of contiguous channels into one row
+	 *  in the Speaker Configuration tab's Physical Outputs panel — a
+	 *  planning-UI-only concept, unrelated to `output_bridged`'s real
+	 *  hardware relay (CVR amps have no "join" hardware concept). Channels
+	 *  sharing the same non-`None` id, in a contiguous run, render as one
+	 *  joined row; a channel with `None` is its own row. Independent of
+	 *  what's assigned to member channels — two joined channels may hold
+	 *  different (or no) `speaker_library_id`s; the frontend renders that
+	 *  "mixed" case per-channel rather than assuming one profile (see
+	 *  `computeSpeakerGroups` in AmpConfigureView.tsx). Set only via
+	 *  `projects_set_output_join`.
+	 */
+	joinGroupId?: string | null,
 	/**
 	 *  Which physical source feeds this channel's input — Routing tab.
 	 *  `None` until the user picks one.
@@ -593,6 +720,28 @@ export type CvrFirmwareCapability = {
 export type DeviceChannelConfig = {
 	deviceId: string,
 	config: ChannelConfigSnapshot,
+};
+
+/**
+ *  Persists which catalog `AmpModelCatalogEntry` a live-discovered device
+ *  (identified by MAC, not by any Project's `AmpAssignment`) should be
+ *  configured as — needed so Direct Edit mode can resolve `AmpCapability`
+ *  for a bare `DiscoveredDevice` the same way Project mode resolves it for
+ *  an `AmpAssignment`. Deliberately independent of `AmpAssignment.mac`
+ *  (which stays unpopulated) and of any `Project` — this is a small,
+ *  standalone, MAC-keyed pairing, not the (separate, out-of-scope) feature
+ *  of linking a live device into a Project's persisted config.
+ */
+export type DeviceModelLink = {
+	mac: string,
+	ampModelId: string,
+	/**
+	 *  `true` when produced by `match_catalog_model`, `false` when the user
+	 *  explicitly picked/overrode it — an auto-match is safe to silently
+	 *  re-run and refresh on every reconnect, a manual pick never is.
+	 */
+	autoMatched: boolean,
+	updatedAt: number | null,
 };
 
 /**

@@ -7,3 +7,6 @@ pub mod request;
 pub mod telemetry;
 pub mod telemetry_v118;
 pub mod telemetry_v119;
+pub mod write;
+pub mod write_v118;
+pub mod write_v119;

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActionIcon,
   Button,
@@ -42,6 +42,7 @@ import {
 } from "lucide-react";
 import { EqEditor } from "./EqEditor";
 import { LimiterEditor } from "./LimiterEditor";
+import { LoadSpeakerConfigDialog } from "./LoadSpeakerConfigDialog";
 import { SpeakerFormModal } from "./SpeakerFormModal";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import {
@@ -49,24 +50,49 @@ import {
   type AmpAssignment,
   type AmpCapability_Serialize as AmpCapability,
   type AmpModelCatalogEntry,
+  type ChannelConfigSnapshot,
   type ChannelSource,
+  type DiscoveredDevice,
   type PowerMode,
   type Project,
   type SourceChannelCount,
   type SourceKind,
   type SpeakerLibraryEntry_Serialize as SpeakerLibraryEntry,
 } from "../lib/bindings";
+import {
+  createProjectConfigureActions,
+  PROJECT_CONFIGURE_CAPABILITIES,
+  type ConfigureActions,
+  type ConfigureCapabilities,
+} from "../lib/configureActions";
+import {
+  buildLiveAssignmentViewModel,
+  createLiveConfigureActions,
+  LIVE_CONFIGURE_CAPABILITIES,
+} from "../lib/liveConfigureAdapter";
+
+/** Which project (persisted) or live device (Direct Edit, no project) this
+ * Configure screen instance targets — the single seam that lets the same
+ * capability-driven tab UI serve both modes (see `configureActions.ts`/
+ * `liveConfigureAdapter.ts`). */
+export type ConfigureSource =
+  | {
+      kind: "project";
+      project: Project;
+      assignment: AmpAssignment;
+      ampModel?: AmpModelCatalogEntry;
+      onProjectUpdate: (project: Project) => void;
+    }
+  | {
+      kind: "live";
+      device: DiscoveredDevice;
+      channelConfig?: ChannelConfigSnapshot;
+      ampModel?: AmpModelCatalogEntry;
+    };
 
 interface AmpConfigureViewProps {
-  /** Omitted when configuring a live-discovered device with no project
-   * assignment yet (Live Control mode) — see App.tsx's two entry points. */
-  assignment?: AmpAssignment;
-  ampModel?: AmpModelCatalogEntry;
-  /** Needed (alongside `onProjectUpdate`) since every configurable tab's
-   * mutation commands take `project.id` as an argument. Omitted in Live
-   * Control mode. */
-  project?: Project;
-  onProjectUpdate?: (project: Project) => void;
+  /** Omitted while a Project/live device hasn't been picked yet. */
+  source?: ConfigureSource;
 }
 
 type SkeletonVariant = "scheme" | "list" | "grid";
@@ -254,7 +280,6 @@ function TabSkeleton({
 
 interface ConfigurableTabProps {
   assignment: AmpAssignment;
-  project: Project;
   capability: AmpCapability;
   /** Every Speaker Library entry (including archived ones — see
    * `formatSpeakerAssignment`), fetched once by `AmpConfigureView` and
@@ -266,7 +291,20 @@ interface ConfigurableTabProps {
    * absorbs full Speaker Library CRUD now that the standalone top-level
    * Speaker Library tab is gone. */
   onSpeakersUpdate: (speakers: SpeakerLibraryEntry[]) => void;
-  onProjectUpdate: (project: Project) => void;
+  /** Every mutation a tab can make, targeting either a Project or a live
+   * device — see `configureActions.ts`. Fields with no write support for
+   * the current source (Project-only concepts, or live writes not built
+   * yet) are simply absent; a handler guards with `if (!actions.setX)
+   * return;` rather than assuming every field is always writable. */
+  actions: ConfigureActions;
+  capabilities: ConfigureCapabilities;
+  /** Only defined for a `"project"` source. The Speaker Configuration tab
+   * (Project-only — not rendered for a `"live"` source, see the tab-list
+   * filter in `AmpConfigureView`) uses these directly rather than through
+   * `actions`, since its Join/Bridge/cascade-refresh logic doesn't map onto
+   * the generic per-field action shape. */
+  project?: Project;
+  onProjectUpdate?: (project: Project) => void;
 }
 
 /** "Brand Model — WayLabel" for a channel's speaker assignment — shared by
@@ -275,7 +313,7 @@ interface ConfigurableTabProps {
  * suffix-omission rule) isn't duplicated. Resolves against the *full*
  * speaker list (archived included) so an assignment made before a speaker
  * was archived still displays correctly instead of going blank. */
-function formatSpeakerAssignment(
+export function formatSpeakerAssignment(
   speakers: SpeakerLibraryEntry[],
   speakerLibraryId: string | null | undefined,
   wayIndex: number | null | undefined,
@@ -290,44 +328,61 @@ function formatSpeakerAssignment(
 }
 
 /** One row of the Speaker Configuration tab's Physical Outputs panel — a
- * single unassigned/unjoined channel, or a "joined" multi-way group. */
+ * single channel, or an explicitly-Joined multi-channel group (see
+ * `AmpChannel.joinGroupId`). */
 interface SpeakerOutputGroup {
   leaderChannelIndex: number;
   channelIndexes: number[];
+  /** Resolved only when every member channel shares the same non-null
+   * `speakerLibraryId` with sequential `wayIndex`es (0, 1, 2…) — the common
+   * case (a drag-drop, or a fully-uniform Load). `null` for an unassigned
+   * channel/group. */
   speaker: SpeakerLibraryEntry | null;
+  /** True when the group has >1 channel but its members do NOT share one
+   * uniform sequential assignment (e.g. an explicit Join whose channels
+   * hold different or partial speaker data) — rendered per-channel via
+   * `formatSpeakerAssignment` on every row instead of one group-wide
+   * label/way-list. */
+  mixed: boolean;
 }
 
-/** Derives `SpeakerOutputGroup`s from `assignment.channels` — no group is
- * ever persisted; a "joined" multi-way speaker is just N consecutive
- * channels sharing the same `speakerLibraryId` with sequential `wayIndex`
- * (0, 1, 2…), detected fresh on every render. A channel only continues the
- * previous group when both conditions hold; a coincidentally-matching
- * non-adjacent assignment (or an out-of-order `wayIndex`) is never grouped,
- * it just renders as its own single-channel row. */
+/** Derives `SpeakerOutputGroup`s from `assignment.channels` — grouping
+ * itself is purely `joinGroupId`-adjacency (an explicit, persisted concept
+ * set via `projectsSetOutputJoin`, independent of what's assigned to member
+ * channels); whether a group happens to hold one uniform, sequential
+ * speaker assignment (vs. a "mixed" one) is a separate, render-only
+ * resolution layered on top. */
 function computeSpeakerGroups(
   channels: AmpAssignment["channels"],
   speakers: SpeakerLibraryEntry[],
 ): SpeakerOutputGroup[] {
-  const groups: SpeakerOutputGroup[] = [];
+  const raw: { leaderChannelIndex: number; channelIndexes: number[] }[] = [];
   for (const channel of channels) {
-    const speaker = speakers.find((s) => s.id === channel.speakerLibraryId) ?? null;
-    const previous = groups[groups.length - 1];
-    // Continues the previous group only if this channel shares the same
-    // speaker and its wayIndex is exactly the next sequential one (0, 1, 2…)
-    // — a coincidentally-matching non-adjacent or out-of-order assignment
-    // never merges into a group.
+    const previous = raw[raw.length - 1];
+    const previousTailIndex = previous?.channelIndexes[previous.channelIndexes.length - 1];
+    const previousTail = channels.find((c) => c.channelIndex === previousTailIndex);
     const continuesPrevious =
-      previous !== undefined &&
-      speaker !== null &&
-      previous.speaker?.id === speaker.id &&
-      channel.wayIndex === previous.channelIndexes.length;
+      previous !== undefined && previousTail?.joinGroupId != null && channel.joinGroupId === previousTail.joinGroupId;
     if (continuesPrevious) {
       previous.channelIndexes.push(channel.channelIndex);
     } else {
-      groups.push({ leaderChannelIndex: channel.channelIndex, channelIndexes: [channel.channelIndex], speaker });
+      raw.push({ leaderChannelIndex: channel.channelIndex, channelIndexes: [channel.channelIndex] });
     }
   }
-  return groups;
+  return raw.map((group) => resolveGroupSpeaker(group, channels, speakers));
+}
+
+function resolveGroupSpeaker(
+  group: { leaderChannelIndex: number; channelIndexes: number[] },
+  channels: AmpAssignment["channels"],
+  speakers: SpeakerLibraryEntry[],
+): SpeakerOutputGroup {
+  const members = group.channelIndexes.map((idx) => channels.find((c) => c.channelIndex === idx)!);
+  const first = members[0];
+  const speaker = speakers.find((s) => s.id === first.speakerLibraryId) ?? null;
+  const uniform =
+    speaker !== null && members.every((c, i) => c.speakerLibraryId === speaker.id && (c.wayIndex ?? 0) === i);
+  return { ...group, speaker: uniform ? speaker : null, mixed: group.channelIndexes.length > 1 && !uniform };
 }
 
 /** dBFS scale for the Input/Output row meters — no live device exists in
@@ -605,31 +660,23 @@ function ChannelRail({
   );
 }
 
-function InputTab({ assignment, project, capability, onProjectUpdate }: ConfigurableTabProps) {
+function InputTab({ assignment, capability, actions }: ConfigurableTabProps) {
   const { min, max } = capability.paramRanges.delayInMs;
   const [eqChannelIndex, setEqChannelIndex] = useState(0);
   const [view, setView] = useState<string | null>("input");
   const eqChannel = assignment.channels.find((c) => c.channelIndex === eqChannelIndex) ?? assignment.channels[0];
 
   async function handleDelayChange(channelIndex: number, delayInMs: number) {
-    const result = await commands.projectsSetChannelDelayIn(project.id, assignment.id, channelIndex, delayInMs);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    await actions.setChannelDelayIn(channelIndex, delayInMs);
   }
 
   async function handleMuteToggle(channelIndex: number, muted: boolean) {
-    const result = await commands.projectsSetChannelInputMute(project.id, assignment.id, channelIndex, muted);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    await actions.setChannelInputMute(channelIndex, muted);
   }
 
   async function handleRename(channelIndex: number, name: string | null) {
-    const result = await commands.projectsSetChannelName(project.id, assignment.id, channelIndex, "input", name);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setChannelName) return;
+    await actions.setChannelName(channelIndex, "input", name);
   }
 
   function openEq(channelIndex: number) {
@@ -660,11 +707,10 @@ function InputTab({ assignment, project, capability, onProjectUpdate }: Configur
               <EqEditor
                 key={eqChannel.channelIndex}
                 assignment={assignment}
-                project={project}
                 channelIndex={eqChannel.channelIndex}
                 direction="input"
                 capability={capability}
-                onProjectUpdate={onProjectUpdate}
+                actions={actions}
               />
             </div>
           ) : (
@@ -1058,7 +1104,7 @@ function BridgePairSidebar({
   );
 }
 
-function OutputTab({ assignment, project, capability, onProjectUpdate }: ConfigurableTabProps) {
+function OutputTab({ assignment, capability, actions, capabilities }: ConfigurableTabProps) {
   const trimRange = capability.paramRanges.outputTrimDb;
   const volumeRange = capability.paramRanges.outputVolumeDb;
   const delayRange = capability.paramRanges.delayOutMs;
@@ -1073,70 +1119,39 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
     assignment.channels.find((c) => c.channelIndex === subChannelIndex) ?? assignment.channels[0];
 
   async function handleChange(channelIndex: number, field: "trim" | "volume" | "delay", value: number) {
-    const result = await commands.projectsSetChannelOutput(
-      project.id,
-      assignment.id,
+    await actions.setChannelOutput(
       channelIndex,
       field === "trim" ? value : null,
       field === "volume" ? value : null,
       field === "delay" ? value : null,
     );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
   }
 
   async function handleNoiseGateChange(channelIndex: number, enabled: boolean, thresholdDbu: number) {
-    const result = await commands.projectsSetChannelNoiseGate(
-      project.id,
-      assignment.id,
-      channelIndex,
-      enabled,
-      thresholdDbu,
-    );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setChannelNoiseGate) return;
+    await actions.setChannelNoiseGate(channelIndex, enabled, thresholdDbu);
   }
 
   async function handlePhaseInvertToggle(channelIndex: number, inverted: boolean) {
-    const result = await commands.projectsSetChannelPhaseInvert(project.id, assignment.id, channelIndex, inverted);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    await actions.setChannelPhaseInvert(channelIndex, inverted);
   }
 
   async function handleRename(channelIndex: number, name: string | null) {
-    const result = await commands.projectsSetChannelName(project.id, assignment.id, channelIndex, "output", name);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setChannelName) return;
+    await actions.setChannelName(channelIndex, "output", name);
   }
 
   async function handleMuteToggle(channelIndex: number, muted: boolean) {
-    const result = await commands.projectsSetChannelOutputMute(project.id, assignment.id, channelIndex, muted);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    await actions.setChannelOutputMute(channelIndex, muted);
   }
 
   async function handlePowerModeChange(channelIndex: number, mode: PowerMode) {
-    const result = await commands.projectsSetChannelPowerMode(project.id, assignment.id, channelIndex, mode);
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    await actions.setChannelPowerMode(channelIndex, mode);
   }
 
   async function handleBridgeToggle(pairLeaderChannelIndex: number, bridged: boolean) {
-    const result = await commands.projectsSetOutputBridge(
-      project.id,
-      assignment.id,
-      pairLeaderChannelIndex,
-      bridged,
-    );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setOutputBridge) return;
+    await actions.setOutputBridge(pairLeaderChannelIndex, bridged);
   }
 
   function openSubTab(channelIndex: number, target: "fir" | "eq" | "limiter") {
@@ -1186,11 +1201,10 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
               <EqEditor
                 key={subChannel.channelIndex}
                 assignment={assignment}
-                project={project}
                 channelIndex={subChannel.channelIndex}
                 direction="output"
                 capability={capability}
-                onProjectUpdate={onProjectUpdate}
+                actions={actions}
               />
             </div>
           ) : view === "limiter" ? (
@@ -1198,10 +1212,10 @@ function OutputTab({ assignment, project, capability, onProjectUpdate }: Configu
               <LimiterEditor
                 key={subChannel.channelIndex}
                 assignment={assignment}
-                project={project}
                 channelIndex={subChannel.channelIndex}
                 capability={capability}
-                onProjectUpdate={onProjectUpdate}
+                actions={actions}
+                capabilities={capabilities}
               />
             </Center>
           ) : (
@@ -1371,7 +1385,7 @@ function SchemeTab({ assignment, speakers }: ConfigurableTabProps) {
   );
 }
 
-const SPEAKER_OUTPUT_LETTER = (channelIndex: number) => String.fromCharCode(65 + channelIndex);
+export const SPEAKER_OUTPUT_LETTER = (channelIndex: number) => String.fromCharCode(65 + channelIndex);
 
 /** One channel's row in the Physical Outputs panel. Every channel gets its
  * own row (not one collapsed row per group) — a group's resolved speaker
@@ -1387,6 +1401,7 @@ const SPEAKER_OUTPUT_LETTER = (channelIndex: number) => String.fromCharCode(65 +
 function PhysicalOutputChannelRow({
   channel,
   group,
+  speakers,
   selected,
   dragOver,
   onSelect,
@@ -1397,9 +1412,10 @@ function PhysicalOutputChannelRow({
 }: {
   channel: AmpAssignment["channels"][number];
   group: SpeakerOutputGroup;
+  speakers: SpeakerLibraryEntry[];
   selected: boolean;
   dragOver: boolean;
-  onSelect: () => void;
+  onSelect: (e: React.MouseEvent) => void;
   onEject: () => void;
   onDragOver: (e: React.DragEvent) => void;
   onDragLeave: () => void;
@@ -1409,7 +1425,12 @@ function PhysicalOutputChannelRow({
   const positionInGroup = group.channelIndexes.indexOf(channel.channelIndex);
   const wayLabel = group.speaker?.ways[positionInGroup]?.label ?? group.speaker?.ways[0]?.label ?? null;
   const speakerLabel = isLeader && group.speaker ? `${group.speaker.brand} ${group.speaker.model}` : null;
+  // In a "mixed" group (an explicit Join whose members don't share one
+  // uniform sequential speaker), every row resolves and shows its own
+  // assignment instead of relying on a single group-wide label.
+  const ownLabel = group.mixed ? formatSpeakerAssignment(speakers, channel.speakerLibraryId, channel.wayIndex) : null;
   const highlighted = selected || dragOver;
+  const canEject = group.speaker !== null || group.mixed || group.channelIndexes.length > 1;
 
   return (
     <UnstyledButton
@@ -1430,18 +1451,18 @@ function PhysicalOutputChannelRow({
       style={{ backgroundColor: highlighted ? "var(--mantine-color-amber-light)" : undefined }}
     >
       <Group justify="space-between" wrap="nowrap" gap="xs">
-        <Text size="sm" c={speakerLabel ? undefined : "dimmed"} lineClamp={1} className="flex-1">
-          {speakerLabel ?? (isLeader ? "Speaker Model" : "")}
+        <Text size="sm" c={speakerLabel || ownLabel ? undefined : "dimmed"} lineClamp={1} className="flex-1">
+          {speakerLabel ?? ownLabel ?? (isLeader ? "Speaker Model" : "")}
         </Text>
         <Text size="xs" c="dimmed" lineClamp={1} className="flex-1" ta="center">
-          {wayLabel ?? "-"}
+          {group.mixed ? "-" : (wayLabel ?? "-")}
         </Text>
         <Center w={22} h={22} bdrs="xl" bd="1px solid var(--mantine-color-default-border)" className="shrink-0">
           <Text fz={10} fw={700}>
             {SPEAKER_OUTPUT_LETTER(channel.channelIndex)}
           </Text>
         </Center>
-        {isLeader && group.speaker ? (
+        {isLeader && canEject ? (
           <ActionIcon
             size="sm"
             variant="subtle"
@@ -1466,14 +1487,19 @@ function PhysicalOutputChannelRow({
  * Outputs row — plain text carrying the speaker's id. */
 const SPEAKER_DRAG_MIME = "application/x-ampcore-speaker-id";
 
+/** Project-only — never rendered for a live-device source (see the tab-list
+ * filter in `AmpConfigureView`), so `project`/`onProjectUpdate` are always
+ * defined in practice despite being typed optional on `ConfigurableTabProps`
+ * for the benefit of the other (dual-mode) tabs. */
 function SpeakerConfigurationTab({
   assignment,
-  project,
+  project: projectProp,
   speakers,
   onSpeakersUpdate,
-  onProjectUpdate,
+  onProjectUpdate: onProjectUpdateProp,
 }: ConfigurableTabProps) {
-  const [selectedLeaderIndex, setSelectedLeaderIndex] = useState<number | null>(null);
+  const [selectedChannelIndexes, setSelectedChannelIndexes] = useState<number[]>([]);
+  const lastClickedChannelRef = useRef<number | null>(null);
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
   const [dragOverLeaderIndex, setDragOverLeaderIndex] = useState<number | null>(null);
   const [brandFilter, setBrandFilter] = useState("");
@@ -1481,10 +1507,27 @@ function SpeakerConfigurationTab({
   const [modelFilter, setModelFilter] = useState("");
   const [waysFilter, setWaysFilter] = useState<string | null>("any");
   const [formEntry, setFormEntry] = useState<SpeakerLibraryEntry | "new" | null>(null);
+  const [loadDialogOpen, setLoadDialogOpen] = useState(false);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<"assign" | "split" | "join" | "bridge" | "archive" | "delete" | null>(
+    null,
+  );
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const groups = computeSpeakerGroups(assignment.channels, speakers);
-  const selectedGroup = groups.find((g) => g.leaderChannelIndex === selectedLeaderIndex) ?? null;
+  const selectedGroups = groups.filter((g) => g.channelIndexes.some((idx) => selectedChannelIndexes.includes(idx)));
+  const selectedGroup = selectedGroups.length === 1 ? selectedGroups[0] : null;
   const selectedLibraryEntry = speakers.find((s) => s.id === selectedLibraryId) ?? null;
+  const sortedSelection = [...selectedChannelIndexes].sort((a, b) => a - b);
+  const canJoin = sortedSelection.length >= 2 && sortedSelection.every((v, i) => i === 0 || v === sortedSelection[i - 1] + 1);
+
+  useEffect(() => {
+    setConfirmingDeleteId(null);
+  }, [selectedLibraryId]);
+
+  if (!projectProp || !onProjectUpdateProp) return null;
+  const project = projectProp;
+  const onProjectUpdate = onProjectUpdateProp;
 
   async function refreshLibrary() {
     const result = await commands.speakerLibraryList();
@@ -1493,15 +1536,51 @@ function SpeakerConfigurationTab({
     }
   }
 
+  /** Expands a click on `channelIndex` to its whole current group — a plain
+   * click always selects the entire row it lands on. */
+  function expandToGroup(channelIndex: number): number[] {
+    return groups.find((g) => g.channelIndexes.includes(channelIndex))?.channelIndexes ?? [channelIndex];
+  }
+
+  /** Plain click selects the clicked row's whole group; ctrl/cmd-click
+   * toggles a group in/out of the selection; shift-click range-selects
+   * from the last-clicked channel. Feeds the Join/Split/Bridge actions and
+   * the Load dialog's implicit target set. */
+  function handleChannelClick(channelIndex: number, e: React.MouseEvent) {
+    const grouped = expandToGroup(channelIndex);
+    if (e.shiftKey) {
+      const anchor =
+        lastClickedChannelRef.current ?? selectedChannelIndexes[selectedChannelIndexes.length - 1] ?? channelIndex;
+      const lo = Math.min(anchor, channelIndex);
+      const hi = Math.max(anchor, channelIndex);
+      setSelectedChannelIndexes(Array.from({ length: hi - lo + 1 }, (_, i) => lo + i));
+      lastClickedChannelRef.current = channelIndex;
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      const already = grouped.every((idx) => selectedChannelIndexes.includes(idx));
+      setSelectedChannelIndexes(
+        already
+          ? selectedChannelIndexes.filter((idx) => !grouped.includes(idx))
+          : [...new Set([...selectedChannelIndexes, ...grouped])].sort((a, b) => a - b),
+      );
+      lastClickedChannelRef.current = channelIndex;
+      return;
+    }
+    setSelectedChannelIndexes(grouped);
+    lastClickedChannelRef.current = channelIndex;
+  }
+
   /** Runs channel patches one at a time (awaited, not concurrent) — a
    * flood of concurrent per-channel calls was the root cause of a real
    * race-condition bug in the Limiter panel's sliders earlier this session
    * (Peak's floor getting stomped by a stale intermediate value). Only the
    * final successful result is applied to `onProjectUpdate`, so Apply/Split
-   * don't flicker through intermediate partially-applied states. */
+   * don't flicker through intermediate partially-applied states. Surfaces
+   * the first failure instead of silently breaking out of the loop. */
   async function applyChannelPatches(
     patches: { channelIndex: number; speakerLibraryId: string | null; wayIndex: number | null }[],
-  ) {
+  ): Promise<{ ok: boolean; error: string | null }> {
     let latest: Project | null = null;
     for (const patch of patches) {
       const result = await commands.projectsSetChannelSpeaker(
@@ -1511,12 +1590,16 @@ function SpeakerConfigurationTab({
         patch.speakerLibraryId,
         patch.wayIndex,
       );
-      if (result.status !== "ok") break;
+      if (result.status !== "ok") {
+        if (latest) onProjectUpdate(latest);
+        return { ok: false, error: result.error.message };
+      }
       latest = result.data;
     }
     if (latest) {
       onProjectUpdate(latest);
     }
+    return { ok: true, error: null };
   }
 
   /** Writes `speaker` across as many consecutive channels as it has ways,
@@ -1525,8 +1608,11 @@ function SpeakerConfigurationTab({
    * matching the old software), no separate Load/Apply step. Also clears
    * any leftover channels from the group being dropped onto that fall
    * outside the new speaker's span, so replacing e.g. a 3-way with a 1-way
-   * doesn't leave orphaned way indices behind. */
-  function handleDropOnGroup(group: SpeakerOutputGroup, speaker: SpeakerLibraryEntry) {
+   * doesn't leave orphaned way indices behind. A multi-way drop additionally
+   * auto-Joins its span (`projectsSetOutputJoin`) so the quick-drop path
+   * keeps looking grouped, exactly as it did before Join grouping became
+   * explicit. */
+  async function handleDropOnGroup(group: SpeakerOutputGroup, speaker: SpeakerLibraryEntry) {
     const wayCount = Math.max(1, speaker.ways.length);
     const leader = group.leaderChannelIndex;
     if (leader + wayCount > assignment.channels.length) return;
@@ -1538,7 +1624,21 @@ function SpeakerConfigurationTab({
     }));
     const leftover = group.channelIndexes.filter((idx) => !newIndexes.includes(idx));
     const clearPatches = leftover.map((channelIndex) => ({ channelIndex, speakerLibraryId: null, wayIndex: null }));
-    applyChannelPatches([...patches, ...clearPatches]);
+
+    setBusyAction("assign");
+    setActionError(null);
+    const result = await applyChannelPatches([...patches, ...clearPatches]);
+    if (!result.ok) {
+      setActionError(result.error);
+      setBusyAction(null);
+      return;
+    }
+    if (newIndexes.length > 1) {
+      const joinResult = await commands.projectsSetOutputJoin(project.id, assignment.id, newIndexes, true);
+      if (joinResult.status === "ok") onProjectUpdate(joinResult.data);
+      else setActionError(joinResult.error.message);
+    }
+    setBusyAction(null);
   }
 
   function handleDropEvent(group: SpeakerOutputGroup, e: React.DragEvent) {
@@ -1553,18 +1653,64 @@ function SpeakerConfigurationTab({
     ejectGroup(selectedGroup);
   }
 
-  function ejectGroup(group: SpeakerOutputGroup) {
+  /** Clears assignments for `group`'s channels, and (for a >1-channel
+   * group) also clears the explicit Join grouping via
+   * `projectsSetOutputJoin`, so Split fully un-groups rather than leaving a
+   * now-empty joined row behind. */
+  async function ejectGroup(group: SpeakerOutputGroup) {
+    setBusyAction("split");
+    setActionError(null);
     const patches = group.channelIndexes.map((channelIndex) => ({
       channelIndex,
       speakerLibraryId: null,
       wayIndex: null,
     }));
-    applyChannelPatches(patches);
+    const result = await applyChannelPatches(patches);
+    if (!result.ok) {
+      setActionError(result.error);
+      setBusyAction(null);
+      return;
+    }
+    if (group.channelIndexes.length > 1) {
+      const joinResult = await commands.projectsSetOutputJoin(project.id, assignment.id, group.channelIndexes, false);
+      if (joinResult.status === "ok") onProjectUpdate(joinResult.data);
+      else setActionError(joinResult.error.message);
+    }
+    setBusyAction(null);
+    setSelectedChannelIndexes([]);
+  }
+
+  /** Joins the current (contiguous) selection into one explicit group.
+   * Wipes any existing per-channel assignments on the span first — a fresh
+   * Join shouldn't silently inherit stale data, matching the old app's
+   * `joinSelected`. */
+  async function handleJoin() {
+    if (!canJoin) return;
+    setBusyAction("join");
+    setActionError(null);
+    const wipeResult = await applyChannelPatches(
+      sortedSelection.map((channelIndex) => ({ channelIndex, speakerLibraryId: null, wayIndex: null })),
+    );
+    if (!wipeResult.ok) {
+      setActionError(wipeResult.error);
+      setBusyAction(null);
+      return;
+    }
+    const joinResult = await commands.projectsSetOutputJoin(project.id, assignment.id, sortedSelection, true);
+    if (joinResult.status === "ok") {
+      onProjectUpdate(joinResult.data);
+      setSelectedChannelIndexes(sortedSelection);
+    } else {
+      setActionError(joinResult.error.message);
+    }
+    setBusyAction(null);
   }
 
   async function handleBridgeToggle() {
     if (!selectedGroup) return;
     const leaderChannel = assignment.channels.find((c) => c.channelIndex === selectedGroup.leaderChannelIndex);
+    setBusyAction("bridge");
+    setActionError(null);
     const result = await commands.projectsSetOutputBridge(
       project.id,
       assignment.id,
@@ -1573,15 +1719,48 @@ function SpeakerConfigurationTab({
     );
     if (result.status === "ok") {
       onProjectUpdate(result.data);
+    } else {
+      setActionError(result.error.message);
     }
+    setBusyAction(null);
   }
 
   async function handleArchive(id: string) {
+    setBusyAction("archive");
+    setActionError(null);
     const result = await commands.speakerLibraryArchive(id);
     if (result.status === "ok") {
       if (selectedLibraryId === id) setSelectedLibraryId(null);
-      refreshLibrary();
+      onSpeakersUpdate(speakers.map((s) => (s.id === id ? { ...s, archived: true } : s)));
+    } else {
+      setActionError(result.error.message);
     }
+    setBusyAction(null);
+  }
+
+  /** Two-click confirm (matches `ProjectEditModal`'s delete idiom) —
+   * permanently removes the entry. The backend cascades: any channel across
+   * any project referencing this speaker gets cleared server-side, so this
+   * assignment's own display is refreshed via `projectsGet` afterward
+   * rather than relying on a stale local `onProjectUpdate`. */
+  async function handleDelete(id: string) {
+    if (confirmingDeleteId !== id) {
+      setConfirmingDeleteId(id);
+      return;
+    }
+    setBusyAction("delete");
+    setActionError(null);
+    const result = await commands.speakerLibraryDelete(id);
+    if (result.status === "ok") {
+      if (selectedLibraryId === id) setSelectedLibraryId(null);
+      setConfirmingDeleteId(null);
+      onSpeakersUpdate(speakers.filter((s) => s.id !== id));
+      const projectResult = await commands.projectsGet(project.id);
+      if (projectResult.status === "ok" && projectResult.data) onProjectUpdate(projectResult.data);
+    } else {
+      setActionError(result.error.message);
+    }
+    setBusyAction(null);
   }
 
   function handleFormSaved(entry: SpeakerLibraryEntry) {
@@ -1601,7 +1780,9 @@ function SpeakerConfigurationTab({
   const isBridged = selectedGroup
     ? (assignment.channels.find((c) => c.channelIndex === selectedGroup.leaderChannelIndex)?.outputBridged ?? false)
     : false;
-  const assignedGroups = groups.filter((g) => g.speaker !== null);
+  const assignedGroups = groups.filter(
+    (g) => g.speaker !== null || g.channelIndexes.some((idx) => assignment.channels.find((c) => c.channelIndex === idx)?.speakerLibraryId),
+  );
 
   const waysFilterOptions = [
     { value: "any", label: "Any" },
@@ -1622,6 +1803,10 @@ function SpeakerConfigurationTab({
     return true;
   });
 
+  const canSplit = Boolean(
+    selectedGroup && (selectedGroup.speaker !== null || selectedGroup.mixed || selectedGroup.channelIndexes.length > 1),
+  );
+
   return (
     <div className="flex h-full" style={{ gap: 16, padding: 24 }}>
       <Stack gap="sm" h="100%" justify="center" className="flex-1" style={{ flexGrow: 2 }}>
@@ -1638,9 +1823,10 @@ function SpeakerConfigurationTab({
                 <PhysicalOutputChannelRow
                   channel={channel}
                   group={group}
-                  selected={selectedGroup?.leaderChannelIndex === group.leaderChannelIndex}
+                  speakers={speakers}
+                  selected={selectedChannelIndexes.includes(channel.channelIndex)}
                   dragOver={dragOverLeaderIndex === group.leaderChannelIndex}
-                  onSelect={() => setSelectedLeaderIndex(group.leaderChannelIndex)}
+                  onSelect={(e) => handleChannelClick(channel.channelIndex, e)}
                   onEject={() => ejectGroup(group)}
                   onDragOver={() => setDragOverLeaderIndex(group.leaderChannelIndex)}
                   onDragLeave={() => setDragOverLeaderIndex((current) => (current === group.leaderChannelIndex ? null : current))}
@@ -1663,14 +1849,23 @@ function SpeakerConfigurationTab({
             Controls
           </Text>
           <Text size="xs" c="dimmed">
-            Drag a Library entry onto a Physical Outputs row to assign it.
+            Drag a Library entry onto a Physical Outputs row, or select multiple outputs (ctrl/shift-click) and Join
+            them, then use Load... for per-channel control.
           </Text>
-          <Button size="sm" variant="default" disabled={!selectedGroup?.speaker} onClick={handleSplit}>
+          <Button size="sm" variant="default" loading={busyAction === "split"} disabled={!canSplit} onClick={handleSplit}>
             Split/Reset
+          </Button>
+          <Button size="sm" variant="default" loading={busyAction === "join"} disabled={!canJoin} onClick={handleJoin}>
+            Join
           </Button>
           <div style={{ opacity: canBridge ? 1 : 0.45, pointerEvents: canBridge ? "auto" : "none" }}>
             <BridgeToggle label="Bridge" bridged={isBridged} onClick={handleBridgeToggle} />
           </div>
+          {actionError && (
+            <Text size="xs" c="red">
+              {actionError}
+            </Text>
+          )}
         </Stack>
 
         <Stack gap={2}>
@@ -1713,11 +1908,30 @@ function SpeakerConfigurationTab({
           <Button
             size="xs"
             variant="default"
+            disabled={!selectedLibraryEntry}
+            onClick={() => selectedLibraryEntry && setLoadDialogOpen(true)}
+          >
+            Load...
+          </Button>
+          <Button
+            size="xs"
+            variant="default"
             color="red"
+            loading={busyAction === "archive"}
             disabled={!selectedLibraryEntry}
             onClick={() => selectedLibraryEntry && handleArchive(selectedLibraryEntry.id)}
           >
-            Delete from library
+            Archive
+          </Button>
+          <Button
+            size="xs"
+            variant={confirmingDeleteId === selectedLibraryEntry?.id ? "filled" : "default"}
+            color="red"
+            loading={busyAction === "delete"}
+            disabled={!selectedLibraryEntry}
+            onClick={() => selectedLibraryEntry && handleDelete(selectedLibraryEntry.id)}
+          >
+            {confirmingDeleteId === selectedLibraryEntry?.id ? "Confirm Delete" : "Delete Permanently"}
           </Button>
           <Button size="xs" variant="default" onClick={refreshLibrary}>
             Refresh
@@ -1785,6 +1999,17 @@ function SpeakerConfigurationTab({
         editEntry={formEntry === "new" ? null : formEntry}
         onSaved={handleFormSaved}
       />
+
+      {selectedLibraryEntry && (
+        <LoadSpeakerConfigDialog
+          opened={loadDialogOpen}
+          onClose={() => setLoadDialogOpen(false)}
+          assignment={assignment}
+          speakers={speakers}
+          profile={selectedLibraryEntry}
+          onApply={applyChannelPatches}
+        />
+      )}
     </div>
   );
 }
@@ -1884,9 +2109,8 @@ function MatrixCrosspointCell({
  * when wiring up a routing scheme. */
 function RoutingTab({
   assignment,
-  project,
   capability,
-  onProjectUpdate,
+  actions,
 }: ConfigurableTabProps) {
   const { min, max } = capability.paramRanges.matrixGainDb;
   const sourceCount = capability.topology.matrixInputCount;
@@ -1901,16 +2125,8 @@ function RoutingTab({
     kind: SourceKind | null,
     index: number | null,
   ) {
-    const result = await commands.projectsSetChannelSource(
-      project.id,
-      assignment.id,
-      channelIndex,
-      kind,
-      index,
-    );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setChannelSource) return;
+    await actions.setChannelSource(channelIndex, kind, index);
   }
 
   async function handleGainChange(
@@ -1918,17 +2134,8 @@ function RoutingTab({
     sourceIndex: number,
     gainDb: number,
   ) {
-    const result = await commands.projectsSetMatrixCrosspoint(
-      project.id,
-      assignment.id,
-      channelIndex,
-      sourceIndex,
-      gainDb,
-      null,
-    );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setMatrixCrosspoint) return;
+    await actions.setMatrixCrosspoint(channelIndex, sourceIndex, gainDb, null);
   }
 
   async function handleActiveChange(
@@ -1936,24 +2143,15 @@ function RoutingTab({
     sourceIndex: number,
     active: boolean,
   ) {
-    const result = await commands.projectsSetMatrixCrosspoint(
-      project.id,
-      assignment.id,
-      channelIndex,
-      sourceIndex,
-      null,
-      active,
-    );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    }
+    if (!actions.setMatrixCrosspoint) return;
+    await actions.setMatrixCrosspoint(channelIndex, sourceIndex, null, active);
   }
 
   return (
     <Center h="100%" p="xl">
       <Stack gap="md" align="center">
         <Text fw={600}>Routing</Text>
-        <ScrollArea>
+        <ScrollArea offsetScrollbars type="auto" scrollbarSize={8}>
           <div
             style={{
               display: "grid",
@@ -2126,14 +2324,20 @@ const TAB_COMPONENTS: Record<
   speakerConfiguration: SpeakerConfigurationTab,
 };
 
-export function AmpConfigureView({
-  assignment,
-  ampModel,
-  project,
-  onProjectUpdate,
-}: AmpConfigureViewProps) {
-  const channelCount =
-    assignment?.channels.length ?? DEFAULT_SCHEME_CHANNEL_COUNT;
+export function AmpConfigureView({ source }: AmpConfigureViewProps) {
+  const ampModel = source?.ampModel;
+  const liveChannelCount =
+    source?.kind === "live" ? source.device.outputChannels || DEFAULT_SCHEME_CHANNEL_COUNT : DEFAULT_SCHEME_CHANNEL_COUNT;
+  const assignment: AmpAssignment | undefined =
+    source?.kind === "project"
+      ? source.assignment
+      : source?.kind === "live"
+        ? buildLiveAssignmentViewModel(source.device, source.channelConfig, liveChannelCount)
+        : undefined;
+  const channelCount = assignment?.channels.length ?? DEFAULT_SCHEME_CHANNEL_COUNT;
+  const firmwareVersion =
+    source?.kind === "project" ? (source.assignment.firmwareVersion ?? null) : source?.kind === "live" ? source.device.firmwareVersion : null;
+
   const [capability, setCapability] = useState<AmpCapability | null>(null);
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [speakers, setSpeakers] = useState<SpeakerLibraryEntry[]>([]);
@@ -2145,19 +2349,17 @@ export function AmpConfigureView({
     }
     let cancelled = false;
     setCapabilityLoading(true);
-    commands
-      .ampCapabilityResolve(ampModel.id, assignment?.firmwareVersion ?? null)
-      .then((result) => {
-        if (cancelled) return;
-        setCapabilityLoading(false);
-        if (result.status === "ok") {
-          setCapability(result.data);
-        }
-      });
+    commands.ampCapabilityResolve(ampModel.id, firmwareVersion).then((result) => {
+      if (cancelled) return;
+      setCapabilityLoading(false);
+      if (result.status === "ok") {
+        setCapability(result.data);
+      }
+    });
     return () => {
       cancelled = true;
     };
-  }, [ampModel, assignment?.firmwareVersion]);
+  }, [ampModel, firmwareVersion]);
 
   useEffect(() => {
     commands.speakerLibraryList().then((result) => {
@@ -2167,10 +2369,25 @@ export function AmpConfigureView({
     });
   }, []);
 
+  const actions: ConfigureActions | undefined =
+    source?.kind === "project"
+      ? createProjectConfigureActions(source.project.id, source.assignment.id, source.onProjectUpdate)
+      : source?.kind === "live"
+        ? createLiveConfigureActions(source.device.id)
+        : undefined;
+  const capabilities: ConfigureCapabilities = source?.kind === "live" ? LIVE_CONFIGURE_CAPABILITIES : PROJECT_CONFIGURE_CAPABILITIES;
+  const project = source?.kind === "project" ? source.project : undefined;
+  const onProjectUpdate = source?.kind === "project" ? source.onProjectUpdate : undefined;
+
+  // Speaker Configuration is a Project-only planning concept (physical
+  // output assignment, Join grouping) with no live-device equivalent — not
+  // shown at all for a live source, rather than rendered disabled.
+  const visibleTabs = source?.kind === "live" ? TABS.filter((t) => t.value !== "speakerConfiguration") : TABS;
+
   return (
     <Tabs defaultValue="scheme" orientation="vertical" className="h-full">
       <Tabs.List className="justify-center">
-        {TABS.map(({ value, label, icon: Icon }) => (
+        {visibleTabs.map(({ value, label, icon: Icon }) => (
           <Tooltip
             key={value}
             label={label}
@@ -2185,14 +2402,13 @@ export function AmpConfigureView({
         ))}
       </Tabs.List>
 
-      {TABS.map(({ value, label, skeleton }) => {
+      {visibleTabs.map(({ value, label, skeleton }) => {
         let content: ReactNode;
 
         if (
           !CONFIGURABLE_TABS.has(value) ||
           !assignment ||
-          !project ||
-          !onProjectUpdate
+          !actions
         ) {
           content = (
             <TabSkeleton
@@ -2220,10 +2436,12 @@ export function AmpConfigureView({
           content = (
             <TabComponent
               assignment={assignment}
-              project={project}
               capability={capability}
               speakers={speakers}
               onSpeakersUpdate={setSpeakers}
+              actions={actions}
+              capabilities={capabilities}
+              project={project}
               onProjectUpdate={onProjectUpdate}
             />
           );

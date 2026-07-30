@@ -2,6 +2,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::data::amp_model::AmpModelCatalogEntry;
 use crate::data::capability::{PowerMode, SourceKind};
+use crate::data::common::new_id;
 use crate::data::project::{
     AmpAssignment, ChannelSource, CrossoverSlotKind, CrossoverSlotPatch, EqBandPatch, EqDirection, LimiterPatch,
     Project,
@@ -959,6 +960,74 @@ pub fn projects_set_output_bridge(
         .ok_or_else(|| AppError::from(format!("channel {} not found", pair_leader_channel_index)))?;
 
     channel.output_bridged = bridged;
+    project.touch();
+
+    let project = project.clone();
+    save_project_file(&inner.data_dir, &project).map_err(AppError::from)?;
+    app.emit("project:updated", &project).ok();
+    Ok(project)
+}
+
+/// Sets (or clears) explicit visual grouping for a run of output channels —
+/// Speaker Configuration tab's Join/Split. Purely a grouping toggle; does
+/// not touch `speaker_library_id`/`way_index` (see `AmpChannel.join_group_id`'s
+/// doc comment) — callers that also want to wipe assignments do so via the
+/// existing `projects_set_channel_speaker` path first. When `joined` is
+/// true, `channel_indexes` must be at least 2, distinct, and contiguous
+/// (sorted, each exactly one more than the last); all listed channels get a
+/// freshly generated shared `join_group_id`. When `joined` is false,
+/// `join_group_id` is simply cleared on each listed channel — no
+/// contiguity requirement, so Split can pass a group's existing
+/// `channelIndexes` as-is.
+#[tauri::command]
+#[specta::specta]
+pub fn projects_set_output_join(
+    app: AppHandle,
+    state: State<ProjectDataState>,
+    project_id: String,
+    assignment_id: String,
+    channel_indexes: Vec<u32>,
+    joined: bool,
+) -> Result<Project, AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    let project = inner
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| AppError::from(format!("project {} not found", project_id)))?;
+
+    let assignment = project
+        .amp_assignments
+        .iter_mut()
+        .find(|a| a.id == assignment_id)
+        .ok_or_else(|| AppError::from(format!("assignment {} not found", assignment_id)))?;
+
+    if joined {
+        if channel_indexes.len() < 2 {
+            return Err(AppError::from("join requires at least 2 channels".to_string()));
+        }
+        let mut sorted = channel_indexes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() != channel_indexes.len() {
+            return Err(AppError::from("join channel list has duplicates".to_string()));
+        }
+        if sorted.windows(2).any(|w| w[1] != w[0] + 1) {
+            return Err(AppError::from("join requires contiguous channels".to_string()));
+        }
+    }
+    for idx in &channel_indexes {
+        if !assignment.channels.iter().any(|c| c.channel_index == *idx) {
+            return Err(AppError::from(format!("channel {} not found", idx)));
+        }
+    }
+
+    let group_id = joined.then(new_id);
+    for idx in &channel_indexes {
+        if let Some(channel) = assignment.channels.iter_mut().find(|c| c.channel_index == *idx) {
+            channel.join_group_id = group_id.clone();
+        }
+    }
     project.touch();
 
     let project = project.clone();

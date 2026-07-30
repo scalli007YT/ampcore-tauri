@@ -280,14 +280,19 @@ export interface ResponsePoint {
   db: number;
 }
 
+/** Identifies one of the 10 chain stages a `ChannelEq` holds — `hp`/`lp`
+ * (a `CrossoverSlot`, no gain/Q) or a parametric `band` by its 0-7 index
+ * into `ChannelEq.bands` (an `EqBand`, the same index `setEqBand` takes).
+ * `ChannelEq` is deliberately not a uniform 10-element array (unlike the old
+ * app's `EqBand[]`) since crossover slots and parametric bands are
+ * structurally different types — this ref lets callers name "which stage"
+ * without re-deriving that branch at every call site. */
+export type EqStageRef = { kind: "hp" } | { kind: "lp" } | { kind: "band"; bandIndex: number };
+
 /** Samples `numPoints` log-spaced frequencies across the audible range
- * (20Hz-20kHz) and returns the composite response curve — every point is a
- * real evaluation of `compositeResponseDb` (true filter math), not an
- * interpolated/smoothed approximation. 800 points (not the earlier 200) so
- * steep slopes (e.g. a 48dB/oct 8th-order crossover's transition, which can
- * span under an octave) still render as a crisp, mathematically faithful
- * curve instead of visibly under-sampled straight-line segments. */
-export function buildResponseCurve(eq: ChannelEq, numPoints = 800): ResponsePoint[] {
+ * (20Hz-20kHz) and evaluates `fn` at each — shared by `buildResponseCurve`
+ * (composite chain) and `buildBandResponseCurve` (one isolated stage). */
+function sampleLogCurve(fn: (freqHz: number) => number, numPoints: number): ResponsePoint[] {
   const minHz = 20;
   const maxHz = 20000;
   const logMin = Math.log10(minHz);
@@ -296,7 +301,31 @@ export function buildResponseCurve(eq: ChannelEq, numPoints = 800): ResponsePoin
   for (let i = 0; i < numPoints; i++) {
     const t = i / (numPoints - 1);
     const freqHz = 10 ** (logMin + t * (logMax - logMin));
-    points.push({ freqHz, db: compositeResponseDb(eq, freqHz) });
+    points.push({ freqHz, db: fn(freqHz) });
   }
   return points;
+}
+
+/** 800 points (not fewer) so steep slopes (e.g. a 48dB/oct 8th-order
+ * crossover's transition, which can span under an octave) still render as a
+ * crisp, mathematically faithful curve instead of visibly under-sampled
+ * straight-line segments. */
+export function buildResponseCurve(eq: ChannelEq, numPoints = 800): ResponsePoint[] {
+  return sampleLogCurve((freqHz) => compositeResponseDb(eq, freqHz), numPoints);
+}
+
+/** Isolated single-stage response — the composite curve's one term for
+ * `ref` evaluated alone, all other stages excluded. Lets the EQ graph
+ * overlay "what is *this* band doing on its own" distinct from the summed
+ * composite curve, which is hard to read apart once multiple bands overlap
+ * in frequency. `crossoverMagnitudeDb`/`eqBandMagnitudeDb` stay
+ * module-private — this is the only exported way to evaluate one stage. */
+export function buildBandResponseCurve(eq: ChannelEq, ref: EqStageRef, numPoints = 800): ResponsePoint[] {
+  const fn =
+    ref.kind === "hp"
+      ? (freqHz: number) => crossoverMagnitudeDb(eq.hp, "hp", freqHz)
+      : ref.kind === "lp"
+        ? (freqHz: number) => crossoverMagnitudeDb(eq.lp, "lp", freqHz)
+        : (freqHz: number) => eqBandMagnitudeDb(eq.bands[ref.bandIndex], freqHz);
+  return sampleLogCurve(fn, numPoints);
 }

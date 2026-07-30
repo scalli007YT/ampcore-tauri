@@ -6,8 +6,9 @@ use tauri::{AppHandle, Manager};
 
 use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use super::capability::cvr::builtin_topology;
-use super::common::EntryOrigin;
-use super::project::Project;
+use super::common::{new_id, EntryOrigin};
+use super::device_link::DeviceModelLink;
+use super::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
 use super::speaker_library::SpeakerLibraryEntry;
 
 /// Rust-owned canonical store for Projects + Speaker Library + Amp Model
@@ -22,6 +23,7 @@ pub struct ProjectDataInner {
     pub projects: Vec<Project>,
     pub speaker_library: Vec<SpeakerLibraryEntry>,
     pub amp_models: Vec<AmpModelCatalogEntry>,
+    pub device_model_links: Vec<DeviceModelLink>,
 }
 
 /// Builtin CVR amp product line — (model, channel_count). Seeded into the
@@ -125,6 +127,7 @@ impl ProjectDataState {
         fs::create_dir_all(data_dir.join("projects")).map_err(|e| e.to_string())?;
 
         let speaker_library = load_json_or_default(&data_dir.join("speaker_library.json"))?;
+        let device_model_links = load_json_or_default(&data_dir.join("device_model_links.json"))?;
         let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
         let migrated = migrate_dante_flag(&mut amp_models);
         let seeded = seed_builtin_amp_models(&mut amp_models);
@@ -135,9 +138,14 @@ impl ProjectDataState {
 
         let mut projects = load_projects(&data_dir)?;
         for project in projects.iter_mut() {
-            let matrix_changed = reconcile_project_matrix_sizes(project, &amp_models);
-            let eq_changed = reconcile_project_eq_band_sizes(project, &amp_models);
-            if matrix_changed || eq_changed {
+            let mut changed = false;
+            if project.schema_version < CURRENT_PROJECT_SCHEMA_VERSION {
+                changed |= migrate_inferred_speaker_groups_to_join_ids(project);
+            }
+            changed |= reconcile_project_matrix_sizes(project, &amp_models);
+            changed |= reconcile_project_eq_band_sizes(project, &amp_models);
+            if changed {
+                project.schema_version = CURRENT_PROJECT_SCHEMA_VERSION;
                 save_project_file(&data_dir, project)?;
             }
         }
@@ -147,6 +155,7 @@ impl ProjectDataState {
             projects,
             speaker_library,
             amp_models,
+            device_model_links,
         })))
     }
 }
@@ -208,6 +217,49 @@ fn reconcile_project_eq_band_sizes(project: &mut Project, amp_models: &[AmpModel
     changed
 }
 
+/// One-time backfill for projects saved before explicit `join_group_id`
+/// existed: synthesizes a shared id for every run of >=2 channels the OLD
+/// purely-inferred grouping rule (same non-null `speaker_library_id` +
+/// sequential `way_index` starting at 0) would have grouped, so
+/// pre-existing sequential drag-drop assignments don't visually un-group
+/// the first time this ships. Gated by the caller on `schema_version <
+/// CURRENT_PROJECT_SCHEMA_VERSION` (not a bare "is join_group_id already
+/// set?" check) so it fires exactly once per project — a channel a user has
+/// since explicitly Split back apart (clearing both its assignment and its
+/// join_group_id) must never be silently re-grouped on a later load just
+/// because its data still happens to look sequential, and a fresh
+/// non-grouped sequential assignment made via the Load dialog must never be
+/// auto-grouped either.
+fn migrate_inferred_speaker_groups_to_join_ids(project: &mut Project) -> bool {
+    let mut changed = false;
+    for assignment in project.amp_assignments.iter_mut() {
+        let mut i = 0;
+        while i < assignment.channels.len() {
+            if assignment.channels[i].speaker_library_id.is_none() {
+                i += 1;
+                continue;
+            }
+            let speaker_id = assignment.channels[i].speaker_library_id.clone();
+            let mut j = i + 1;
+            while j < assignment.channels.len()
+                && assignment.channels[j].speaker_library_id == speaker_id
+                && assignment.channels[j].way_index == Some((j - i) as u32)
+            {
+                j += 1;
+            }
+            if j - i >= 2 {
+                let group_id = new_id();
+                for channel in &mut assignment.channels[i..j] {
+                    channel.join_group_id = Some(group_id.clone());
+                }
+                changed = true;
+            }
+            i = j.max(i + 1);
+        }
+    }
+    changed
+}
+
 fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {
     let projects_dir = data_dir.join("projects");
     let mut projects = Vec::new();
@@ -256,6 +308,12 @@ pub fn save_speaker_library(data_dir: &Path, entries: &[SpeakerLibraryEntry]) ->
 
 pub fn save_amp_models(data_dir: &Path, entries: &[AmpModelCatalogEntry]) -> Result<(), String> {
     let path = data_dir.join("amp_models.json");
+    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+pub fn save_device_model_links(data_dir: &Path, entries: &[DeviceModelLink]) -> Result<(), String> {
+    let path = data_dir.join("device_model_links.json");
     let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
 }

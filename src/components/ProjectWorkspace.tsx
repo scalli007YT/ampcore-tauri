@@ -114,14 +114,13 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
           {activeTab === "operator" && <OperatorView />}
           {activeDevice && (
             <AmpConfigureView
-              assignment={activeDevice}
-              ampModel={
-                activeDevice.ampModelId
-                  ? ampModels?.find((m) => m.id === activeDevice.ampModelId)
-                  : undefined
-              }
-              project={project}
-              onProjectUpdate={onProjectUpdate}
+              source={{
+                kind: "project",
+                project,
+                assignment: activeDevice,
+                ampModel: activeDevice.ampModelId ? ampModels?.find((m) => m.id === activeDevice.ampModelId) : undefined,
+                onProjectUpdate,
+              }}
             />
           )}
         </div>

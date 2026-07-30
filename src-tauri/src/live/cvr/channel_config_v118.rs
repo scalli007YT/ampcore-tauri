@@ -112,6 +112,44 @@ fn crossover_filter_type(code: u8) -> CrossoverFilterType {
     }
 }
 
+/// Inverse of `eq_filter_type` — the wire code for a given `EqFilterType`,
+/// used by `write_v118.rs` to encode outgoing FC=30 FILTER_TYPE writes. Kept
+/// next to the read-side mapping (not duplicated in the write module) so
+/// read and write can never silently drift into disagreeing about which
+/// code means what.
+pub(crate) fn eq_filter_type_code(filter_type: EqFilterType) -> u8 {
+    match filter_type {
+        EqFilterType::Peaking => 0,
+        EqFilterType::LowShelf => 1,
+        EqFilterType::HighShelf => 2,
+        EqFilterType::AllPass1st => 3,
+        EqFilterType::AllPass2nd => 4,
+        EqFilterType::GeneralLow => 5,
+        EqFilterType::GeneralHigh => 6,
+        EqFilterType::ButterworthLow => 7,
+        EqFilterType::ButterworthHigh => 8,
+        EqFilterType::BesselLow => 9,
+        EqFilterType::BesselHigh => 10,
+    }
+}
+
+/// Inverse of `crossover_filter_type` — see `eq_filter_type_code`.
+pub(crate) fn crossover_filter_type_code(filter_type: CrossoverFilterType) -> u8 {
+    match filter_type {
+        CrossoverFilterType::Butterworth12 => 0,
+        CrossoverFilterType::Bessel12 => 1,
+        CrossoverFilterType::LinkwitzRiley12 => 2,
+        CrossoverFilterType::Butterworth18 => 3,
+        CrossoverFilterType::Butterworth24 => 4,
+        CrossoverFilterType::Bessel24 => 5,
+        CrossoverFilterType::LinkwitzRiley24 => 6,
+        CrossoverFilterType::Butterworth36 => 7,
+        CrossoverFilterType::Butterworth48 => 8,
+        CrossoverFilterType::Bessel48 => 9,
+        CrossoverFilterType::LinkwitzRiley48 => 10,
+    }
+}
+
 /// Confirmed 1:1 against the reference's `POWER_MODE_NAMES` (0=Low-Ω,
 /// 1=70V, 2=100V) — matches `PowerMode`'s declaration order exactly. `None`
 /// for any other byte value — genuinely unmapped, not defaulted.
