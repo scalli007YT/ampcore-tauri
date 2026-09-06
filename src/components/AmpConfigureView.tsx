@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActionIcon,
+  Badge,
   Button,
   Center,
   Group,
@@ -31,6 +32,7 @@ import {
   CircuitBoard,
   FlipVertical2,
   Link2,
+  RefreshCw,
   Route,
   Speaker,
   ShieldAlert,
@@ -45,6 +47,7 @@ import { LimiterEditor } from "./LimiterEditor";
 import { LoadSpeakerConfigDialog } from "./LoadSpeakerConfigDialog";
 import { SpeakerFormModal } from "./SpeakerFormModal";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
+import { useLivePresets } from "../hooks/useLivePresets";
 import {
   commands,
   type AmpAssignment,
@@ -58,7 +61,9 @@ import {
   type SourceChannelCount,
   type SourceKind,
   type SpeakerLibraryEntry_Serialize as SpeakerLibraryEntry,
+  type Telemetry,
 } from "../lib/bindings";
+import { channelTelemetry, type ChannelTelemetry } from "../lib/channelTelemetry";
 import {
   createProjectConfigureActions,
   PROJECT_CONFIGURE_CAPABILITIES,
@@ -88,6 +93,12 @@ export type ConfigureSource =
       device: DiscoveredDevice;
       channelConfig?: ChannelConfigSnapshot;
       ampModel?: AmpModelCatalogEntry;
+      /** Latest FC=6 heartbeat reading for this device, if one has arrived
+       * (see `useLiveTelemetry`). Drives the meters and the V/A/°C/LIM stat
+       * tiles; absent for a Project source and until the first heartbeat
+       * lands, in which case every reading renders as unlit/"—" rather than
+       * as a fabricated zero. */
+      telemetry?: Telemetry;
     };
 
 interface AmpConfigureViewProps {
@@ -124,7 +135,11 @@ const TABS = [
 }[];
 
 /** Tabs wired to real capability + persisted values this phase — every other
- * tab keeps rendering `TabSkeleton` as before. */
+ * tab keeps rendering `TabSkeleton` as before. Preset Configuration is
+ * deliberately not in this set — it has no amp-model/capability dependency
+ * at all (FC=59 is a live wire-protocol feature, not model-catalog-driven),
+ * so it's special-cased in the render loop below instead of going through
+ * the capability-gated dispatch every other tab here shares. */
 const CONFIGURABLE_TABS = new Set(["scheme", "routing", "input", "output", "speakerConfiguration"]);
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
@@ -281,6 +296,12 @@ function TabSkeleton({
 interface ConfigurableTabProps {
   assignment: AmpAssignment;
   capability: AmpCapability;
+  /** Latest heartbeat reading for a `"live"` source — `undefined` for a
+   * Project source and before the first heartbeat arrives. Read through the
+   * `channelTelemetry` helper rather than indexed directly, so a short
+   * array (a firmware whose packet carries fewer channels than the model's
+   * topology) degrades to `null`/unlit instead of `0`. */
+  telemetry?: Telemetry;
   /** Every Speaker Library entry (including archived ones — see
    * `formatSpeakerAssignment`), fetched once by `AmpConfigureView` and
    * shared across every tab rather than each tab re-fetching its own copy
@@ -385,24 +406,49 @@ function resolveGroupSpeaker(
   return { ...group, speaker: uniform ? speaker : null, mixed: group.channelIndexes.length > 1 && !uniform };
 }
 
-/** dBFS scale for the Input/Output row meters — no live device exists in
- * this offline phase, so every caller passes `value={-60}` (fully unlit),
- * matching the old `MockInputMeter`'s "decorative only" rule. */
-const DBFS_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
+const METER_FLOOR_DB = -60;
 
-/** `wide` drops the usual `maxWidth` cap — the Output tab's row layout wants
- * the meter to fill most of the row's width (matching the reference
- * hardware view), unlike the Input tab's compact fixed-width meter. */
-function InputDbfsMeter({ disabled, wide }: { disabled?: boolean; wide?: boolean }) {
+/** Shared dB scale for every channel level meter in this view. `0` is the
+ * top for all of them, but means different things per tab: rated max output
+ * on Output/Scheme/Routing (`outputLevelDb`), and 1V on Input (`inputDbv`).
+ * `-60` is `METER_FLOOR_DB`, the value a `null` reading renders at. */
+const LEVEL_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
+
+/** The one channel level meter used by every tab — Input, Output, Scheme and
+ * Routing all render this, so a meter reads identically wherever it appears
+ * rather than each tab styling its own. `VuMeter` itself stays the generic
+ * primitive (orientation, gradient, scale, thickness are all its props);
+ * this fixes the single house style for a *channel level* reading, so those
+ * choices live in one place instead of being re-decided per call site.
+ *
+ * `wide` drops the usual `maxWidth` cap — the Output tab's row wants the
+ * meter to fill most of its width (matching the reference hardware view),
+ * unlike the compact fixed-width meter every other tab uses.
+ *
+ * `levelDb` is `null` for a Project source, before the first heartbeat, and
+ * for a channel with no signal — all of which render fully unlit, the same
+ * as a real reading at the floor. The neighbouring stat tile reads "—"
+ * rather than a number, which is what keeps those cases distinguishable. */
+function ChannelLevelMeter({
+  levelDb,
+  disabled,
+  wide,
+}: {
+  levelDb: number | null;
+  disabled?: boolean;
+  wide?: boolean;
+}) {
   return (
     <div className="min-w-0 flex-1" style={{ minWidth: 160, maxWidth: wide ? undefined : 260 }}>
       <VuMeter
         orientation="horizontal"
-        min={-60}
+        min={METER_FLOOR_DB}
         max={0}
-        value={-60}
+        value={levelDb ?? METER_FLOOR_DB}
+        gradient={DEFAULT_LEVEL_GRADIENT}
         thickness={24}
-        marks={DBFS_MARKS}
+        marks={LEVEL_MARKS}
+        peakHold
         disabled={disabled}
       />
     </div>
@@ -532,6 +578,7 @@ function RenameableLabel({
 
 function InputChannelRow({
   channel,
+  telemetry,
   delayMin,
   delayMax,
   nameMaxLength,
@@ -541,6 +588,7 @@ function InputChannelRow({
   onRename,
 }: {
   channel: AmpAssignment["channels"][number];
+  telemetry: ChannelTelemetry;
   delayMin: number | null;
   delayMax: number | null;
   nameMaxLength: number;
@@ -562,8 +610,11 @@ function InputChannelRow({
         onRename={onRename}
       />
       <Group gap="xs" wrap="nowrap" align="center">
-        <InputDbfsMeter disabled={muted} />
-        <InputStatTile value="---" label="dBFS" />
+        <ChannelLevelMeter levelDb={telemetry.inputDbv} disabled={muted} />
+        <InputStatTile
+          value={telemetry.inputDbv === null ? "—" : telemetry.inputDbv.toFixed(1)}
+          label="dBV"
+        />
         <InputStatTile
           value=""
           label="Mute"
@@ -660,8 +711,9 @@ function ChannelRail({
   );
 }
 
-function InputTab({ assignment, capability, actions }: ConfigurableTabProps) {
+function InputTab({ assignment, capability, actions, telemetry }: ConfigurableTabProps) {
   const { min, max } = capability.paramRanges.delayInMs;
+  const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const [eqChannelIndex, setEqChannelIndex] = useState(0);
   const [view, setView] = useState<string | null>("input");
   const eqChannel = assignment.channels.find((c) => c.channelIndex === eqChannelIndex) ?? assignment.channels[0];
@@ -720,6 +772,7 @@ function InputTab({ assignment, capability, actions }: ConfigurableTabProps) {
                   <InputChannelRow
                     key={channel.channelIndex}
                     channel={channel}
+                    telemetry={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage)}
                     delayMin={min}
                     delayMax={max}
                     nameMaxLength={capability.paramRanges.channelNameMaxLength}
@@ -746,6 +799,7 @@ const POWER_MODE_LABELS: Record<PowerMode, string> = {
 
 function OutputChannelRow({
   channel,
+  telemetry,
   trimMin,
   trimMax,
   volumeMin,
@@ -769,6 +823,7 @@ function OutputChannelRow({
   onRename,
 }: {
   channel: AmpAssignment["channels"][number];
+  telemetry: ChannelTelemetry;
   trimMin: number | null;
   trimMax: number | null;
   volumeMin: number | null;
@@ -813,11 +868,21 @@ function OutputChannelRow({
         onRename={onRename}
       />
       <Group gap="xs" wrap="nowrap" align="center" className="overflow-x-auto">
-        <InputDbfsMeter disabled={muted} wide />
-        <InputStatTile value="" label="LIM" onClick={onOpenLimiter} icon={<SlidersHorizontal size={16} />} />
-        <InputStatTile value="0" label="V" />
-        <InputStatTile value="0" label="A" />
-        <InputStatTile value="0" label="°C" />
+        <ChannelLevelMeter levelDb={telemetry.outputLevelDb} disabled={muted} wide />
+        <InputStatTile
+          value={telemetry.gainReductionDb === null ? "" : telemetry.gainReductionDb.toFixed(1)}
+          label="LIM"
+          onClick={onOpenLimiter}
+          // Lit only while the limiter is actually pulling gain down, so the
+          // tile doubles as a live "limiting now" indicator instead of a
+          // permanently-highlighted button.
+          active={telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0}
+          activeColor="var(--mantine-color-red-6)"
+          icon={telemetry.gainReductionDb === null ? <SlidersHorizontal size={16} /> : undefined}
+        />
+        <InputStatTile value={telemetry.outputVoltage === null ? "—" : telemetry.outputVoltage.toFixed(1)} label="V" />
+        <InputStatTile value={telemetry.outputCurrent === null ? "—" : telemetry.outputCurrent.toFixed(2)} label="A" />
+        <InputStatTile value={telemetry.temperatureC === null ? "—" : telemetry.temperatureC.toFixed(1)} label="°C" />
         <InputStatTile value="" label="FIR" onClick={onOpenFir} icon={<Waves size={16} />} />
         <InputStatTile value="" label="EQ Out" onClick={onOpenEq} icon={<Activity size={16} />} />
         <Popover
@@ -1104,7 +1169,7 @@ function BridgePairSidebar({
   );
 }
 
-function OutputTab({ assignment, capability, actions, capabilities }: ConfigurableTabProps) {
+function OutputTab({ assignment, capability, actions, capabilities, telemetry }: ConfigurableTabProps) {
   const trimRange = capability.paramRanges.outputTrimDb;
   const volumeRange = capability.paramRanges.outputVolumeDb;
   const delayRange = capability.paramRanges.delayOutMs;
@@ -1113,6 +1178,7 @@ function OutputTab({ assignment, capability, actions, capabilities }: Configurab
   const splitTrimVolume = capability.firmware.splitTrimVolume;
   const noiseGateThresholdAdjustable = capability.firmware.noiseGateThreshold;
   const powerModes = capability.topology.powerModes;
+  const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const [subChannelIndex, setSubChannelIndex] = useState(0);
   const [view, setView] = useState<string | null>("output");
   const subChannel =
@@ -1213,6 +1279,7 @@ function OutputTab({ assignment, capability, actions, capabilities }: Configurab
                 key={subChannel.channelIndex}
                 assignment={assignment}
                 channelIndex={subChannel.channelIndex}
+                telemetry={channelTelemetry(telemetry, subChannel.channelIndex, ratedRmsVoltage)}
                 capability={capability}
                 actions={actions}
                 capabilities={capabilities}
@@ -1227,6 +1294,7 @@ function OutputTab({ assignment, capability, actions, capabilities }: Configurab
                     <OutputChannelRow
                       key={channel.channelIndex}
                       channel={channel}
+                      telemetry={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage)}
                       trimMin={trimRange.min}
                       trimMax={trimRange.max}
                       volumeMin={volumeRange.min}
@@ -1289,32 +1357,6 @@ function OutputTab({ assignment, capability, actions, capabilities }: Configurab
   );
 }
 
-/** Level scale for the Scheme/Routing per-channel meters — no live device
- * exists in this offline phase, so every caller passes `value={-60}`
- * (fully unlit), matching the old `MockLevelMeter`'s "decorative only"
- * rule. */
-const LEVEL_MARKS: VuMeterMark[] = [-60, -54, -48, -42, -36, -30, -24, -18, -12, -6, 0, 6, 12, 18].map((value) => ({
-  value,
-  label: String(value),
-}));
-
-function LevelMeter() {
-  return (
-    <div style={{ minWidth: 160, maxWidth: 200, width: "100%" }}>
-      <VuMeter
-        orientation="horizontal"
-        min={-60}
-        max={18}
-        value={-60}
-        gradient={DEFAULT_LEVEL_GRADIENT}
-        backdropOpacity={0.6}
-        thickness={8}
-        marks={LEVEL_MARKS}
-      />
-    </div>
-  );
-}
-
 /** One channel's signal-flow summary row on the Scheme tab — same
  * proportions as `SchemeRowSkeleton` (50px / 90px / flex-1 / 160px), filled
  * with real values pulled from Source Selection and the Input/Output tabs.
@@ -1322,9 +1364,11 @@ function LevelMeter() {
 function SchemeRow({
   channel,
   speakers,
+  telemetry,
 }: {
   channel: AmpAssignment["channels"][number];
   speakers: SpeakerLibraryEntry[];
+  telemetry: ChannelTelemetry;
 }) {
   const sourceLabel = formatSourceLabel(channel.source);
   const speakerLabel = formatSpeakerAssignment(speakers, channel.speakerLibraryId, channel.wayIndex);
@@ -1366,19 +1410,25 @@ function SchemeRow({
         <ArrowRight size={14} />
       </Center>
       <Center w={160}>
-        <LevelMeter />
+        <ChannelLevelMeter levelDb={telemetry.outputLevelDb} />
       </Center>
     </Group>
   );
 }
 
-function SchemeTab({ assignment, speakers }: ConfigurableTabProps) {
+function SchemeTab({ assignment, speakers, telemetry, capability }: ConfigurableTabProps) {
+  const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   return (
     <Stack h="100%" p="xl" gap="md">
       <Text fw={600}>Scheme</Text>
       <Stack gap="lg" className="flex-1" justify="center">
         {assignment.channels.map((channel) => (
-          <SchemeRow key={channel.channelIndex} channel={channel} speakers={speakers} />
+          <SchemeRow
+            key={channel.channelIndex}
+            channel={channel}
+            speakers={speakers}
+            telemetry={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage)}
+          />
         ))}
       </Stack>
     </Stack>
@@ -2111,8 +2161,10 @@ function RoutingTab({
   assignment,
   capability,
   actions,
+  telemetry,
 }: ConfigurableTabProps) {
   const { min, max } = capability.paramRanges.matrixGainDb;
+  const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
   const sourceCount = capability.topology.matrixInputCount;
   const sourceCounts = capability.topology.sourceCounts;
   const [hoveredCell, setHoveredCell] = useState<{
@@ -2301,7 +2353,9 @@ function RoutingTab({
                         {String.fromCharCode(65 + channel.channelIndex)}
                       </Text>
                     </Group>
-                    <LevelMeter />
+                    <ChannelLevelMeter
+                      levelDb={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage).outputLevelDb}
+                    />
                   </Group>
                 </Fragment>
               );
@@ -2310,6 +2364,81 @@ function RoutingTab({
         </ScrollArea>
       </Stack>
     </Center>
+  );
+}
+
+/** FC=59 preset browser — fetch-on-demand (mount + manual Refresh) rather
+ * than the continuous-poll pattern other tabs use, since preset names
+ * change rarely (see `useLivePresets`). Deliberately not a
+ * `ConfigurableTabProps` consumer like the other tabs in `TAB_COMPONENTS`:
+ * presets are a live wire-protocol feature with no amp-model/capability
+ * dependency, so it only needs `deviceId`/`firmwareFamily` (see the
+ * special-cased branch in `AmpConfigureView`'s render loop below). */
+function PresetConfigurationTab({ deviceId, firmwareFamily }: { deviceId?: string; firmwareFamily?: string | null }) {
+  const { presets, loading, refresh, recall } = useLivePresets(deviceId);
+
+  if (!deviceId) {
+    return (
+      <Center h="100%">
+        <Text c="dimmed" size="sm">
+          No live device selected.
+        </Text>
+      </Center>
+    );
+  }
+
+  if (firmwareFamily !== "1.1.8") {
+    return (
+      <Center h="100%">
+        <Text c="dimmed" size="sm">
+          Preset fetching requires firmware 1.1.8 (detected: {firmwareFamily ?? "unknown"}).
+        </Text>
+      </Center>
+    );
+  }
+
+  return (
+    <Stack p="md" gap="md" h="100%">
+      <Group justify="space-between">
+        <Text fw={600}>Preset Configuration</Text>
+        <Button size="xs" leftSection={<RefreshCw size={14} />} loading={loading} onClick={refresh}>
+          Refresh
+        </Button>
+      </Group>
+      <ScrollArea className="flex-1">
+        <Stack gap="xs">
+          {!presets && !loading && (
+            <Text c="dimmed" size="sm">
+              No preset data yet — click Refresh.
+            </Text>
+          )}
+          {(presets?.slots ?? []).map((slot) => {
+            const isEmpty = !slot.name || slot.name.toLowerCase() === "null";
+            const isActive = !isEmpty && presets?.activePresetName === slot.name;
+            return (
+              <Group
+                key={slot.index}
+                justify="space-between"
+                p="xs"
+                style={{ border: "1px solid var(--mantine-color-default-border)", borderRadius: 4 }}
+              >
+                <Text c={isEmpty ? "dimmed" : undefined}>{isEmpty ? "(empty)" : slot.name}</Text>
+                <Group gap="xs">
+                  {isActive && (
+                    <Badge color="green" variant="light">
+                      Active
+                    </Badge>
+                  )}
+                  <Button size="xs" variant="light" disabled={isEmpty} onClick={() => recall(slot.index)}>
+                    Recall
+                  </Button>
+                </Group>
+              </Group>
+            );
+          })}
+        </Stack>
+      </ScrollArea>
+    </Stack>
   );
 }
 
@@ -2380,9 +2509,19 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const onProjectUpdate = source?.kind === "project" ? source.onProjectUpdate : undefined;
 
   // Speaker Configuration is a Project-only planning concept (physical
-  // output assignment, Join grouping) with no live-device equivalent — not
-  // shown at all for a live source, rather than rendered disabled.
-  const visibleTabs = source?.kind === "live" ? TABS.filter((t) => t.value !== "speakerConfiguration") : TABS;
+  // output assignment, Join grouping) with no live-device equivalent.
+  // Preset Configuration is the mirror image — a live-device-only concept
+  // (FC=59 presets live on the physical amp; a Project with no live device
+  // has nothing to fetch) — hidden for a Project source and when no source
+  // is selected at all, not rendered disabled.
+  const visibleTabs = TABS.filter((t) => {
+    if (t.value === "speakerConfiguration" && source?.kind === "live") return false;
+    if (t.value === "presetConfiguration" && source?.kind !== "live") return false;
+    return true;
+  });
+  const telemetry = source?.kind === "live" ? source.telemetry : undefined;
+  const deviceId = source?.kind === "live" ? source.device.id : undefined;
+  const firmwareFamily = source?.kind === "live" ? source.device.firmwareFamily : undefined;
 
   return (
     <Tabs defaultValue="scheme" orientation="vertical" className="h-full">
@@ -2405,7 +2544,9 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
       {visibleTabs.map(({ value, label, skeleton }) => {
         let content: ReactNode;
 
-        if (
+        if (value === "presetConfiguration") {
+          content = <PresetConfigurationTab deviceId={deviceId} firmwareFamily={firmwareFamily} />;
+        } else if (
           !CONFIGURABLE_TABS.has(value) ||
           !assignment ||
           !actions
@@ -2437,6 +2578,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
             <TabComponent
               assignment={assignment}
               capability={capability}
+              telemetry={telemetry}
               speakers={speakers}
               onSpeakersUpdate={setSpeakers}
               actions={actions}

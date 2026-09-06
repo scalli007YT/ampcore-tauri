@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::data::common::now_millis;
 
 use super::cvr::channel_config::ChannelConfigSnapshot;
+use super::cvr::preset::DevicePresetsSnapshot;
 use super::cvr::request::RequestSpec;
 use super::cvr::telemetry::Telemetry;
 use super::driver::DriverHandle;
@@ -53,6 +54,11 @@ pub struct LiveDeviceInner {
     /// Latest FC=27 channel-config snapshot per device id — same
     /// never-cleared-on-offline, separately-emitted pattern as `telemetry`.
     pub channel_config: HashMap<String, ChannelConfigSnapshot>,
+    /// Latest FC=59 preset snapshot per device id — on-demand only (no
+    /// background poll, see `commands/live_control.rs`'s
+    /// `live_control_fetch_presets`), but stored/emitted the same way as
+    /// `telemetry`/`channel_config` so every mounted view stays in sync.
+    pub presets: HashMap<String, DevicePresetsSnapshot>,
     /// Reaches into the running CVR driver's request engine from outside its
     /// task (e.g. a future Tauri command) — `None` whenever no driver is
     /// running. `Some` while `CvrDriver::start`'s spawned task is alive.
@@ -71,6 +77,7 @@ impl LiveDeviceState {
             handles: Vec::new(),
             telemetry: HashMap::new(),
             channel_config: HashMap::new(),
+            presets: HashMap::new(),
             request_tx: None,
         })))
     }
@@ -102,6 +109,16 @@ pub struct DeviceChannelConfig {
     pub config: ChannelConfigSnapshot,
 }
 
+/// Event/command payload pairing a device id with its latest FC=59 preset
+/// snapshot — the shape `live_presets:updated` emits and
+/// `live_control_get_presets` returns a snapshot `Vec` of.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePresets {
+    pub device_id: String,
+    pub presets: DevicePresetsSnapshot,
+}
+
 #[derive(Clone)]
 pub struct LiveEventSink {
     pub app: AppHandle,
@@ -128,6 +145,18 @@ impl LiveEventSink {
             inner.channel_config.insert(device_id.clone(), config.clone());
         }
         self.app.emit("live_channel_config:updated", &DeviceChannelConfig { device_id, config }).ok();
+    }
+
+    /// Records one device's freshly fetched FC=59 preset snapshot and emits
+    /// it — same never-cleared, separately-emitted pattern as
+    /// `set_channel_config`, just triggered on-demand rather than by a
+    /// background poll.
+    pub fn set_presets(&self, device_id: String, presets: DevicePresetsSnapshot) {
+        {
+            let mut inner = self.state.lock().unwrap();
+            inner.presets.insert(device_id.clone(), presets.clone());
+        }
+        self.app.emit("live_presets:updated", &DevicePresets { device_id, presets }).ok();
     }
 
     pub fn upsert(&self, mut device: DiscoveredDevice) {

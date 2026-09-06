@@ -2,14 +2,35 @@ import { useEffect, useState } from "react";
 import { Button, Divider, Group, NumberInput, Slider, Stack, Text } from "@mantine/core";
 import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type Limiter } from "../lib/bindings";
 import type { ConfigureActions, ConfigureCapabilities } from "../lib/configureActions";
-import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
+import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark, type VuMeterZone } from "./VuMeter";
+import { limiterThresholdToDb, type ChannelTelemetry } from "../lib/channelTelemetry";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
-/** Scale for the Out dB/Limit dB columns — no live device data exists yet
- * in this offline-planning phase, so both meters are always shown at their
- * minimum (fully unlit), matching the old `MeterColumn`'s decorative-only
- * rule. */
+/** Bottom of the Out dB / Limit dB scale. Also the value a `null` reading
+ * renders at, so a channel with no telemetry sits unlit on both columns. */
+const LIMITER_METER_FLOOR = -40;
+
+/** Threshold marker colors on the Out dB column — the vivid ends of
+ * `DEFAULT_LEVEL_GRADIENT` (its yellow and red stops run through
+ * `vibrantColor`), so the lines read as belonging to the same scale they're
+ * drawn on rather than as arbitrary UI accents. */
+const RMS_THRESHOLD_COLOR = "rgb(255, 237, 31)";
+const PEAK_THRESHOLD_COLOR = "rgb(255, 28, 28)";
+/** Shaded operating bands sit under the fill, so they have to stay readable
+ * through the unlit track without competing with the bar itself. */
+const THRESHOLD_ZONE_OPACITY = 0.5;
+/** Left/right halves of the Out dB track, used only while the two threshold
+ * lines would otherwise occlude each other (see `thresholdsCollide`). */
+const RMS_MARK_SPAN = [0, 0.5] as const;
+const PEAK_MARK_SPAN = [0.5, 1] as const;
+/** Vertical gap, in px, below which the two threshold lines are treated as
+ * overlapping. A touch more than the 2px line height, so a near-miss splits
+ * rather than rendering as one thick smear with a sliver of gap. */
+const MARK_COLLISION_PX = 3;
+
+/** Scale for the Out dB/Limit dB columns. `0` means rated max output on the
+ * Out column and *no* gain reduction on the Limit column. */
 const LIMITER_METER_MARKS: VuMeterMark[] = [0, -8, -16, -24, -32, -40].map((value) => ({
   value,
   label: String(value),
@@ -80,6 +101,10 @@ const SLIDER_WATT_STEP = 10;
 interface LimiterEditorProps {
   assignment: AmpAssignment;
   channelIndex: number;
+  /** This channel's live heartbeat slice — drives the Out dB / Limit dB
+   * columns. Absent for a Project source and before the first heartbeat,
+   * which leaves both meters unlit and their readouts at "—". */
+  telemetry?: ChannelTelemetry;
   capability: AmpCapability;
   actions: ConfigureActions;
   capabilities: ConfigureCapabilities;
@@ -91,9 +116,17 @@ interface LimiterEditorProps {
  * Load (ohms) field, and an ON/OFF pill per stage above the numeric fields.
  * Both stages can be engaged simultaneously. Derived power readouts and the
  * meters are display-only, computed from the channel's existing `ohms`
- * field — never persisted, since no live device data exists in this
- * offline-planning phase. */
-export function LimiterEditor({ assignment, channelIndex, capability, actions, capabilities }: LimiterEditorProps) {
+ * field — never persisted. The Out dB/Limit dB columns are fed by live
+ * heartbeat telemetry (`telemetry`); the derived power readouts remain
+ * display-only. */
+export function LimiterEditor({
+  assignment,
+  channelIndex,
+  capability,
+  actions,
+  capabilities,
+  telemetry,
+}: LimiterEditorProps) {
   const channel = assignment.channels.find((c) => c.channelIndex === channelIndex) ?? assignment.channels[0];
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
   const ohms = channel.ohms ?? 8;
@@ -190,6 +223,80 @@ export function LimiterEditor({ assignment, channelIndex, capability, actions, c
   const rmsRangeMinDisplay = rmsRange.min != null ? toDisplay(rmsRange.min) : null;
   const peakRangeMinDisplay = peakRange.min != null ? toDisplay(peakRange.min) : null;
 
+  // Threshold marker positions on the Out dB meter. Deliberately the *raw*
+  // per-channel thresholds, not the bridge-doubled display values: the meter
+  // shows this channel's own output level against its own rated voltage, so
+  // a doubled threshold would sit ~6dB off on a bridged pair.
+  const rmsThresholdDb = limiterThresholdToDb(rmsThresholdVrms, "rms", ratedRmsVoltage);
+  const peakThresholdDb = limiterThresholdToDb(peakThresholdVp, "peak", ratedRmsVoltage);
+  // A threshold off the bottom of the scale is dropped rather than clamped —
+  // a line pinned to the floor would read as a threshold *at* -40dB.
+  const inScale = (db: number | null): db is number => db !== null && db >= LIMITER_METER_FLOOR && db <= 0;
+  // Two bands under the bar: red from the peak threshold up to 0dB (past
+  // peak protection), yellow between the two thresholds (RMS limiting, peak
+  // still clear). Both need their own threshold in scale to have a defined
+  // edge; the yellow band additionally needs the peak line, since that's
+  // where it starts.
+  //
+  // Peak normally sits at or above RMS in dB, since the panel enforces
+  // `peakVp >= rmsVrms * √2` on every edit — but only on edit. Stored data
+  // can violate it (`FALLBACK_LIMITER`'s own 100Vrms/140Vp pair is 1.4V
+  // short of the floor, putting peak 0.1dB *below* RMS), so the two can
+  // cross. `VuMeter` orders each zone's ends itself rather than assuming
+  // `from < to`, which is what keeps that case rendering as a thin band
+  // instead of vanishing.
+  const outMeterZones: VuMeterZone[] = [
+    ...(inScale(peakThresholdDb)
+      ? [{ from: peakThresholdDb, to: 0, color: PEAK_THRESHOLD_COLOR, opacity: THRESHOLD_ZONE_OPACITY }]
+      : []),
+    ...(inScale(peakThresholdDb) && inScale(rmsThresholdDb)
+      ? [
+          {
+            from: rmsThresholdDb,
+            to: peakThresholdDb,
+            color: RMS_THRESHOLD_COLOR,
+            opacity: THRESHOLD_ZONE_OPACITY,
+          },
+        ]
+      : []),
+  ];
+  // Peak lands on exactly the same dB as RMS whenever it sits at its
+  // enforced floor of `rmsVrms * √2` — the panel's default state — so the
+  // collision test is measured in rendered pixels rather than in dB, and
+  // tracks the meter's real height and scale instead of a guessed epsilon.
+  const meterPxPerDb = SLIDER_HEIGHT / (0 - LIMITER_METER_FLOOR);
+  const thresholdsCollide =
+    inScale(rmsThresholdDb) &&
+    inScale(peakThresholdDb) &&
+    Math.abs(peakThresholdDb - rmsThresholdDb) * meterPxPerDb < MARK_COLLISION_PX;
+
+  const outMeterMarks: VuMeterMark[] = [
+    ...LIMITER_METER_MARKS,
+    // Full-width normally; half-width lanes only while the two lines would
+    // land on top of each other. Neither is ever nudged off its true value —
+    // the split is what makes a genuine tie readable as one yellow/red line.
+    ...(inScale(rmsThresholdDb)
+      ? [
+          {
+            value: rmsThresholdDb,
+            color: RMS_THRESHOLD_COLOR,
+            glow: true,
+            span: thresholdsCollide ? RMS_MARK_SPAN : undefined,
+          },
+        ]
+      : []),
+    ...(inScale(peakThresholdDb)
+      ? [
+          {
+            value: peakThresholdDb,
+            color: PEAK_THRESHOLD_COLOR,
+            glow: true,
+            span: thresholdsCollide ? PEAK_MARK_SPAN : undefined,
+          },
+        ]
+      : []),
+  ];
+
   async function handleOhmsChange(value: number) {
     if (!actions.setChannelOhms) return;
     const targetChannelIndex = isBridged ? pairLeaderIndex : channelIndex;
@@ -216,8 +323,25 @@ export function LimiterEditor({ assignment, channelIndex, capability, actions, c
             patch({ rmsThresholdVrms: Math.min(rawVoltage, rmsThresholdMax) });
           }}
         />
-        <LimiterMeterColumn label="Out dB" gradient valueText="---" />
-        <LimiterMeterColumn label="Limit dB" valueText="0.0 dB" />
+        <LimiterMeterColumn
+          label="Out dB"
+          gradient
+          peakHold
+          levelDb={telemetry?.outputLevelDb ?? null}
+          valueText={fmtDb(telemetry?.outputLevelDb ?? null)}
+          marks={outMeterMarks}
+          zones={outMeterZones}
+        />
+        <LimiterMeterColumn
+          label="Limit dB"
+          // Gain reduction, so the bar hangs from 0 downward: an idle
+          // limiter reads as an empty track, and the lit length *is* the
+          // reduction. Filling from the bottom like a level meter would
+          // show a full bar whenever nothing is being limited.
+          fillFrom="max"
+          levelDb={telemetry?.gainReductionDb ?? null}
+          valueText={fmtDb(telemetry?.gainReductionDb ?? null)}
+        />
         <ThresholdSliderColumn
           label="Peak"
           value={peakPowerWatts(peakThresholdVpDisplay, effectiveOhms)}
@@ -411,11 +535,36 @@ function ThresholdSliderColumn({
   );
 }
 
-/** `Out dB`/`Limit dB` columns — `Out dB` uses the shared level gradient,
- * `Limit dB` (gain reduction) is a plain flat track. Both always show
- * `value` at the scale's max (fully unlit/no reduction) since no live
- * device data exists in this offline-planning phase. */
-function LimiterMeterColumn({ label, gradient, valueText }: { label: string; gradient?: boolean; valueText: string }) {
+function fmtDb(db: number | null): string {
+  return db === null ? "—" : `${db.toFixed(1)} dB`;
+}
+
+/** `Out dB`/`Limit dB` columns — `Out dB` is an output level meter on the
+ * shared gradient, `Limit dB` is a gain-reduction meter on a flat track
+ * hanging from the top (see `fillFrom`). "Empty" is a different number for
+ * each: the scale's floor for a level meter, but `0` for a reduction meter,
+ * where the floor would mean 40dB of gain reduction. A `null` reading uses
+ * whichever of the two leaves the track unlit, so no data never reads as a
+ * pinned meter. */
+function LimiterMeterColumn({
+  label,
+  gradient,
+  levelDb,
+  valueText,
+  fillFrom,
+  peakHold,
+  marks = LIMITER_METER_MARKS,
+  zones,
+}: {
+  label: string;
+  gradient?: boolean;
+  levelDb: number | null;
+  valueText: string;
+  fillFrom?: "min" | "max";
+  peakHold?: boolean;
+  marks?: VuMeterMark[];
+  zones?: VuMeterZone[];
+}) {
   return (
     <Stack gap={8} align="center">
       <Text size="sm" fw={700} c="dimmed" tt="uppercase">
@@ -423,14 +572,16 @@ function LimiterMeterColumn({ label, gradient, valueText }: { label: string; gra
       </Text>
       <VuMeter
         orientation="vertical"
-        min={-40}
+        min={LIMITER_METER_FLOOR}
         max={0}
-        value={0}
+        value={levelDb ?? (fillFrom === "max" ? 0 : LIMITER_METER_FLOOR)}
         gradient={gradient ? DEFAULT_LEVEL_GRADIENT : undefined}
-        backdropOpacity={gradient ? 0.25 : 1}
         thickness={22}
         size={SLIDER_HEIGHT}
-        marks={LIMITER_METER_MARKS}
+        marks={marks}
+        zones={zones}
+        fillFrom={fillFrom}
+        peakHold={peakHold}
       />
       <Text size="xs" c="dimmed">
         {valueText}

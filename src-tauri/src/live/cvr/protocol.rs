@@ -37,11 +37,6 @@ pub const FC_HEARTBEAT: u8 = 6;
 /// wire protocol doesn't support asking for just one.
 pub const FC_SYNC_DATA: u8 = 27;
 
-/// Body-bytes-per-datagram unit for multi-fragment requests/responses —
-/// matches the reference implementation's chunk size exactly (required for
-/// interop: this is a wire-format constant, not a tunable).
-pub const FRAGMENT_SIZE: usize = 450;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum CvrFirmwareFamily {
@@ -194,57 +189,6 @@ pub fn build_basic_info_query() -> Vec<u8> {
 
 pub fn build_heartbeat_query() -> Vec<u8> {
     build_protocol_packet(FC_HEARTBEAT, 2, 0, &[])
-}
-
-/// Splits a large protocol frame across multiple datagrams when its inner
-/// frame (StructHeader + body + checksum) exceeds `FRAGMENT_SIZE`. For
-/// bodies that fit in one datagram, delegates to `build_protocol_packet` and
-/// returns a single-element `Vec` — the existing single-fragment path stays
-/// byte-for-byte unchanged for every function code in use today.
-///
-/// The multi-fragment path mirrors the reference implementation's `sendFC`
-/// exactly: 1-based `packets_step`, and every fragment's NetworkData header
-/// carries the *last* fragment's length (not its own) in the
-/// `packets_lastlen` field — matching that specific asymmetry is required
-/// for compatibility with real firmware, the same way `validate_frame`
-/// already has to match an intentional checksum asymmetry.
-///
-/// Built for a future large write (e.g. FC=57 speaker data) — no function
-/// code in use today sends a body anywhere near this size, so this path is
-/// unexercised against real hardware until one does.
-pub fn build_protocol_packets(function_code: u8, status_code: u8, chx: u8, body: &[u8]) -> Vec<Vec<u8>> {
-    let struct_header = build_struct_header(function_code, status_code, chx, 0, 0, 0);
-    let mut inner = Vec::with_capacity(STRUCT_HEADER_LEN + body.len());
-    inner.extend_from_slice(&struct_header);
-    inner.extend_from_slice(body);
-    let checksum = calc_check_code(&inner);
-    inner.extend_from_slice(&checksum);
-
-    if inner.len() <= FRAGMENT_SIZE {
-        let network_header = build_network_data_header(inner.len() as u16, 0, 0, 1, 1);
-        let mut packet = Vec::with_capacity(NETWORK_HEADER_LEN + inner.len());
-        packet.extend_from_slice(&network_header);
-        packet.extend_from_slice(&inner);
-        return vec![packet];
-    }
-
-    // Wire format's packets_count field is a u8, so ~114KB (255 * 450B) is
-    // the hard ceiling — unreachable by anything this app sends today.
-    let packets_count = ((inner.len() + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE) as u8;
-    let last_len = if inner.len() % FRAGMENT_SIZE == 0 { FRAGMENT_SIZE } else { inner.len() % FRAGMENT_SIZE };
-
-    (1..=packets_count)
-        .map(|step| {
-            let chunk_start = (step as usize - 1) * FRAGMENT_SIZE;
-            let chunk_len = if step == packets_count { last_len } else { FRAGMENT_SIZE };
-            let chunk = &inner[chunk_start..chunk_start + chunk_len];
-            let network_header = build_network_data_header(last_len as u16, 0, 0, packets_count, step);
-            let mut packet = Vec::with_capacity(NETWORK_HEADER_LEN + chunk.len());
-            packet.extend_from_slice(&network_header);
-            packet.extend_from_slice(chunk);
-            packet
-        })
-        .collect()
 }
 
 /// Every received data packet (dataState=0) gets ACK'd by echoing its

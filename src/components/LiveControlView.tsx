@@ -161,6 +161,7 @@ export function LiveControlView() {
                     kind: "live",
                     device: selectedDevice,
                     channelConfig: channelConfigById[selectedDevice.id],
+                    telemetry: telemetryById[selectedDevice.id],
                     ampModel: ampModel ?? undefined,
                   }}
                 />

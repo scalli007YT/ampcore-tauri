@@ -2,6 +2,7 @@ pub mod channel_config;
 pub mod channel_config_v118;
 pub mod channel_config_v119;
 pub mod driver;
+pub mod preset;
 pub mod protocol;
 pub mod request;
 pub mod telemetry;

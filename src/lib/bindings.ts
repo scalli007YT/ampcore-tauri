@@ -170,6 +170,39 @@ export const commands = {
 	liveControlGetTelemetry: () => typedError<DeviceTelemetry[], AppError>(__TAURI_INVOKE("live_control_get_telemetry")),
 	liveControlGetChannelConfig: () => typedError<DeviceChannelConfig[], AppError>(__TAURI_INVOKE("live_control_get_channel_config")),
 	/**
+	 *  On-demand counterpart to the background ~200ms FC=27 poll (see
+	 *  `driver.rs`'s `config_poll_tick`): sends one SYNC_DATA request through the
+	 *  driver's request registry with an `External` sink and awaits its result
+	 *  directly, instead of waiting for the next passive poll tick to pick it up.
+	 *  Still updates `LiveDeviceState.channel_config` and emits
+	 *  `live_channel_config:updated` exactly like the background poll does (via
+	 *  the shared `parse_and_store_sync_data`), so callers that only listen for
+	 *  the event rather than this command's return value stay in sync too.
+	 */
+	liveControlRefreshNow: (deviceId: string) => typedError<DeviceChannelConfig, AppError>(__TAURI_INVOKE("live_control_refresh_now", { deviceId })),
+	/**
+	 *  Fetches the full preset slot-name list (FC=59 mode=0) and the currently
+	 *  active preset's name (mode=4) as one command — deliberately not two
+	 *  independently-callable commands, since both share the same FC=59 request
+	 *  registry key and must not overlap (see `send_preset_request`'s doc). The
+	 *  mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
+	 *  the result and emits `live_presets:updated`, same pattern as
+	 *  `live_control_refresh_now`/`parse_and_store_sync_data`.
+	 */
+	liveControlFetchPresets: (deviceId: string) => typedError<DevicePresets, AppError>(__TAURI_INVOKE("live_control_fetch_presets", { deviceId })),
+	/**
+	 *  Snapshot getter mirroring `live_control_get_channel_config` — returns
+	 *  whatever `live_control_fetch_presets` last stored, no wire I/O.
+	 */
+	liveControlGetPresets: () => typedError<DevicePresets[], AppError>(__TAURI_INVOKE("live_control_get_presets")),
+	/**
+	 *  Fire-and-forget FC=59 mode=2 recall, same convention as every other write
+	 *  in this app (see `write.rs`'s module doc) — the device's new active
+	 *  preset shows up on the next manual `live_control_fetch_presets` call, not
+	 *  pushed automatically here.
+	 */
+	liveControlRecallPreset: (deviceId: string, slotIndex: number) => typedError<null, AppError>(__TAURI_INVOKE("live_control_recall_preset", { deviceId, slotIndex })),
+	/**
 	 *  Fire-and-forget: sends the write packet and returns once the datagram is
 	 *  sent, without waiting for the device to apply it. The next FC=27 poll
 	 *  (already running for every discovered device, see `driver.rs`) picks up
@@ -745,6 +778,22 @@ export type DeviceModelLink = {
 };
 
 /**
+ *  Event/command payload pairing a device id with its latest FC=59 preset
+ *  snapshot — the shape `live_presets:updated` emits and
+ *  `live_control_get_presets` returns a snapshot `Vec` of.
+ */
+export type DevicePresets = {
+	deviceId: string,
+	presets: DevicePresetsSnapshot,
+};
+
+export type DevicePresetsSnapshot = {
+	slots: PresetSlot[],
+	activePresetName: string | null,
+	receivedAt: number | null,
+};
+
+/**
  *  Event/command payload pairing a device id with its latest telemetry —
  *  the shape `live_telemetry:updated` emits and `live_control_get_telemetry`
  *  returns a snapshot `Vec` of.
@@ -894,6 +943,11 @@ export type PeakLimiter = {
 
 /**  Output power/impedance mode — ported from the old app's `POWER_MODE_NAMES`. */
 export type PowerMode = "lowOhm" | "v70" | "v100";
+
+export type PresetSlot = {
+	index: number,
+	name: string,
+};
 
 export type Project = {
 	id: string,

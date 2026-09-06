@@ -36,6 +36,17 @@ pub enum RequestError {
     /// function code (see `RequestRegistry::resolve`'s FC=27 check) — a real
     /// surfaced error, never silently handed to a byte parser as if valid.
     ShapeMismatch(usize),
+    /// Another request was already pending for this IP (any function code)
+    /// when this one was submitted — rejected before ever registering it.
+    /// Necessary because `FragmentReassembler`'s `by_ip` map (see below) has
+    /// no per-function-code or per-request correlation id to key on — the
+    /// wire's `NetworkDataHeader` doesn't carry one at the individual
+    /// fragment level — so two concurrent multi-fragment response streams
+    /// from the same IP (e.g. the FC=27 poll tick and an on-demand FC=59
+    /// fetch racing each other) would silently interleave into one garbled
+    /// buffer instead of failing loudly. Retriable — the caller should back
+    /// off briefly and try again once the other exchange has resolved.
+    Busy,
 }
 
 /// Where a resolved request's result goes. `Internal` is what the driver's
@@ -89,11 +100,13 @@ pub struct RequestRegistry {
 }
 
 impl RequestRegistry {
-    /// True if a request for `(ip, fc)` is already in flight — the driver's
-    /// FC=27 poll tick uses this to skip a device rather than stacking a
-    /// second request on top of an unresolved one.
-    pub fn has_pending(&self, ip: &str, function_code: u8) -> bool {
-        self.pending.contains_key(&(ip.to_string(), function_code))
+    /// True if a request for `ip` is in flight under ANY function code — the
+    /// driver uses this (not `has_pending`) before registering anything new
+    /// for that ip, since the shared per-IP `FragmentReassembler` can't
+    /// safely interleave two concurrent multi-fragment exchanges regardless
+    /// of which function codes they're for (see `RequestError::Busy`).
+    pub fn has_pending_for_ip(&self, ip: &str) -> bool {
+        self.pending.keys().any(|(pending_ip, _)| pending_ip == ip)
     }
 
     /// Registers a new request, bumping the `(ip, fc)` generation counter.

@@ -198,8 +198,14 @@ async fn run(
                     inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
                 };
                 for (_id, ip) in targets {
-                    if registry.has_pending(&ip, FC_SYNC_DATA) {
-                        continue; // previous poll for this device hasn't resolved yet — don't stack
+                    // Any pending request for this ip (not just FC=27) blocks a
+                    // new poll — the shared per-IP FragmentReassembler can't
+                    // safely interleave two concurrent multi-fragment exchanges,
+                    // so this defers to whatever's already in flight (e.g. an
+                    // on-demand FC=59 fetch) rather than racing it. Just skipped
+                    // this cycle — tried again next tick.
+                    if registry.has_pending_for_ip(&ip) {
+                        continue;
                     }
                     let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, body: Vec::new(), sink: ResultSink::Internal };
                     let (packet, superseded) = registry.register(spec, Instant::now());
@@ -212,11 +218,23 @@ async fn run(
 
             Some(spec) = request_rx.recv() => {
                 let ip = spec.ip.clone();
-                let (packet, superseded) = registry.register(spec, Instant::now());
-                if let Some(resolved) = superseded {
-                    deliver_resolved(resolved, &sink);
+                // Same per-IP exclusivity as the poll tick above, enforced on
+                // the way in here too — an external caller (e.g.
+                // `live_control_fetch_presets`) racing the poll tick must be
+                // rejected outright rather than registered, since by the time
+                // both are pending it's too late: their responses would already
+                // be interleaving in the shared reassembler.
+                if registry.has_pending_for_ip(&ip) {
+                    if let ResultSink::External(tx) = spec.sink {
+                        let _ = tx.send(Err(RequestError::Busy));
+                    }
+                } else {
+                    let (packet, superseded) = registry.register(spec, Instant::now());
+                    if let Some(resolved) = superseded {
+                        deliver_resolved(resolved, &sink);
+                    }
+                    let _ = socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await;
                 }
-                let _ = socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await;
             }
 
             _ = deadline_tick.tick() => {
@@ -250,7 +268,18 @@ async fn run(
 
                     match reassembler.accept(&ip, &nd, raw) {
                         Some(Assembled::Single(raw)) => {
-                            if let Some(id) = handle_single(&raw, ip, &sink, protocol_slug, brand) {
+                            // Most request/response FCs (unlike FC=27's always-fragmented
+                            // SYNC_DATA) fit in one datagram — feed into the registry first;
+                            // on_frame() is a no-op when there's no live pending request for
+                            // (ip, fc), so this is safe unconditionally, including for FC=0/6
+                            // (never registered via the registry in the first place).
+                            if raw.len() >= NETWORK_HEADER_LEN + STRUCT_HEADER_LEN {
+                                let inner = &raw[NETWORK_HEADER_LEN..];
+                                if validate_frame(inner) {
+                                    registry.on_frame(&ip, inner[1], inner.to_vec(), Instant::now());
+                                }
+                            }
+                            if let Some(id) = handle_single(&raw, ip.clone(), &sink, protocol_slug, brand) {
                                 stats.entry(id).or_default().record_received();
                             }
                         }
@@ -274,12 +303,44 @@ async fn run(
     Ok(())
 }
 
+/// Parses a resolved FC=27 SYNC_DATA frame, stores it, and broadcasts
+/// `live_channel_config:updated` — shared by the config-poll tick's
+/// `Internal` path here and `live_control_refresh_now`'s `External`
+/// on-demand path (see `commands/live_control.rs`), so both go through
+/// identical validation/parsing instead of two copies drifting apart.
+pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -> Result<channel_config::ChannelConfigSnapshot, String> {
+    if frame.len() < STRUCT_HEADER_LEN + CHECKSUM_LEN {
+        return Err(format!("FC=27 frame too short for {}: {} bytes", ip, frame.len()));
+    }
+    let body = &frame[STRUCT_HEADER_LEN..frame.len() - CHECKSUM_LEN];
+    let device = {
+        let inner = sink.state.lock().unwrap();
+        inner.devices.values().find(|d| d.ip == ip).cloned()
+    };
+    let Some(device) = device else {
+        return Err(format!("no known device for ip {}", ip));
+    };
+    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body) {
+        Some(cfg) => {
+            sink.set_channel_config(device.id, cfg.clone());
+            Ok(cfg)
+        }
+        None => Err(format!(
+            "FC=27 parse failure for {} (firmware {:?}, {} body bytes)",
+            ip,
+            device.firmware_family,
+            body.len()
+        )),
+    }
+}
+
 /// Delivers one resolved request's result to wherever it needs to go.
 /// `Internal` (the config-poll tick's own requests) is handled synchronously
 /// right here — parsing ~2.5KB of already-in-memory bytes is not actually
 /// async work, so there's no need for a channel/oneshot round trip for this
 /// case. `External` wakes whatever task is awaiting the oneshot `Receiver`
-/// on the other side (a future Tauri command) via a non-blocking send.
+/// on the other side (a Tauri command, see `live_control_refresh_now`) via a
+/// non-blocking send.
 fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventSink) {
     match resolved.sink {
         ResultSink::Internal => {
@@ -287,35 +348,22 @@ fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventS
                 return;
             }
             match resolved.result {
-                Ok(frame) => {
-                    if frame.len() < STRUCT_HEADER_LEN + CHECKSUM_LEN {
-                        eprintln!("[cvr driver] FC=27 frame too short for {}: {} bytes", resolved.ip, frame.len());
-                        return;
-                    }
-                    let body = &frame[STRUCT_HEADER_LEN..frame.len() - CHECKSUM_LEN];
-                    let device = {
-                        let inner = sink.state.lock().unwrap();
-                        inner.devices.values().find(|d| d.ip == resolved.ip).cloned()
-                    };
-                    let Some(device) = device else { return };
-                    match channel_config::parse_channel_config(device.firmware_family.as_deref(), body) {
-                        Some(cfg) => {
-                            println!("[cvr driver] FC=27 config for {}: {} channels", resolved.ip, cfg.channels.len());
-                            sink.set_channel_config(device.id, cfg);
-                        }
-                        None => eprintln!(
-                            "[cvr driver] FC=27 parse failure for {} (firmware {:?}, {} body bytes)",
-                            resolved.ip,
-                            device.firmware_family,
-                            body.len()
-                        ),
-                    }
-                }
+                Ok(frame) => match parse_and_store_sync_data(&resolved.ip, &frame, sink) {
+                    Ok(cfg) => println!("[cvr driver] FC=27 config for {}: {} channels", resolved.ip, cfg.channels.len()),
+                    Err(e) => eprintln!("[cvr driver] {e}"),
+                },
                 Err(RequestError::Timeout) => {
                     eprintln!("[cvr driver] FC=27 request to {} timed out", resolved.ip);
                 }
                 Err(RequestError::ShapeMismatch(len)) => {
                     eprintln!("[cvr driver] FC=27 response from {} had an implausible shape ({len} bytes)", resolved.ip);
+                }
+                // Never actually produced for a *registered* Internal request —
+                // `Busy` is only ever sent from the `request_rx` arm's rejection
+                // path, before a request is registered at all — but matched
+                // here for exhaustiveness.
+                Err(RequestError::Busy) => {
+                    eprintln!("[cvr driver] FC=27 request to {} unexpectedly resolved as Busy", resolved.ip);
                 }
             }
         }

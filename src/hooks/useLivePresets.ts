@@ -1,0 +1,84 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { notifications } from "@mantine/notifications";
+import { commands, type DevicePresets, type DevicePresetsSnapshot } from "../lib/bindings";
+
+/** Keyed by `DiscoveredDevice.id`. Unlike `useLiveChannelConfig`/telemetry,
+ * FC=59 preset data is never background-polled (preset names change rarely)
+ * — `refresh()` triggers `live_control_fetch_presets` on demand (mount +
+ * manual button), but the store/listen half mirrors those hooks exactly so
+ * every mounted view stays in sync via `live_presets:updated`.
+ *
+ * Errors surface as Mantine toasts rather than inline state — `refresh()`
+ * failures are otherwise easy to miss (e.g. the on-mount fetch failing
+ * silently before the user has looked at the tab), and `recall()` is a
+ * fire-and-forget device write with no other feedback at all, so a toast is
+ * the only confirmation the user gets that it actually fired. */
+export function useLivePresets(deviceId: string | undefined) {
+  const [presetsById, setPresetsById] = useState<Record<string, DevicePresetsSnapshot>>({});
+  const [loading, setLoading] = useState(false);
+  // Read inside recall()'s toast without retriggering the callback's own
+  // identity on every fetch — recall is passed down as a stable click
+  // handler, not something that should re-render its consumers on refresh.
+  const presetsRef = useRef(presetsById);
+  presetsRef.current = presetsById;
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      unlisten = await listen<DevicePresets>("live_presets:updated", (event) => {
+        setPresetsById((prev) => ({ ...prev, [event.payload.deviceId]: event.payload.presets }));
+      });
+      const initial = await commands.liveControlGetPresets();
+      if (!cancelled && initial.status === "ok") {
+        setPresetsById(Object.fromEntries(initial.data.map((d) => [d.deviceId, d.presets])));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    if (!deviceId) return;
+    setLoading(true);
+    const result = await commands.liveControlFetchPresets(deviceId);
+    setLoading(false);
+    if (result.status === "error") {
+      notifications.show({ color: "red", title: "Preset fetch failed", message: result.error.message });
+    }
+  }, [deviceId]);
+
+  const recall = useCallback(
+    async (slotIndex: number) => {
+      if (!deviceId) return;
+      const result = await commands.liveControlRecallPreset(deviceId, slotIndex);
+      if (result.status === "error") {
+        notifications.show({ color: "red", title: "Preset recall failed", message: result.error.message });
+        return;
+      }
+      const slotName = presetsRef.current[deviceId]?.slots.find((s) => s.index === slotIndex)?.name;
+      notifications.show({
+        color: "green",
+        title: "Preset recalled",
+        message: slotName ? `"${slotName}" applied` : `Slot ${slotIndex + 1} applied`,
+      });
+    },
+    [deviceId],
+  );
+
+  useEffect(() => {
+    refresh();
+  }, [deviceId]);
+
+  return {
+    presets: deviceId ? presetsById[deviceId] : undefined,
+    loading,
+    refresh,
+    recall,
+  };
+}

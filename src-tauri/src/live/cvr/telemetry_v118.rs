@@ -9,11 +9,13 @@
 //! Dispatch is purely by heartbeat body byte length, not by catalog model —
 //! the wire data is self-describing.
 //!
-//! `outputDbu` (present in the reference) is deliberately omitted here: it's
-//! `20*log10(v / ratedRmsVoltage)`, and no discovered device is linked to a
-//! catalog model/`AmpAssignment` yet in this phase, so no rated voltage is
-//! available. A future phase that links `DiscoveredDevice` to an
-//! `AmpAssignment` should add it back using `capability::cvr::rated_rms_voltage`.
+//! The reference's `outputDbu` is `Telemetry::output_level_db` here, but it
+//! is NOT filled in by this adapter: `20*log10(v / ratedRmsVoltage)` needs a
+//! rated voltage, which can only be looked up from the device's firmware
+//! string, and this function only sees raw packet bytes. `driver.rs` fills
+//! it (and `rated_rms_voltage`) in after parsing, via
+//! `capability::cvr::rated_rms_voltage_from_firmware_string` — leaving it
+//! `None` for any model that lookup doesn't recognize.
 
 use crate::data::common::now_millis;
 use crate::live::dsp::voltage_to_db;

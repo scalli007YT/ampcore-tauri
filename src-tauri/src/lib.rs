@@ -10,7 +10,8 @@ use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_lis
 use commands::capability::amp_capability_resolve;
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
 use commands::live_control::{
-    live_control_get_channel_config, live_control_get_telemetry, live_control_list_devices,
+    live_control_fetch_presets, live_control_get_channel_config, live_control_get_presets,
+    live_control_get_telemetry, live_control_list_devices, live_control_recall_preset, live_control_refresh_now,
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
     live_control_set_eq_band, live_control_set_output_mute, live_control_start, live_control_stop,
@@ -83,6 +84,10 @@ pub fn run() {
             live_control_list_devices,
             live_control_get_telemetry,
             live_control_get_channel_config,
+            live_control_refresh_now,
+            live_control_fetch_presets,
+            live_control_get_presets,
+            live_control_recall_preset,
             live_control_set_output_mute,
             live_control_set_channel_output,
             live_control_set_channel_delay_in,

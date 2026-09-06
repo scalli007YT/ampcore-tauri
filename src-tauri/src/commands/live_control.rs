@@ -3,12 +3,14 @@ use std::net::Ipv4Addr;
 use tauri::{AppHandle, State};
 
 use crate::data::capability::PowerMode;
+use crate::data::common::now_millis;
 use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection};
 use crate::error::AppError;
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
+use crate::live::cvr::preset;
 use crate::live::cvr::write;
 use crate::live::driver::all_drivers;
-use crate::live::state::{DeviceChannelConfig, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink};
+use crate::live::state::{DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink};
 
 /// Shared lookup for every write command below: resolves `device_id` to its
 /// current `firmware_family` + parsed IP in one pass, so each command body
@@ -34,6 +36,20 @@ fn resolve_write_target(
 
 fn unknown_firmware_error(device_id: &str) -> AppError {
     AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
+}
+
+/// FC=59 preset fetch/recall has no confirmed 1.1.9 spec in either reference
+/// source (see `live/cvr/preset.rs`'s module doc) — gate the feature to 1.1.8
+/// only rather than guessing it also works there, matching this app's
+/// "no generic fallback encoding" write philosophy.
+fn require_v118_firmware(device_id: &str, firmware_family: Option<&str>) -> Result<(), AppError> {
+    if firmware_family != Some("1.1.8") {
+        return Err(AppError::from(format!(
+            "device {} preset fetch/recall requires firmware 1.1.8 (detected: {:?})",
+            device_id, firmware_family
+        )));
+    }
+    Ok(())
 }
 
 /// FC=30 FILTER_TYPE's wire body encodes `filter_type` and `active`
@@ -150,6 +166,150 @@ pub fn live_control_get_channel_config(state: State<LiveDeviceState>) -> Result<
         .iter()
         .map(|(device_id, config)| DeviceChannelConfig { device_id: device_id.clone(), config: config.clone() })
         .collect())
+}
+
+/// On-demand counterpart to the background ~200ms FC=27 poll (see
+/// `driver.rs`'s `config_poll_tick`): sends one SYNC_DATA request through the
+/// driver's request registry with an `External` sink and awaits its result
+/// directly, instead of waiting for the next passive poll tick to pick it up.
+/// Still updates `LiveDeviceState.channel_config` and emits
+/// `live_channel_config:updated` exactly like the background poll does (via
+/// the shared `parse_and_store_sync_data`), so callers that only listen for
+/// the event rather than this command's return value stay in sync too.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDeviceState>, device_id: String) -> Result<DeviceChannelConfig, AppError> {
+    let (ip, request_tx) = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, request_tx)
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let spec = crate::live::cvr::request::RequestSpec {
+        ip: ip.clone(),
+        function_code: crate::live::cvr::protocol::FC_SYNC_DATA,
+        body: Vec::new(),
+        sink: crate::live::cvr::request::ResultSink::External(tx),
+    };
+    request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
+    let frame = rx
+        .await
+        .map_err(|_| AppError::from("live control driver dropped the request"))?
+        .map_err(|e| AppError::from(format!("{:?}", e)))?;
+
+    let sink = LiveEventSink { app, state: state.0.clone() };
+    let config = crate::live::cvr::driver::parse_and_store_sync_data(&ip, &frame, &sink).map_err(AppError::from)?;
+    Ok(DeviceChannelConfig { device_id, config })
+}
+
+/// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
+/// `CONFIG_POLL_INTERVAL` (200ms) and a single exchange typically resolves
+/// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
+/// comfortably outlasts one poll cycle without adding noticeable latency to
+/// the common case (which succeeds on the first attempt).
+const PRESET_REQUEST_MAX_RETRIES: u32 = 10;
+const PRESET_REQUEST_RETRY_DELAY_MS: u64 = 30;
+
+/// Sends one FC=59 request through the driver's request registry with an
+/// `External` sink and awaits its resolved frame — shared by both halves of
+/// `live_control_fetch_presets` below. Not reusable across an `.await` point
+/// with a second call in flight for the same device: `RequestRegistry` keys
+/// pending requests by `(ip, function_code)` only, so a second FC=59 request
+/// sent before the first resolves would supersede/fail it (see
+/// `live/cvr/request.rs`'s `RequestRegistry::register`) — callers must fully
+/// await one call before making the next.
+///
+/// Transparently retries `RequestError::Busy` (the driver rejects a new
+/// request outright when another exchange — most commonly the background
+/// FC=27 poll — is already in flight for this ip, since the shared per-IP
+/// `FragmentReassembler` can't safely interleave two concurrent
+/// multi-fragment responses; see `RequestError::Busy`'s doc). Without this
+/// retry, a fetch racing the poll tick (most likely right after mount, when
+/// several things fire close together) would surface a raw "Busy" error
+/// instead of just quietly succeeding a moment later.
+async fn send_preset_request(
+    request_tx: &tokio::sync::mpsc::UnboundedSender<crate::live::cvr::request::RequestSpec>,
+    ip: &str,
+    body: Vec<u8>,
+) -> Result<Vec<u8>, AppError> {
+    let mut last_err = AppError::from(format!("device {} preset request never attempted", ip));
+    for attempt in 0..=PRESET_REQUEST_MAX_RETRIES {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let spec = crate::live::cvr::request::RequestSpec {
+            ip: ip.to_string(),
+            function_code: crate::live::cvr::preset::FC_SAVE_RECALL,
+            body: body.clone(),
+            sink: crate::live::cvr::request::ResultSink::External(tx),
+        };
+        request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
+        match rx.await.map_err(|_| AppError::from("live control driver dropped the request"))? {
+            Ok(frame) => return Ok(frame),
+            Err(crate::live::cvr::request::RequestError::Busy) => {
+                last_err = AppError::from(format!("device {} still busy after {} attempt(s)", ip, attempt + 1));
+                if attempt < PRESET_REQUEST_MAX_RETRIES {
+                    tokio::time::sleep(std::time::Duration::from_millis(PRESET_REQUEST_RETRY_DELAY_MS)).await;
+                }
+            }
+            Err(e) => return Err(AppError::from(format!("{:?}", e))),
+        }
+    }
+    Err(last_err)
+}
+
+/// Fetches the full preset slot-name list (FC=59 mode=0) and the currently
+/// active preset's name (mode=4) as one command — deliberately not two
+/// independently-callable commands, since both share the same FC=59 request
+/// registry key and must not overlap (see `send_preset_request`'s doc). The
+/// mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
+/// the result and emits `live_presets:updated`, same pattern as
+/// `live_control_refresh_now`/`parse_and_store_sync_data`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDeviceState>, device_id: String) -> Result<DevicePresets, AppError> {
+    let (ip, firmware_family, request_tx) = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let device = inner.devices.get(&device_id).cloned().ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, device.firmware_family, request_tx)
+    };
+    require_v118_firmware(&device_id, firmware_family.as_deref())?;
+
+    let list_frame = send_preset_request(&request_tx, &ip, preset::build_list_request_body()).await?;
+    let slots = preset::parse_preset_list(&list_frame)
+        .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=0 response had an unexpected shape", device_id)))?;
+
+    let current_frame = send_preset_request(&request_tx, &ip, preset::build_current_request_body()).await?;
+    let active_preset_name = preset::parse_preset_current(&current_frame)
+        .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
+
+    let snapshot = preset::DevicePresetsSnapshot { slots, active_preset_name: Some(active_preset_name), received_at: now_millis() };
+    let sink = LiveEventSink { app, state: state.0.clone() };
+    sink.set_presets(device_id.clone(), snapshot.clone());
+    Ok(DevicePresets { device_id, presets: snapshot })
+}
+
+/// Snapshot getter mirroring `live_control_get_channel_config` — returns
+/// whatever `live_control_fetch_presets` last stored, no wire I/O.
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_get_presets(state: State<LiveDeviceState>) -> Result<Vec<DevicePresets>, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(inner.presets.iter().map(|(device_id, presets)| DevicePresets { device_id: device_id.clone(), presets: presets.clone() }).collect())
+}
+
+/// Fire-and-forget FC=59 mode=2 recall, same convention as every other write
+/// in this app (see `write.rs`'s module doc) — the device's new active
+/// preset shows up on the next manual `live_control_fetch_presets` call, not
+/// pushed automatically here.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<(), AppError> {
+    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+    require_v118_firmware(&device_id, firmware_family.as_deref())?;
+    write::send_control(ip, &crate::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Fire-and-forget: sends the write packet and returns once the datagram is
