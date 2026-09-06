@@ -1,4 +1,6 @@
-import { commands, type AmpAssignment, type AmpChannel, type ChannelConfig, type ChannelConfigSnapshot, type DiscoveredDevice } from "./bindings";
+import { notifications } from "@mantine/notifications";
+
+import { commands, type AmpAssignment, type AmpChannel, type AppError, type ChannelConfig, type ChannelConfigSnapshot, type DiscoveredDevice } from "./bindings";
 import type { ConfigureActions, ConfigureCapabilities } from "./configureActions";
 
 /** Direct Edit mode has no Project — Speaker/Join planning and manually
@@ -72,51 +74,65 @@ export function buildLiveAssignmentViewModel(
   };
 }
 
+/** Surfaces a failed live write as a red notification, the same way
+ * `useLivePresets` already reports FC=59 failures.
+ *
+ * Every command below returns `bindings.ts`'s `typedError` envelope, which
+ * resolves with `{ status: "error" }` for an `AppError` rather than
+ * rejecting — `AppError` is a plain `{ message }` struct, not an `Error`
+ * instance, so it never hits the `throw` branch in `typedError`. A
+ * `.catch()` on these calls is therefore dead code: it was silently
+ * dropping every backend-side failure (unknown firmware family, device no
+ * longer in discovery, unparseable ip, "no FC=27 poll yet to merge this EQ
+ * band against"), leaving the user with a control that just snapped back on
+ * the next poll and no explanation. This checks `status` instead.
+ *
+ * `id: label` dedupes rather than stacking: a slider dragged against a
+ * device that is failing every write replaces its own toast instead of
+ * emitting one per intermediate value. */
+async function reportWrite(
+  label: string,
+  call: Promise<{ status: "ok"; data: null } | { status: "error"; error: AppError }>,
+): Promise<void> {
+  const result = await call;
+  if (result.status === "error") {
+    console.error(`${label} failed`, result.error);
+    notifications.show({ id: label, color: "red", title: `${label} failed`, message: result.error.message });
+  }
+}
+
 /** Every write goes straight to the device, fire-and-forget — same
  * convention as `LiveControlView.tsx`'s existing `OutputMuteBar`: the next
  * FC=27 poll (already subscribed via `useLiveChannelConfig`) reflects the
- * change back through the same read path, not this call's return value. */
+ * change back through the same read path, not this call's return value.
+ * "Fire-and-forget" is about the *wire* (no ACK, no retry — see
+ * `live/cvr/write.rs`), not about the command result: a write the backend
+ * refused to even send is a real error and goes through `reportWrite`. */
 export function createLiveConfigureActions(deviceId: string): ConfigureActions {
   return {
     async setChannelDelayIn(channelIndex, delayInMs) {
-      await commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs).catch((e) => {
-        console.error("liveControlSetChannelDelayIn failed", e);
-      });
+      await reportWrite("Set input delay", commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs));
     },
     async setChannelInputMute(channelIndex, muted) {
-      await commands.liveControlSetChannelInputMute(deviceId, channelIndex, muted).catch((e) => {
-        console.error("liveControlSetChannelInputMute failed", e);
-      });
+      await reportWrite("Set input mute", commands.liveControlSetChannelInputMute(deviceId, channelIndex, muted));
     },
     async setChannelOutput(channelIndex, trimDb, volumeDb, delayOutMs) {
-      await commands.liveControlSetChannelOutput(deviceId, channelIndex, trimDb, volumeDb, delayOutMs).catch((e) => {
-        console.error("liveControlSetChannelOutput failed", e);
-      });
+      await reportWrite("Set output trim/volume/delay", commands.liveControlSetChannelOutput(deviceId, channelIndex, trimDb, volumeDb, delayOutMs));
     },
     async setChannelPhaseInvert(channelIndex, inverted) {
-      await commands.liveControlSetChannelPhaseInvert(deviceId, channelIndex, inverted).catch((e) => {
-        console.error("liveControlSetChannelPhaseInvert failed", e);
-      });
+      await reportWrite("Set phase invert", commands.liveControlSetChannelPhaseInvert(deviceId, channelIndex, inverted));
     },
     async setChannelOutputMute(channelIndex, muted) {
-      await commands.liveControlSetOutputMute(deviceId, channelIndex, muted).catch((e) => {
-        console.error("liveControlSetOutputMute failed", e);
-      });
+      await reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
     },
     async setChannelPowerMode(channelIndex, mode) {
-      await commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode).catch((e) => {
-        console.error("liveControlSetChannelPowerMode failed", e);
-      });
+      await reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
     },
     async setEqBand(channelIndex, direction, bandIndex, patch) {
-      await commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch).catch((e) => {
-        console.error("liveControlSetEqBand failed", e);
-      });
+      await reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));
     },
     async setCrossoverSlot(channelIndex, direction, slot, patch) {
-      await commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch).catch((e) => {
-        console.error("liveControlSetCrossoverSlot failed", e);
-      });
+      await reportWrite("Set crossover", commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch));
     },
   };
 }
