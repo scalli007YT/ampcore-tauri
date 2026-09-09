@@ -1,7 +1,17 @@
 import { notifications } from "@mantine/notifications";
 
-import { commands, type AmpAssignment, type AmpChannel, type AppError, type ChannelConfig, type ChannelConfigSnapshot, type DiscoveredDevice } from "./bindings";
+import {
+  commands,
+  type AmpAssignment,
+  type AmpChannel,
+  type AppError,
+  type ChannelConfig,
+  type ChannelConfigSnapshot,
+  type DiscoveredDevice,
+  type LiveWriteAck,
+} from "./bindings";
 import type { ConfigureActions, ConfigureCapabilities } from "./configureActions";
+import { showRollingNotification } from "./rollingNotification";
 
 /** Direct Edit mode has no Project — Speaker/Join planning and manually
  * authored `ohms` are genuinely inapplicable to a live device, not just
@@ -87,27 +97,82 @@ export function buildLiveAssignmentViewModel(
  * band against"), leaving the user with a control that just snapped back on
  * the next poll and no explanation. This checks `status` instead.
  *
- * `id: label` dedupes rather than stacking: a slider dragged against a
- * device that is failing every write replaces its own toast instead of
- * emitting one per intermediate value. */
+ * Failures deliberately carry **no `id`**, so they stack, and
+ * `autoClose: false`, so they persist until dismissed. A failed write means
+ * the device did not take the value — losing that behind a newer toast is
+ * the one outcome that must not happen silently. `<Notifications limit>` in
+ * `main.tsx` caps how many pile up.
+ *
+ * The burst protection that the old `id` provided now lives where it belongs:
+ * `notifySuccess` stays silent for coalesced writes, and the backend collapses
+ * repeated writes to one parameter before they ever reach the wire (see
+ * `WriteRegistry::submit`), so a drag no longer generates a toast per
+ * intermediate value in the first place. */
 async function reportWrite(
   label: string,
-  call: Promise<{ status: "ok"; data: null } | { status: "error"; error: AppError }>,
+  call: Promise<{ status: "ok"; data: LiveWriteAck } | { status: "error"; error: AppError }>,
 ): Promise<void> {
   const result = await call;
   if (result.status === "error") {
     console.error(`${label} failed`, result.error);
-    notifications.show({ id: label, color: "red", title: `${label} failed`, message: result.error.message });
+    notifications.show({
+      color: "red",
+      title: `${label} failed`,
+      message: result.error.message,
+      autoClose: false,
+    });
+    return;
   }
+  notifySuccess(label, result.data);
 }
 
-/** Every write goes straight to the device, fire-and-forget — same
- * convention as `LiveControlView.tsx`'s existing `OutputMuteBar`: the next
- * FC=27 poll (already subscribed via `useLiveChannelConfig`) reflects the
- * change back through the same read path, not this call's return value.
- * "Fire-and-forget" is about the *wire* (no ACK, no retry — see
- * `live/cvr/write.rs`), not about the command result: a write the backend
- * refused to even send is a real error and goes through `reportWrite`. */
+/** Green counterpart to the red failure toast: confirms the device actually
+ * acknowledged the write, which is the whole point of the ACK path (see
+ * `live/cvr/request.rs`'s `WriteRegistry`).
+ *
+ * Mirror image of the failure toast on purpose. Successes roll — a stream of
+ * writes to one control shows a single confirmation that replaces itself
+ * rather than a stack — and auto-close quickly. A success is reassurance;
+ * missing one costs nothing, whereas missing a failure costs a wrong value on
+ * the amp.
+ *
+ * Rolling goes through `showRollingNotification` rather than a stable `id`,
+ * because `notifications.show()` silently *ignores* a repeated id instead of
+ * replacing it — see that helper's doc for the two Mantine behaviours involved.
+ *
+ * Two deliberate silences:
+ * - a command whose packets were *all* coalesced never reached the wire; the
+ *   newer write that superseded it reports instead, so toasting here would
+ *   double-count a single user action; and
+ * - `attempts` is only spelled out when it exceeds 1, since needing refires
+ *   is the notable case — "1/6" on every write is noise. */
+function notifySuccess(label: string, ack: LiveWriteAck): void {
+  if (ack.packets > 0 && ack.coalesced === ack.packets) return;
+
+  const sent = ack.packets - ack.coalesced;
+  const parts = [`${sent} packet${sent === 1 ? "" : "s"} in ${ack.elapsedMs} ms`];
+  if (ack.attempts > 1) parts.push(`${ack.attempts} attempts`);
+  if (ack.coalesced > 0) parts.push(`${ack.coalesced} coalesced`);
+
+  showRollingNotification(label, {
+    color: "green",
+    title: `${label} confirmed`,
+    message: `Acknowledged by device — ${parts.join(", ")}`,
+    autoClose: 1500,
+  });
+}
+
+/** Every write goes straight to the device, and each call now resolves only
+ * once the device has acknowledged the packet at the transport level, or
+ * rejects after the backend's refire budget is spent (see
+ * `live/cvr/request.rs`'s `WriteRegistry`). What that confirms is *delivery* —
+ * not that the device applied the value — so the display still comes from the
+ * read path: the next FC=27 poll, already subscribed via
+ * `useLiveChannelConfig`, reflects the real state back. Nothing here is
+ * optimistic.
+ *
+ * Both failure modes therefore reach `reportWrite`: a write the backend
+ * refused to build or send, and one the device never acknowledged. */
 export function createLiveConfigureActions(deviceId: string): ConfigureActions {
   return {
     async setChannelDelayIn(channelIndex, delayInMs) {

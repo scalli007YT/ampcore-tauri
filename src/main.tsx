@@ -9,7 +9,12 @@ import App from "./App";
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <MantineProvider theme={theme} defaultColorScheme="auto">
-      <Notifications position="bottom-right" />
+      {/* `limit` is explicit because failure toasts now persist until
+          dismissed (see `liveConfigureAdapter`'s `reportWrite`) — without a
+          cap, a burst against an unreachable amp could bury the screen.
+          `defaultColorScheme="auto"` below must stay in sync with the
+          inlined ColorSchemeScript in index.html. */}
+      <Notifications position="bottom-right" limit={5} />
       <App />
     </MantineProvider>
   </React.StrictMode>,

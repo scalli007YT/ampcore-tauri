@@ -58,7 +58,7 @@ pub fn build_current_request_body() -> Vec<u8> {
     body
 }
 
-/// Full fire-and-forget control packet for `mode=2` (recall/apply
+/// Full control packet for `mode=2` (recall/apply
 /// `slot_index`, 0-based). Device-wide action — all struct-header fields
 /// (`chx`/`segment`/`link`/`in_out_flag`) are 0; the slot index lives in the
 /// body's `ch_x` byte instead.

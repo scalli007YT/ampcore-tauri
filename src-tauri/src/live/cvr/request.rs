@@ -11,8 +11,16 @@
 //! correlation — a stale reply from an already-timed-out request can be
 //! misattributed to a newer request for the same key. This module fixes
 //! that with a monotonic generation counter per key (see `RequestRegistry`).
+//!
+//! The second half of this file is the *write* counterpart, `WriteRegistry`
+//! — a separate, much simpler engine built on the protocol's transport-level
+//! ACK (`NetworkDataHeader.data_state`) rather than on function-code replies.
+//! The two are independent: a request correlates a full response frame by
+//! `(ip, function_code)`, whereas a write only ever gets back a bare 10-byte
+//! header carrying no identifying field at all, so it correlates by device IP
+//! under strict stop-and-wait. See `WriteRegistry::on_ack`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -306,3 +314,287 @@ impl FragmentReassembler {
         self.by_ip.retain(|_, state| now - state.first_seen_at <= max_age_ms);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Write ACK confirmation
+// ---------------------------------------------------------------------------
+
+/// How long to wait for a write's ACK echo before refiring. Deliberately
+/// tighter than the vendor reference's `UDP_tool.outTime(1.0, ip)` 1s budget:
+/// on the LAN this app targets, an ACK round trip is single-digit
+/// milliseconds, so 1s spends almost all of its time waiting on a packet that
+/// is already lost. Trading that for more, faster refires recovers a dropped
+/// write sooner and keeps the worst case well under the old single timeout.
+pub const WRITE_ACK_TIMEOUT_MS: u64 = 200;
+/// Retransmissions after the initial send before a write is failed — so
+/// 6 transmissions total, and a worst case of
+/// `(1 + WRITE_MAX_REFIRES) * WRITE_ACK_TIMEOUT_MS` = 1.2s before the caller
+/// sees an error (versus 3s for the reference's 3-attempt/1s loop).
+pub const WRITE_MAX_REFIRES: u8 = 5;
+/// Upper bound on writes queued behind the in-flight one for a single device.
+/// Only reachable when a device stops ACKing (each write then costs the full
+/// 1.2s above) while the UI keeps producing them — a fader drag against an
+/// amp that just went offline. The *oldest* queued write is dropped rather
+/// than the newest, so the final position of a drag is the one that survives.
+pub const WRITE_QUEUE_MAX: usize = 64;
+
+#[derive(Debug)]
+pub enum WriteError {
+    /// The device never echoed this write's NetworkData header back with
+    /// `data_state = 1`, across the initial send and all `WRITE_MAX_REFIRES`
+    /// refires.
+    Timeout,
+    /// Dropped from an over-long per-device queue (see `WRITE_QUEUE_MAX`) —
+    /// superseded by newer writes that were still waiting behind it.
+    Backlogged,
+    /// The driver task stopped while this write was queued or in flight.
+    DriverStopped,
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Timeout => write!(
+                f,
+                "device did not acknowledge the write after {} attempts ({WRITE_ACK_TIMEOUT_MS}ms each)",
+                write_max_attempts()
+            ),
+            WriteError::Backlogged => {
+                write!(f, "write dropped — more than {WRITE_QUEUE_MAX} writes were queued for this device")
+            }
+            WriteError::DriverStopped => write!(f, "live control stopped before the write was acknowledged"),
+        }
+    }
+}
+
+/// What a successful write reports back. `attempts` counts transmissions,
+/// so 1 means it was ACKed on the first send and anything higher means that
+/// many refires were needed — a direct read on how lossy the link is, which
+/// is otherwise invisible once the retry succeeds.
+///
+/// `attempts == 0` is the *coalesced* sentinel: this write never went on the
+/// wire because a newer write to the same parameter replaced it while it was
+/// still queued (see `WriteRegistry::submit`). It is reported as success
+/// because the caller's intent — "this parameter now holds this value" — is
+/// satisfied by the packet that superseded it, and surfacing an error would
+/// make the UI toast a failure for a write it deliberately discarded. The
+/// honest caveat: if that *replacement* later fails, this caller has already
+/// been told `Ok`.
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOutcome {
+    pub attempts: u8,
+    pub elapsed_ms: u64,
+}
+
+/// Transmissions a write gets in total: the initial send plus every refire.
+pub const fn write_max_attempts() -> u8 {
+    WRITE_MAX_REFIRES + 1
+}
+
+pub struct WriteSpec {
+    pub ip: String,
+    pub packet: Vec<u8>,
+    /// `false` for a packet that is *itself* an ACK (`data_state = 1`) —
+    /// today only `write::CROSSOVER_COMMIT_PACKET`. Neither side ACKs an ACK
+    /// (that would loop forever), so such a packet is sent in queue order and
+    /// resolved `Ok` the moment it goes out, never waited on.
+    pub expect_ack: bool,
+    pub tx: oneshot::Sender<Result<WriteOutcome, WriteError>>,
+}
+
+struct InFlightWrite {
+    packet: Vec<u8>,
+    deadline: Instant,
+    /// Transmissions made so far, starting at 1 for the initial send —
+    /// counted up rather than down so it can be reported verbatim in
+    /// `WriteOutcome::attempts`.
+    transmissions: u8,
+    started_at: Instant,
+    tx: oneshot::Sender<Result<WriteOutcome, WriteError>>,
+}
+
+#[derive(Default)]
+struct WriteQueue {
+    in_flight: Option<InFlightWrite>,
+    queued: VecDeque<WriteSpec>,
+}
+
+/// Stop-and-wait write confirmation, one independent queue per device IP.
+/// Mirrors the vendor reference's blocking `UDP.send` retry loop, but
+/// non-blocking: the driver loop submits, feeds ACKs in, and polls deadlines,
+/// while each caller awaits its own oneshot. Like `RequestRegistry`, this
+/// performs no I/O — it returns `Transmit`s for the driver to put on the wire.
+#[derive(Default)]
+pub struct WriteRegistry {
+    by_ip: HashMap<String, WriteQueue>,
+}
+
+impl WriteRegistry {
+    /// True while any device has a write queued or awaiting its ACK.
+    ///
+    /// The driver gates its background polling arms on this, mirroring the
+    /// vendor reference's `UDP.isRefresh = false` bracket around `UDP.send`
+    /// (`UDP.cs:97-100`/`:201-204`): while a write is outstanding, the
+    /// heartbeat/sync/discovery traffic goes off the wire entirely so the ACK
+    /// contends with nothing. Deliberately global rather than per-IP — the
+    /// socket is shared, so another device's fragment burst would delay this
+    /// write's ACK just as much as its own device's would.
+    pub fn has_pending(&self) -> bool {
+        self.by_ip.values().any(|queue| queue.in_flight.is_some() || !queue.queued.is_empty())
+    }
+
+    /// Enqueues a write, returning whatever should now go on the wire: the
+    /// write itself if the device was idle, plus any `expect_ack = false`
+    /// packets behind it, which resolve immediately and let the queue keep
+    /// draining in the same pass.
+    ///
+    /// Coalesces first: a write that targets the same parameter as the last
+    /// still-queued write replaces it rather than queueing behind it. Without
+    /// this, a held stepper or fast typing produces a run of packets that this
+    /// queue can only retire one ACK round trip at a time — and, with the
+    /// driver's polling gate, each one extends the window in which no
+    /// background traffic flows. See `coalesce_key` for the safety rules.
+    pub fn submit(&mut self, spec: WriteSpec, now: Instant) -> Vec<Transmit> {
+        let ip = spec.ip.clone();
+        let queue = self.by_ip.entry(ip.clone()).or_default();
+
+        let incoming_key = coalesce_key(&spec);
+        let replaces_last = incoming_key.is_some()
+            && queue.queued.back().and_then(coalesce_key) == incoming_key;
+        if replaces_last {
+            let superseded = queue.queued.pop_back().expect("back() matched just above");
+            let _ = superseded.tx.send(Ok(WriteOutcome { attempts: 0, elapsed_ms: 0 }));
+        } else if queue.queued.len() >= WRITE_QUEUE_MAX {
+            if let Some(dropped) = queue.queued.pop_front() {
+                let _ = dropped.tx.send(Err(WriteError::Backlogged));
+            }
+        }
+
+        queue.queued.push_back(spec);
+        let mut out = Vec::new();
+        Self::pump(queue, &ip, now, &mut out);
+        out
+    }
+
+    /// Feeds one inbound ACK (a datagram with `data_state != 0`) in: resolves
+    /// this device's in-flight write, then starts the next queued one. An ACK
+    /// for a device with nothing in flight is silently ignored — the common
+    /// case, since the device ACKs every heartbeat and query we send too.
+    ///
+    /// Correlation is by **device IP alone**, exactly as the vendor
+    /// reference's `UDP_tool.jugeOutTime(string IP)` does. This is not
+    /// laziness: real 1.1.8 hardware, verified on the wire, replies with a
+    /// bare 10-byte header whose `packets_lastlen` is **0** — it does *not*
+    /// echo the value we sent. An ACK carries no function code, no request id
+    /// and no usable length, so IP is the only thing to key on. Correlating on
+    /// anything richer simply never matches, and every write times out despite
+    /// being acknowledged every time (observed: writes failing 6/6 while the
+    /// device ACKed each one).
+    ///
+    /// Two things make IP-only matching sound, and both must keep holding:
+    /// 1. writes are strictly stop-and-wait per device, so there is at most
+    ///    one outstanding write to attribute an ACK to; and
+    /// 2. the driver suspends heartbeat/sync/discovery while any write is
+    ///    pending (`has_pending`), so almost no other ACK-generating traffic is
+    ///    in flight to steal the match — the same reason the vendor clears
+    ///    `isRefresh` for the duration of its send.
+    ///
+    /// Residual risk, inherited from the reference and accepted: an ACK for a
+    /// query sent just before the write can arrive right after it and confirm
+    /// the write early. The window is ~1-2ms against a 50ms heartbeat, and the
+    /// consequence is an optimistic success on a packet that almost certainly
+    /// landed anyway.
+    pub fn on_ack(&mut self, ip: &str, now: Instant) -> Vec<Transmit> {
+        let Some(queue) = self.by_ip.get_mut(ip) else { return Vec::new() };
+        if queue.in_flight.is_none() {
+            return Vec::new();
+        }
+        let done = queue.in_flight.take().expect("in_flight checked just above");
+        let _ = done.tx.send(Ok(WriteOutcome {
+            attempts: done.transmissions,
+            elapsed_ms: now.saturating_duration_since(done.started_at).as_millis() as u64,
+        }));
+        let mut out = Vec::new();
+        Self::pump(queue, ip, now, &mut out);
+        out
+    }
+
+    /// Retransmit/fail sweep — same role as `RequestRegistry::poll_deadlines`,
+    /// driven by the driver's `deadline_tick`. Never blocks.
+    pub fn poll_deadlines(&mut self, now: Instant) -> Vec<Transmit> {
+        let mut out = Vec::new();
+        for (ip, queue) in self.by_ip.iter_mut() {
+            if !queue.in_flight.as_ref().is_some_and(|w| now >= w.deadline) {
+                continue;
+            }
+            if queue.in_flight.as_ref().is_some_and(|w| w.transmissions < write_max_attempts()) {
+                let in_flight = queue.in_flight.as_mut().expect("in_flight matched just above");
+                in_flight.transmissions += 1;
+                in_flight.deadline = now + Duration::from_millis(WRITE_ACK_TIMEOUT_MS);
+                out.push(Transmit { ip: ip.clone(), packet: in_flight.packet.clone() });
+            } else {
+                let failed = queue.in_flight.take().expect("in_flight matched just above");
+                let _ = failed.tx.send(Err(WriteError::Timeout));
+                Self::pump(queue, ip, now, &mut out);
+            }
+        }
+        self.by_ip.retain(|_, queue| queue.in_flight.is_some() || !queue.queued.is_empty());
+        out
+    }
+
+    /// Starts queued writes until one is left awaiting an ACK (or the queue
+    /// empties). Loops rather than promoting a single entry because an
+    /// `expect_ack = false` packet resolves the instant it is handed over,
+    /// leaving the device idle again within the same pass.
+    fn pump(queue: &mut WriteQueue, ip: &str, now: Instant, out: &mut Vec<Transmit>) {
+        while queue.in_flight.is_none() {
+            let Some(spec) = queue.queued.pop_front() else { return };
+            out.push(Transmit { ip: ip.to_string(), packet: spec.packet.clone() });
+            if spec.expect_ack {
+                queue.in_flight = Some(InFlightWrite {
+                    packet: spec.packet,
+                    deadline: now + Duration::from_millis(WRITE_ACK_TIMEOUT_MS),
+                    transmissions: 1,
+                    started_at: now,
+                    tx: spec.tx,
+                });
+            } else {
+                // Never waited on, so it is by definition a first-attempt
+                // success the moment it goes on the wire.
+                let _ = spec.tx.send(Ok(WriteOutcome { attempts: 1, elapsed_ms: 0 }));
+            }
+        }
+    }
+}
+
+/// Identifies "which knob" a write turns, for coalescing: the StructHeader's
+/// `(function_code, chx, segment, in_out_flag)`. Two writes sharing this key
+/// set the same parameter on the same channel, so the later one's value is the
+/// only one that matters and the earlier can be dropped.
+///
+/// Returns `None` — meaning *never coalesce* — for:
+/// - packets with `expect_ack == false`, i.e. `CROSSOVER_COMMIT_PACKET`, which
+///   is a raw ACK echo with no StructHeader to key on and whose position
+///   immediately after its freq write is load-bearing;
+/// - anything too short to hold a StructHeader;
+/// - `FC_SAVE_RECALL` (FC=59), where the slot index lives in the *body* and all
+///   header fields are 0 — collapsing two recalls would silently drop a slot
+///   change rather than a redundant value.
+///
+/// Callers must only ever compare this against the **last** queued entry, never
+/// scan the queue: coalescing against an earlier entry would reorder writes
+/// past the commit packet that has to follow them.
+fn coalesce_key(spec: &WriteSpec) -> Option<(u8, u8, u8, u8)> {
+    if !spec.expect_ack || spec.packet.len() < NETWORK_HEADER_LEN + super::protocol::STRUCT_HEADER_LEN {
+        return None;
+    }
+    let header = &spec.packet[NETWORK_HEADER_LEN..];
+    let function_code = header[1];
+    if function_code == super::preset::FC_SAVE_RECALL {
+        return None;
+    }
+    // header[3] = chx, header[4] = segment, header[9] = in_out_flag —
+    // see `protocol::build_struct_header`.
+    Some((function_code, header[3], header[4], header[9]))
+}
+

@@ -13,7 +13,9 @@ use crate::live::state::{DiscoveredDevice, LiveEventSink};
 
 use super::channel_config;
 use super::protocol::*;
-use super::request::{Assembled, FragmentReassembler, RequestError, RequestRegistry, RequestSpec, ResultSink};
+use super::request::{
+    Assembled, FragmentReassembler, RequestError, RequestRegistry, RequestSpec, ResultSink, WriteRegistry, WriteSpec,
+};
 use super::telemetry;
 
 // Matches the reference implementation's `TimerRefresh.Interval = 4000`
@@ -35,9 +37,14 @@ const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// (250ms, see below) — the fastest cadence known to work against real
 /// hardware, chosen so a write (e.g. `live_control_set_output_mute`) is
 /// reflected back to the UI quickly. Uniform across all devices — this
-/// backend has no notion of "which device the UI has selected" the way the
-/// reference app's dual-tier (250ms/2000ms) polling does, and plumbing that
-/// through would be new coupling not justified this phase.
+/// backend has no notion of "which device the UI has selected".
+///
+/// Worth knowing when tuning this: the C# vendor app does **not** poll FC=27
+/// on a timer at all. It syncs once on entering a device (`UDP.intoCW`) and
+/// thereafter only on discrete events — preset recall, channel copy, import.
+/// A periodic sync is this app's own choice, which is why the write interlock
+/// below (`WriteRegistry::has_pending`) is load-bearing here in a way it never
+/// needed to be there.
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Drives the request registry's settle/hard-timeout checks — finer than
 /// `SETTLE_MS` (20ms) so a settled request resolves promptly.
@@ -114,14 +121,16 @@ impl AmpDriver for CvrDriver {
     fn start(&self, sink: LiveEventSink) -> DriverHandle {
         let (stop_tx, stop_rx) = oneshot::channel();
         let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let (write_tx, write_rx) = mpsc::unbounded_channel();
         {
             let mut inner = sink.state.lock().unwrap();
             inner.request_tx = Some(request_tx);
+            inner.write_tx = Some(write_tx);
         }
         let protocol_slug = self.protocol().slug();
         let brand = self.brand();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = run(sink, stop_rx, request_rx, protocol_slug, brand).await {
+            if let Err(e) = run(sink, stop_rx, request_rx, write_rx, protocol_slug, brand).await {
                 eprintln!("[cvr driver] exited with error: {e}");
             }
         });
@@ -133,6 +142,7 @@ async fn run(
     sink: LiveEventSink,
     mut stop_rx: oneshot::Receiver<()>,
     mut request_rx: mpsc::UnboundedReceiver<RequestSpec>,
+    mut write_rx: mpsc::UnboundedReceiver<WriteSpec>,
     protocol_slug: &'static str,
     brand: &'static str,
 ) -> std::io::Result<()> {
@@ -147,79 +157,40 @@ async fn run(
     let mut stats: HashMap<String, DeviceStats> = HashMap::new();
     let mut reassembler = FragmentReassembler::default();
     let mut registry = RequestRegistry::default();
+    let mut writes = WriteRegistry::default();
     let mut buf = [0u8; 2048];
 
     loop {
+        // `biased;` makes branch order *priority* order instead of tokio's
+        // default uniform-random pick among ready branches. Writes and their
+        // deadline sweep outrank `recv`, which outranks all background polling.
+        //
+        // This does not starve `recv`: the branches above it are only ready
+        // when there is actually a write pending or a timer has elapsed. The
+        // polling branches sitting *below* `recv` is the deliberate part —
+        // under heavy inbound traffic they yield, which is self-correcting,
+        // since our own polling is what generates most of that traffic.
         tokio::select! {
+            biased;
+
             _ = &mut stop_rx => break,
 
-            _ = discovery_tick.tick() => {
-                let query = build_basic_info_query();
-                for addr in directed_broadcast_addresses() {
-                    let _ = socket.send_to(&query, (addr, AMP_PORT)).await;
-                }
-                sink.mark_stale_offline(OFFLINE_TIMEOUT_MS);
-            }
-
-            _ = heartbeat_tick.tick() => {
-                let targets: Vec<(String, String)> = {
-                    let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
-                };
-                let query = build_heartbeat_query();
-                for (id, ip) in targets {
-                    let _ = socket.send_to(&query, (ip.as_str(), AMP_PORT)).await;
-                    stats.entry(id).or_default().sent += 1;
-                }
-            }
-
-            _ = stats_tick.tick() => {
-                for (id, s) in stats.iter_mut() {
-                    if s.sent == 0 {
-                        continue;
-                    }
-                    let lost = s.sent.saturating_sub(s.received);
-                    let loss_pct = lost as f64 / s.sent as f64 * 100.0;
-                    println!(
-                        "[cvr driver] {id}: sent={} recv={} lost={} ({loss_pct:.1}%) avg={:.1}ms jitter={:.1}ms",
-                        s.sent,
-                        s.received,
-                        lost,
-                        s.mean_interval_ms(),
-                        s.jitter_ms()
-                    );
-                    s.reset_window();
-                }
-            }
-
-            _ = config_poll_tick.tick() => {
-                let targets: Vec<(String, String)> = {
-                    let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
-                };
-                for (_id, ip) in targets {
-                    // Any pending request for this ip (not just FC=27) blocks a
-                    // new poll — the shared per-IP FragmentReassembler can't
-                    // safely interleave two concurrent multi-fragment exchanges,
-                    // so this defers to whatever's already in flight (e.g. an
-                    // on-demand FC=59 fetch) rather than racing it. Just skipped
-                    // this cycle — tried again next tick.
-                    if registry.has_pending_for_ip(&ip) {
-                        continue;
-                    }
-                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, body: Vec::new(), sink: ResultSink::Internal };
-                    let (packet, superseded) = registry.register(spec, Instant::now());
-                    if let Some(resolved) = superseded {
-                        deliver_resolved(resolved, &sink);
-                    }
-                    let _ = socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await;
+            // Writes are submitted here rather than sent from an ephemeral
+            // socket by the calling command, so their ACK echo returns to
+            // this long-lived socket and can actually be correlated. Unlike
+            // `request_rx`, there is no per-IP exclusivity check: writes are
+            // single-datagram and never touch the shared `FragmentReassembler`,
+            // and `WriteRegistry` serializes them per device on its own.
+            Some(spec) = write_rx.recv() => {
+                for t in writes.submit(spec, Instant::now()) {
+                    let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
                 }
             }
 
             Some(spec) = request_rx.recv() => {
                 let ip = spec.ip.clone();
-                // Same per-IP exclusivity as the poll tick above, enforced on
-                // the way in here too — an external caller (e.g.
+                // Same per-IP exclusivity as the config poll tick (below,
+                // since writes/requests now outrank polling) — an external caller (e.g.
                 // `live_control_fetch_presets`) racing the poll tick must be
                 // rejected outright rather than registered, since by the time
                 // both are pending it's too late: their responses would already
@@ -238,11 +209,15 @@ async fn run(
             }
 
             _ = deadline_tick.tick() => {
-                let (resolved, retransmits) = registry.poll_deadlines(Instant::now());
+                let now = Instant::now();
+                let (resolved, retransmits) = registry.poll_deadlines(now);
                 for r in resolved {
                     deliver_resolved(r, &sink);
                 }
                 for t in retransmits {
+                    let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
+                }
+                for t in writes.poll_deadlines(now) {
                     let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
                 }
                 reassembler.sweep(super::request::FRAGMENT_MAX_AGE_MS);
@@ -257,13 +232,32 @@ async fn run(
                     if nd.data_flag != NETWORK_DATA_FLAG {
                         continue;
                     }
+                    // An inbound ACK is the device confirming one of OUR
+                    // datagrams: a bare 10-byte header echo carrying no frame
+                    // at all, so it is routed to the write registry and never
+                    // reaches reassembly or `handle_single`. Most are for our
+                    // heartbeat/discovery/FC=27 queries and match no pending
+                    // write — `on_ack` ignores those.
+                    if nd.data_state != 0 {
+                        // The device ACKs *everything* we send — every 50ms
+                        // heartbeat included — so this branch is hot and must
+                        // stay cheap and unlogged. `on_ack` is a no-op unless
+                        // this device has a write awaiting confirmation.
+                        //
+                        // Verified on 1.1.8 hardware: these arrive as a bare
+                        // 10-byte header with `packets_lastlen = 0`, NOT an
+                        // echo of what we sent — which is why `on_ack`
+                        // correlates by IP rather than by any header field.
+                        for t in writes.on_ack(&ip, Instant::now()) {
+                            let _ = socket.send_to(&t.packet, (t.ip.as_str(), AMP_PORT)).await;
+                        }
+                        continue;
+                    }
                     // Stateless per-datagram ACK — not a session handshake.
                     // Must fire before reassembly, for every physical
                     // fragment, not just the logical frame it belongs to.
-                    if nd.data_state == 0 {
-                        if let Some(ack) = build_ack_packet(raw) {
-                            let _ = socket.send_to(&ack, (ip.as_str(), AMP_PORT)).await;
-                        }
+                    if let Some(ack) = build_ack_packet(raw) {
+                        let _ = socket.send_to(&ack, (ip.as_str(), AMP_PORT)).await;
                     }
 
                     match reassembler.accept(&ip, &nd, raw) {
@@ -298,6 +292,83 @@ async fn run(
                     }
                 }
             }
+
+            _ = config_poll_tick.tick() => {
+                // Vendor `isRefresh` interlock — see `WriteRegistry::has_pending`.
+                // Skipped outright rather than deferred: the next tick is only
+                // 200ms away, and queueing work here would just pile requests
+                // up behind the write we are trying to get out cleanly.
+                if writes.has_pending() { continue; }
+                let targets: Vec<(String, String)> = {
+                    let inner = sink.state.lock().unwrap();
+                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
+                };
+                for (_id, ip) in targets {
+                    // Any pending request for this ip (not just FC=27) blocks a
+                    // new poll — the shared per-IP FragmentReassembler can't
+                    // safely interleave two concurrent multi-fragment exchanges,
+                    // so this defers to whatever's already in flight (e.g. an
+                    // on-demand FC=59 fetch) rather than racing it. Just skipped
+                    // this cycle — tried again next tick.
+                    if registry.has_pending_for_ip(&ip) {
+                        continue;
+                    }
+                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, body: Vec::new(), sink: ResultSink::Internal };
+                    let (packet, superseded) = registry.register(spec, Instant::now());
+                    if let Some(resolved) = superseded {
+                        deliver_resolved(resolved, &sink);
+                    }
+                    let _ = socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await;
+                }
+            }
+
+            _ = heartbeat_tick.tick() => {
+                // Vendor `isRefresh` interlock — see `WriteRegistry::has_pending`.
+                if writes.has_pending() { continue; }
+                let targets: Vec<(String, String)> = {
+                    let inner = sink.state.lock().unwrap();
+                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
+                };
+                let query = build_heartbeat_query();
+                for (id, ip) in targets {
+                    let _ = socket.send_to(&query, (ip.as_str(), AMP_PORT)).await;
+                    stats.entry(id).or_default().sent += 1;
+                }
+            }
+
+            _ = discovery_tick.tick() => {
+                // Vendor `isRefresh` interlock — see `WriteRegistry::has_pending`.
+                // `mark_stale_offline` is deliberately inside the gate too: we
+                // cannot judge liveness while we are choosing not to poll, and
+                // ageing devices out on evidence we suppressed would mark every
+                // amp offline after OFFLINE_TIMEOUT_MS during a long write burst.
+                if writes.has_pending() { continue; }
+                let query = build_basic_info_query();
+                for addr in directed_broadcast_addresses() {
+                    let _ = socket.send_to(&query, (addr, AMP_PORT)).await;
+                }
+                sink.mark_stale_offline(OFFLINE_TIMEOUT_MS);
+            }
+
+            _ = stats_tick.tick() => {
+                for (id, s) in stats.iter_mut() {
+                    if s.sent == 0 {
+                        continue;
+                    }
+                    let lost = s.sent.saturating_sub(s.received);
+                    let loss_pct = lost as f64 / s.sent as f64 * 100.0;
+                    println!(
+                        "[cvr driver] {id}: sent={} recv={} lost={} ({loss_pct:.1}%) avg={:.1}ms jitter={:.1}ms",
+                        s.sent,
+                        s.received,
+                        lost,
+                        s.mean_interval_ms(),
+                        s.jitter_ms()
+                    );
+                    s.reset_window();
+                }
+            }
+
         }
     }
     Ok(())
@@ -349,7 +420,11 @@ fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventS
             }
             match resolved.result {
                 Ok(frame) => match parse_and_store_sync_data(&resolved.ip, &frame, sink) {
-                    Ok(cfg) => println!("[cvr driver] FC=27 config for {}: {} channels", resolved.ip, cfg.channels.len()),
+                    Ok(cfg) => {
+                        if wire_log_enabled() {
+                            println!("[cvr driver] FC=27 config for {}: {} channels", resolved.ip, cfg.channels.len());
+                        }
+                    }
                     Err(e) => eprintln!("[cvr driver] {e}"),
                 },
                 Err(RequestError::Timeout) => {

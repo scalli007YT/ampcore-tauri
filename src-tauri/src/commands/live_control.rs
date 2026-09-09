@@ -1,6 +1,7 @@
 use std::net::Ipv4Addr;
 
 use tauri::{AppHandle, State};
+use tokio::sync::mpsc;
 
 use crate::data::capability::PowerMode;
 use crate::data::common::now_millis;
@@ -8,30 +9,72 @@ use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch,
 use crate::error::AppError;
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
 use crate::live::cvr::preset;
+use crate::live::cvr::request::{WriteOutcome, WriteSpec};
 use crate::live::cvr::write;
 use crate::live::driver::all_drivers;
-use crate::live::state::{DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink};
+use crate::live::state::{
+    DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink, LiveWriteAck,
+};
 
 /// Shared lookup for every write command below: resolves `device_id` to its
-/// current `firmware_family` + parsed IP in one pass, so each command body
-/// is just "build a packet or error, then send it".
+/// current `firmware_family`, parsed IP, and the running driver's write
+/// channel in one pass, so each command body is just "build a packet or
+/// error, then send it". The channel is resolved here rather than at each
+/// send so a command against a stopped driver fails before building anything.
 fn resolve_write_target(
     state: &State<'_, LiveDeviceState>,
     device_id: &str,
-) -> Result<(Option<String>, Ipv4Addr), AppError> {
-    let device = {
+) -> Result<(Option<String>, Ipv4Addr, mpsc::UnboundedSender<WriteSpec>), AppError> {
+    let (device, write_tx) = {
         let inner = state.0.lock().map_err(|e| e.to_string())?;
-        inner
+        let device = inner
             .devices
             .get(device_id)
             .cloned()
-            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?
+            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let write_tx = inner.write_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device, write_tx)
     };
     let ip: Ipv4Addr = device
         .ip
         .parse()
         .map_err(|_| AppError::from(format!("device {} has an unparseable ip {}", device_id, device.ip)))?;
-    Ok((device.firmware_family, ip))
+    Ok((device.firmware_family, ip, write_tx))
+}
+
+/// Accumulates the per-packet `WriteOutcome`s of one command into the single
+/// `LiveWriteAck` it returns. Every write command uses this, including the
+/// single-packet ones, so the shape the frontend receives never depends on
+/// how many packets a given parameter happens to require.
+#[derive(Default)]
+struct WriteTally {
+    packets: u32,
+    attempts: u32,
+    elapsed_ms: u32,
+    coalesced: u32,
+}
+
+impl WriteTally {
+    fn record(&mut self, outcome: WriteOutcome) {
+        self.packets += 1;
+        if outcome.attempts == 0 {
+            // Coalesced: never transmitted, so it contributes no latency and
+            // must not drag the reported attempt count down to 0.
+            self.coalesced += 1;
+        } else {
+            self.attempts = self.attempts.max(outcome.attempts as u32);
+            self.elapsed_ms += outcome.elapsed_ms as u32;
+        }
+    }
+
+    fn finish(self) -> LiveWriteAck {
+        LiveWriteAck {
+            packets: self.packets,
+            attempts: self.attempts,
+            elapsed_ms: self.elapsed_ms,
+            coalesced: self.coalesced,
+        }
+    }
 }
 
 fn unknown_firmware_error(device_id: &str) -> AppError {
@@ -131,6 +174,7 @@ pub fn live_control_stop(state: State<LiveDeviceState>) -> Result<(), AppError> 
     let handles = {
         let mut inner = state.0.lock().map_err(|e| e.to_string())?;
         inner.request_tx = None;
+        inner.write_tx = None;
         std::mem::take(&mut inner.handles)
     };
     for h in handles {
@@ -299,21 +343,24 @@ pub fn live_control_get_presets(state: State<LiveDeviceState>) -> Result<Vec<Dev
     Ok(inner.presets.iter().map(|(device_id, presets)| DevicePresets { device_id: device_id.clone(), presets: presets.clone() }).collect())
 }
 
-/// Fire-and-forget FC=59 mode=2 recall, same convention as every other write
-/// in this app (see `write.rs`'s module doc) — the device's new active
-/// preset shows up on the next manual `live_control_fetch_presets` call, not
+/// FC=59 mode=2 recall, same convention as every other write in this app
+/// (see `write.rs`'s module doc): returns once the device has ACKed the
+/// packet, which confirms delivery only. The device's new active preset
+/// still shows up on the next manual `live_control_fetch_presets` call, not
 /// pushed automatically here.
 #[tauri::command]
 #[specta::specta]
-pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, device_id: String, slot_index: u8) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
-    write::send_control(ip, &crate::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?;
-    Ok(())
+    tally.record(write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
 }
 
-/// Fire-and-forget: sends the write packet and returns once the datagram is
-/// sent, without waiting for the device to apply it. The next FC=27 poll
+/// Returns once the device has ACKed the write at the transport level (see
+/// `write.rs`'s `send_control`), or errors if it never does — delivery is
+/// confirmed, but not that the device applied the value. The next FC=27 poll
 /// (already running for every discovered device, see `driver.rs`) picks up
 /// the real new state and pushes it to the frontend via the existing
 /// `live_channel_config:updated` event — no optimistic update here.
@@ -324,12 +371,13 @@ pub async fn live_control_set_output_mute(
     device_id: String,
     channel_index: u8,
     muted: bool,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let packet = write::build_set_output_mute(firmware_family.as_deref(), channel_index, muted)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
 }
 
 #[tauri::command]
@@ -339,12 +387,13 @@ pub async fn live_control_set_channel_input_mute(
     device_id: String,
     channel_index: u8,
     muted: bool,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let packet = write::build_set_input_mute(firmware_family.as_deref(), channel_index, muted)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
 }
 
 #[tauri::command]
@@ -354,12 +403,13 @@ pub async fn live_control_set_channel_delay_in(
     device_id: String,
     channel_index: u8,
     delay_in_ms: f64,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let packet = write::build_set_delay_in(firmware_family.as_deref(), channel_index, delay_in_ms as f32)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
 }
 
 #[tauri::command]
@@ -369,12 +419,13 @@ pub async fn live_control_set_channel_phase_invert(
     device_id: String,
     channel_index: u8,
     inverted: bool,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let packet = write::build_set_phase_invert(firmware_family.as_deref(), channel_index, inverted)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
 }
 
 #[tauri::command]
@@ -384,20 +435,22 @@ pub async fn live_control_set_channel_power_mode(
     device_id: String,
     channel_index: u8,
     power_mode: PowerMode,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let packet = write::build_set_power_mode(firmware_family.as_deref(), channel_index, power_mode)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
-    write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
-    Ok(())
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
 }
 
 /// Partial update of a channel's output trim/volume/delay — mirrors
 /// `projects_set_channel_output`'s per-field-optional convention, but unlike
 /// that single-struct-mutation command, each populated field here is its own
 /// wire write (different FC/`in_out_flag` per field, see `write_v118.rs`) —
-/// up to three fire-and-forget UDP sends per call, dispatched concurrently
-/// rather than awaited one at a time.
+/// up to three UDP sends per call, each awaited to its ACK before the next
+/// goes out (writes are stop-and-wait per device; see `WriteRegistry`), so a
+/// failure on any field surfaces instead of being masked by the others.
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_output(
@@ -407,8 +460,9 @@ pub async fn live_control_set_channel_output(
     trim_db: Option<f64>,
     volume_db: Option<f64>,
     delay_out_ms: Option<f64>,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let firmware_family = firmware_family.as_deref();
 
     let mut packets = Vec::with_capacity(3);
@@ -426,9 +480,9 @@ pub async fn live_control_set_channel_output(
         let packet = packet.ok_or_else(|| {
             AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
         })?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     }
-    Ok(())
+    Ok(tally.finish())
 }
 
 /// Partial update of one parametric EQ band (1-8) — mirrors
@@ -448,8 +502,9 @@ pub async fn live_control_set_eq_band(
     direction: EqDirection,
     band_index: u8,
     patch: EqBandPatch,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let firmware_family = firmware_family.as_deref();
     let in_out_flag: u8 = match direction {
         EqDirection::Input => 0,
@@ -470,24 +525,24 @@ pub async fn live_control_set_eq_band(
         let type_code = eq_filter_type_code(filter_type);
         let packet = write::build_set_eq_filter_type(firmware_family, channel_index, in_out_flag, segment, type_code, active)
             .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     }
     if let Some(freq_hz) = patch.freq_hz {
         let packet = write::build_set_eq_freq(firmware_family, channel_index, in_out_flag, segment, freq_hz as f32)
             .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     }
     if let Some(gain_db) = patch.gain_db {
         let packet = write::build_set_eq_gain(firmware_family, channel_index, in_out_flag, segment, gain_db as f32)
             .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     }
     if let Some(q) = patch.q {
         let packet = write::build_set_eq_q(firmware_family, channel_index, in_out_flag, segment, q as f32)
             .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     }
-    Ok(())
+    Ok(tally.finish())
 }
 
 /// Partial update of the HP or LP crossover slot — same `filter_type`/
@@ -507,8 +562,9 @@ pub async fn live_control_set_crossover_slot(
     direction: EqDirection,
     slot: CrossoverSlotKind,
     patch: CrossoverSlotPatch,
-) -> Result<(), AppError> {
-    let (firmware_family, ip) = resolve_write_target(&state, &device_id)?;
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
     let firmware_family = firmware_family.as_deref();
     let in_out_flag: u8 = match direction {
         EqDirection::Input => 0,
@@ -531,17 +587,17 @@ pub async fn live_control_set_crossover_slot(
         let type_code = crossover_filter_type_code(filter_type);
         let packet = write::build_set_eq_filter_type(firmware_family, channel_index, in_out_flag, segment, type_code, active)
             .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
         wrote_anything = true;
     }
     if let Some(freq_hz) = patch.freq_hz {
         let packet = write::build_set_eq_freq(firmware_family, channel_index, in_out_flag, segment, freq_hz as f32)
             .ok_or_else(|| unknown_firmware_error(&device_id))?;
-        write::send_control(ip, &packet).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
         wrote_anything = true;
     }
     if wrote_anything {
-        write::send_control(ip, &write::CROSSOVER_COMMIT_PACKET).await.map_err(|e| e.to_string())?;
+        tally.record(write::send_control(&write_tx, ip, &write::CROSSOVER_COMMIT_PACKET).await.map_err(|e| e.to_string())?);
     }
-    Ok(())
+    Ok(tally.finish())
 }
