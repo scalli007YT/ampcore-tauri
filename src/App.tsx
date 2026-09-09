@@ -80,7 +80,7 @@ function App() {
   }, [windowTitle]);
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-screen min-w-0 flex-col overflow-hidden">
       <TitleBar
         title={windowTitle}
         projectName={selectedProject?.name}
@@ -98,7 +98,7 @@ function App() {
           ) : undefined
         }
       />
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1">
         {mode === "modeSelect" && (
           <AppModeSelector
             onSelectLiveControl={() => setMode("liveControl")}

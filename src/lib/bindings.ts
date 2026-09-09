@@ -196,33 +196,36 @@ export const commands = {
 	 */
 	liveControlGetPresets: () => typedError<DevicePresets[], AppError>(__TAURI_INVOKE("live_control_get_presets")),
 	/**
-	 *  Fire-and-forget FC=59 mode=2 recall, same convention as every other write
-	 *  in this app (see `write.rs`'s module doc) — the device's new active
-	 *  preset shows up on the next manual `live_control_fetch_presets` call, not
+	 *  FC=59 mode=2 recall, same convention as every other write in this app
+	 *  (see `write.rs`'s module doc): returns once the device has ACKed the
+	 *  packet, which confirms delivery only. The device's new active preset
+	 *  still shows up on the next manual `live_control_fetch_presets` call, not
 	 *  pushed automatically here.
 	 */
-	liveControlRecallPreset: (deviceId: string, slotIndex: number) => typedError<null, AppError>(__TAURI_INVOKE("live_control_recall_preset", { deviceId, slotIndex })),
+	liveControlRecallPreset: (deviceId: string, slotIndex: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_recall_preset", { deviceId, slotIndex })),
 	/**
-	 *  Fire-and-forget: sends the write packet and returns once the datagram is
-	 *  sent, without waiting for the device to apply it. The next FC=27 poll
+	 *  Returns once the device has ACKed the write at the transport level (see
+	 *  `write.rs`'s `send_control`), or errors if it never does — delivery is
+	 *  confirmed, but not that the device applied the value. The next FC=27 poll
 	 *  (already running for every discovered device, see `driver.rs`) picks up
 	 *  the real new state and pushes it to the frontend via the existing
 	 *  `live_channel_config:updated` event — no optimistic update here.
 	 */
-	liveControlSetOutputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_output_mute", { deviceId, channelIndex, muted })),
+	liveControlSetOutputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_output_mute", { deviceId, channelIndex, muted })),
 	/**
 	 *  Partial update of a channel's output trim/volume/delay — mirrors
 	 *  `projects_set_channel_output`'s per-field-optional convention, but unlike
 	 *  that single-struct-mutation command, each populated field here is its own
 	 *  wire write (different FC/`in_out_flag` per field, see `write_v118.rs`) —
-	 *  up to three fire-and-forget UDP sends per call, dispatched concurrently
-	 *  rather than awaited one at a time.
+	 *  up to three UDP sends per call, each awaited to its ACK before the next
+	 *  goes out (writes are stop-and-wait per device; see `WriteRegistry`), so a
+	 *  failure on any field surfaces instead of being masked by the others.
 	 */
-	liveControlSetChannelOutput: (deviceId: string, channelIndex: number, trimDb: number | null, volumeDb: number | null, delayOutMs: number | null) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_output", { deviceId, channelIndex, trimDb, volumeDb, delayOutMs })),
-	liveControlSetChannelDelayIn: (deviceId: string, channelIndex: number, delayInMs: number | null) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_delay_in", { deviceId, channelIndex, delayInMs })),
-	liveControlSetChannelInputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_input_mute", { deviceId, channelIndex, muted })),
-	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
-	liveControlSetChannelPowerMode: (deviceId: string, channelIndex: number, powerMode: PowerMode) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_channel_power_mode", { deviceId, channelIndex, powerMode })),
+	liveControlSetChannelOutput: (deviceId: string, channelIndex: number, trimDb: number | null, volumeDb: number | null, delayOutMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_output", { deviceId, channelIndex, trimDb, volumeDb, delayOutMs })),
+	liveControlSetChannelDelayIn: (deviceId: string, channelIndex: number, delayInMs: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_delay_in", { deviceId, channelIndex, delayInMs })),
+	liveControlSetChannelInputMute: (deviceId: string, channelIndex: number, muted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_input_mute", { deviceId, channelIndex, muted })),
+	liveControlSetChannelPhaseInvert: (deviceId: string, channelIndex: number, inverted: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_phase_invert", { deviceId, channelIndex, inverted })),
+	liveControlSetChannelPowerMode: (deviceId: string, channelIndex: number, powerMode: PowerMode) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_power_mode", { deviceId, channelIndex, powerMode })),
 	/**
 	 *  Partial update of one parametric EQ band (1-8) — mirrors
 	 *  `projects_set_eq_band`'s shape (`EqBandPatch`, only non-`None` fields
@@ -233,7 +236,7 @@ export const commands = {
 	 *  `freq_hz`/`gain_db`/`q` are independent FCs (32/31/34) and each sends its
 	 *  own packet when present in the patch — up to 4 UDP sends per call.
 	 */
-	liveControlSetEqBand: (deviceId: string, channelIndex: number, direction: EqDirection, bandIndex: number, patch: EqBandPatch) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_eq_band", { deviceId, channelIndex, direction, bandIndex, patch })),
+	liveControlSetEqBand: (deviceId: string, channelIndex: number, direction: EqDirection, bandIndex: number, patch: EqBandPatch) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_eq_band", { deviceId, channelIndex, direction, bandIndex, patch })),
 	/**
 	 *  Partial update of the HP or LP crossover slot — same `filter_type`/
 	 *  `active` merge requirement as `live_control_set_eq_band` (see its doc
@@ -244,7 +247,7 @@ export const commands = {
 	 *  constant's doc comment). Sent once per call, after whichever field(s)
 	 *  were actually written, not once per field.
 	 */
-	liveControlSetCrossoverSlot: (deviceId: string, channelIndex: number, direction: EqDirection, slot: CrossoverSlotKind, patch: CrossoverSlotPatch) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_crossover_slot", { deviceId, channelIndex, direction, slot, patch })),
+	liveControlSetCrossoverSlot: (deviceId: string, channelIndex: number, direction: EqDirection, slot: CrossoverSlotKind, patch: CrossoverSlotPatch) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_crossover_slot", { deviceId, channelIndex, direction, slot, patch })),
 	/**
 	 *  Resolves which catalog model a live device (identified by `mac`) should
 	 *  be configured as. An existing manual pick (`auto_matched: false`) always
@@ -912,6 +915,30 @@ export type LimiterPatch = {
 	peakThresholdVp: number | null,
 	peakHoldMs: number | null,
 	peakReleaseMs: number | null,
+};
+
+/**
+ *  What a live write reports back so the frontend can confirm delivery in the
+ *  UI, not just in the console. Aggregated across every packet one command
+ *  puts on the wire — an EQ band patch is up to 4, a crossover slot up to 3.
+ */
+export type LiveWriteAck = {
+	/**  Packets this command produced, coalesced ones included. */
+	packets: number,
+	/**
+	 *  Highest transmission count any one packet needed. 1 means everything
+	 *  was acknowledged on its first send; higher means refires were spent.
+	 */
+	attempts: number,
+	/**  Summed ACK round-trip over the packets that actually went out. */
+	elapsedMs: number,
+	/**
+	 *  Packets superseded by a newer write to the same parameter before they
+	 *  were ever transmitted (see `WriteOutcome::attempts == 0`). A command
+	 *  whose packets were *all* coalesced did nothing on the wire, and the
+	 *  UI should stay quiet about it — the write that replaced it reports.
+	 */
+	coalesced: number,
 };
 
 /**

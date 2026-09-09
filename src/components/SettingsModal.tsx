@@ -97,7 +97,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   return (
     <Modal opened={opened} onClose={onClose} title="App Settings" centered>
       <Stack gap="sm">
-        <Group justify="space-between" wrap="nowrap">
+        <Group justify="space-between" wrap="wrap" gap="xs">
           <Text size="sm">Color mode</Text>
           <SegmentedControl
             size="xs"
@@ -111,7 +111,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
           />
         </Group>
 
-        <Group justify="space-between" wrap="nowrap">
+        <Group justify="space-between" wrap="wrap" gap="xs">
           <Text size="sm">Check for updates on startup</Text>
           <Switch
             checked={autoUpdateChecks}
@@ -123,9 +123,9 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
           />
         </Group>
 
-        <Group justify="space-between" wrap="nowrap">
+        <Group justify="space-between" wrap="wrap" gap="xs">
           <Text size="sm">Version</Text>
-          <Group gap="xs" wrap="nowrap">
+          <Group gap="xs" wrap="wrap">
             <Badge color={STATUS_COLOR[status]} variant="light">
               {version ? `${version} — ${statusLabel}` : statusLabel}
             </Badge>

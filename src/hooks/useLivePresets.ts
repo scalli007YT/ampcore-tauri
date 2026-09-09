@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { notifications } from "@mantine/notifications";
 import { commands, type DevicePresets, type DevicePresetsSnapshot } from "../lib/bindings";
+import { showRollingNotification } from "../lib/rollingNotification";
 
 /** Keyed by `DiscoveredDevice.id`. Unlike `useLiveChannelConfig`/telemetry,
  * FC=59 preset data is never background-polled (preset names change rarely)
@@ -49,7 +50,14 @@ export function useLivePresets(deviceId: string | undefined) {
     const result = await commands.liveControlFetchPresets(deviceId);
     setLoading(false);
     if (result.status === "error") {
-      notifications.show({ color: "red", title: "Preset fetch failed", message: result.error.message });
+      // Same convention as `liveConfigureAdapter`'s `reportWrite`: failures
+      // stack (no `id`) and persist until dismissed.
+      notifications.show({
+        color: "red",
+        title: "Preset fetch failed",
+        message: result.error.message,
+        autoClose: false,
+      });
     }
   }, [deviceId]);
 
@@ -58,14 +66,23 @@ export function useLivePresets(deviceId: string | undefined) {
       if (!deviceId) return;
       const result = await commands.liveControlRecallPreset(deviceId, slotIndex);
       if (result.status === "error") {
-        notifications.show({ color: "red", title: "Preset recall failed", message: result.error.message });
+        notifications.show({
+          color: "red",
+          title: "Preset recall failed",
+          message: result.error.message,
+          autoClose: false,
+        });
         return;
       }
       const slotName = presetsRef.current[deviceId]?.slots.find((s) => s.index === slotIndex)?.name;
-      notifications.show({
+      // Success replaces rather than stacks, matching `notifySuccess`. Must go
+      // through `showRollingNotification` — a stable `id` on
+      // `notifications.show()` is ignored, not replaced.
+      showRollingNotification("preset-recall", {
         color: "green",
         title: "Preset recalled",
         message: slotName ? `"${slotName}" applied` : `Slot ${slotIndex + 1} applied`,
+        autoClose: 1500,
       });
     },
     [deviceId],

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Menu, NumberInput, Select, Stack, Text } from "@mantine/core";
+import { Button, Menu, Select, Stack, Text } from "@mantine/core";
+import { CommitNumberInput } from "./CommitNumberInput";
 import { buildBandResponseCurve, buildResponseCurve, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
 import {
   type AmpAssignment,
@@ -90,6 +91,9 @@ const GRAPH_HEIGHT = 420;
  * edge, rather than the graph (self-limited by its own aspect ratio) ending
  * up narrower than the full-width strip on large windows. */
 const EDITOR_MAX_WIDTH = 1500;
+/** Narrowest a band/crossover column can get before its inputs stop being
+ * readable — the strip scrolls horizontally rather than going below it. */
+const STRIP_MIN_WIDTH = 96;
 const GRAPH_MIN_DB = -24;
 const GRAPH_MAX_DB = 24;
 const GRAPH_MIN_HZ = 20;
@@ -430,6 +434,12 @@ function ResponseGraph({
           display: "block",
           width: "100%",
           height: "auto",
+          // Below ~430px wide the fixed 1000x420 aspect ratio would leave a
+          // graph too short to aim at. The floor letterboxes the viewBox
+          // (default `xMidYMid meet`) instead of stretching it, so the curve
+          // keeps its true shape and `toViewBoxPoint` — which inverts the
+          // live screen CTM — still maps drags correctly.
+          minHeight: 190,
         }}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
@@ -743,6 +753,7 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     <Stack
       gap="md"
       p="md"
+      className="min-w-0"
       style={{
         maxWidth: EDITOR_MAX_WIDTH,
         margin: "0 auto",
@@ -770,48 +781,54 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
         gainRange={gainRange}
         qRange={qRange}
       />
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${2 + displayEq.bands.length}, 1fr)`,
-          gap: 8,
-        }}
-      >
-        <CrossoverStrip
-          label="HP"
-          slot={displayEq.hp}
-          freqMin={freqRange.min}
-          freqMax={freqRange.max}
-          selected={sameStage(selectedStage, { kind: "hp" })}
-          onSelect={() => setSelectedStage({ kind: "hp" })}
-          onChange={(patch) => handleCrossoverChange("hp", patch)}
-        />
-        {displayEq.bands.map((band, i) => (
-          <BandStrip
-            key={i}
-            label={String(i + 1)}
-            band={band}
-            capsByType={eqCapsByType}
+      {/* One column per band plus HP/LP. Equal `1fr` columns alone collapse
+       * to unusable slivers on a narrow window (a 10-band EQ would give each
+       * strip ~35px), so each column keeps a floor wide enough for its
+       * `NumberInput`s and the strip scrolls sideways below that. */}
+      <div className="min-w-0 overflow-x-auto">
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: `repeat(${2 + displayEq.bands.length}, minmax(${STRIP_MIN_WIDTH}px, 1fr))`,
+            gap: 8,
+          }}
+        >
+          <CrossoverStrip
+            label="HP"
+            slot={displayEq.hp}
             freqMin={freqRange.min}
             freqMax={freqRange.max}
-            gainMin={gainRange.min}
-            gainMax={gainRange.max}
-            qMin={qRange.min}
-            qMax={qRange.max}
-            selected={sameStage(selectedStage, { kind: "band", bandIndex: i })}
-            onSelect={() => setSelectedStage({ kind: "band", bandIndex: i })}
-            onChange={(patch) => handleBandChange(i, patch)}
+            selected={sameStage(selectedStage, { kind: "hp" })}
+            onSelect={() => setSelectedStage({ kind: "hp" })}
+            onChange={(patch) => handleCrossoverChange("hp", patch)}
           />
-        ))}
-        <CrossoverStrip
-          label="LP"
-          slot={displayEq.lp}
-          freqMin={freqRange.min}
-          freqMax={freqRange.max}
-          selected={sameStage(selectedStage, { kind: "lp" })}
-          onSelect={() => setSelectedStage({ kind: "lp" })}
-          onChange={(patch) => handleCrossoverChange("lp", patch)}
-        />
+          {displayEq.bands.map((band, i) => (
+            <BandStrip
+              key={i}
+              label={String(i + 1)}
+              band={band}
+              capsByType={eqCapsByType}
+              freqMin={freqRange.min}
+              freqMax={freqRange.max}
+              gainMin={gainRange.min}
+              gainMax={gainRange.max}
+              qMin={qRange.min}
+              qMax={qRange.max}
+              selected={sameStage(selectedStage, { kind: "band", bandIndex: i })}
+              onSelect={() => setSelectedStage({ kind: "band", bandIndex: i })}
+              onChange={(patch) => handleBandChange(i, patch)}
+            />
+          ))}
+          <CrossoverStrip
+            label="LP"
+            slot={displayEq.lp}
+            freqMin={freqRange.min}
+            freqMax={freqRange.max}
+            selected={sameStage(selectedStage, { kind: "lp" })}
+            onSelect={() => setSelectedStage({ kind: "lp" })}
+            onChange={(patch) => handleCrossoverChange("lp", patch)}
+          />
+        </div>
       </div>
     </Stack>
   );
@@ -908,13 +925,13 @@ function CrossoverStrip({
         onChange={(value) => value && onChange({ filterType: value as CrossoverFilterType })}
         allowDeselect={false}
       />
-      <NumberInput
+      <CommitNumberInput
         size="sm"
         suffix=" Hz"
         min={freqMin ?? undefined}
         max={freqMax ?? undefined}
         value={roundFreq(slot.freqHz ?? 0)}
-        onChange={(value) => typeof value === "number" && onChange({ freqHz: value })}
+        onCommit={(value) => onChange({ freqHz: value })}
       />
       {/* No gain/Q for crossover slots — Q is implied by filterType, never
        * user-settable (see CrossoverSlot in filterResponse.ts). Spacers
@@ -963,36 +980,36 @@ function BandStrip({
         onChange={(value) => value && onChange({ filterType: value as EqFilterType })}
         allowDeselect={false}
       />
-      <NumberInput
+      <CommitNumberInput
         size="sm"
         suffix=" Hz"
         min={freqMin ?? undefined}
         max={freqMax ?? undefined}
         value={roundFreq(band.freqHz ?? 0)}
-        onChange={(value) => typeof value === "number" && onChange({ freqHz: value })}
+        onCommit={(value) => onChange({ freqHz: value })}
       />
       {caps.supportsGain ? (
-        <NumberInput
+        <CommitNumberInput
           size="sm"
           suffix=" dB"
           step={0.5}
           min={gainMin ?? undefined}
           max={gainMax ?? undefined}
           value={roundGain(band.gainDb ?? 0)}
-          onChange={(value) => typeof value === "number" && onChange({ gainDb: value })}
+          onCommit={(value) => onChange({ gainDb: value })}
         />
       ) : (
         <div style={{ height: 36 }} />
       )}
       {caps.supportsQ ? (
-        <NumberInput
+        <CommitNumberInput
           size="sm"
           suffix=" Q"
           step={0.1}
           min={qMin ?? undefined}
           max={qMax ?? undefined}
           value={roundQ(band.q ?? 1)}
-          onChange={(value) => typeof value === "number" && onChange({ q: value })}
+          onCommit={(value) => onChange({ q: value })}
         />
       ) : (
         <div style={{ height: 36 }} />

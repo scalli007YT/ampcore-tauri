@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActionIcon, Button, Card, Center, Group, Modal, Stack, Text, TextInput, Textarea, Title } from "@mantine/core";
+import { ActionIcon, Button, Card, Group, Modal, Stack, Text, TextInput, Textarea, Title } from "@mantine/core";
 import { useForm } from "@mantine/form";
 import { Pencil } from "lucide-react";
 import { ProjectEditModal } from "./ProjectEditModal";
@@ -50,57 +50,61 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
   }
 
   return (
-    <Center className="h-full">
-      <Stack w={420}>
-        <Title order={2} ta="center">
-          Select a Project
-        </Title>
+    /* Scroll rather than clip once the project list outgrows the window —
+     * `Center` alone cuts off both ends of taller-than-viewport content. */
+    <div className="h-full overflow-y-auto">
+      <div className="flex min-h-full flex-col items-center justify-center p-4">
+        <Stack w="100%" maw={420}>
+          <Title order={2} ta="center">
+            Select a Project
+          </Title>
 
-        {!loading && projects.length === 0 && (
-          <Text c="dimmed" ta="center">
-            No projects yet — create one to get started.
-          </Text>
-        )}
+          {!loading && projects.length === 0 && (
+            <Text c="dimmed" ta="center">
+              No projects yet — create one to get started.
+            </Text>
+          )}
 
-        <Stack gap="xs">
-          {projects.map((project) => (
-            <Card
-              key={project.id}
-              withBorder
-              padding="sm"
-              onClick={() => onSelect(project)}
-              onMouseEnter={() => setHoveredId(project.id)}
-              onMouseLeave={() => setHoveredId((current) => (current === project.id ? null : current))}
-              className="cursor-pointer"
-            >
-              <Group justify="space-between" wrap="nowrap">
-                <div className="min-w-0">
-                  <Text fw={500}>{project.name}</Text>
-                  {project.description && (
-                    <Text size="sm" c="dimmed">
-                      {project.description}
-                    </Text>
-                  )}
-                </div>
-                <ActionIcon
-                  variant="subtle"
-                  color="gray"
-                  className={hoveredId === project.id ? "visible" : "invisible"}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditingProject(project);
-                  }}
-                  aria-label="Edit project"
-                >
-                  <Pencil size={16} />
-                </ActionIcon>
-              </Group>
-            </Card>
-          ))}
+          <Stack gap="xs">
+            {projects.map((project) => (
+              <Card
+                key={project.id}
+                withBorder
+                padding="sm"
+                onClick={() => onSelect(project)}
+                onMouseEnter={() => setHoveredId(project.id)}
+                onMouseLeave={() => setHoveredId((current) => (current === project.id ? null : current))}
+                className="cursor-pointer"
+              >
+                <Group justify="space-between" wrap="nowrap">
+                  <div className="min-w-0">
+                    <Text fw={500}>{project.name}</Text>
+                    {project.description && (
+                      <Text size="sm" c="dimmed">
+                        {project.description}
+                      </Text>
+                    )}
+                  </div>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    className={hoveredId === project.id ? "visible" : "invisible"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingProject(project);
+                    }}
+                    aria-label="Edit project"
+                  >
+                    <Pencil size={16} />
+                  </ActionIcon>
+                </Group>
+              </Card>
+            ))}
+          </Stack>
+
+          <Button onClick={() => setModalOpen(true)}>New Project</Button>
         </Stack>
-
-        <Button onClick={() => setModalOpen(true)}>New Project</Button>
-      </Stack>
+      </div>
 
       <Modal
         opened={modalOpen}
@@ -140,6 +144,6 @@ export function ProjectSelector({ onSelect }: ProjectSelectorProps) {
         onSaved={(updated) => setProjects((current) => current.map((p) => (p.id === updated.id ? updated : p)))}
         onDeleted={(id) => setProjects((current) => current.filter((p) => p.id !== id))}
       />
-    </Center>
+    </div>
   );
 }

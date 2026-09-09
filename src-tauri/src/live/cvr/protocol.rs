@@ -20,6 +20,23 @@ use std::net::Ipv4Addr;
 use serde::Serialize;
 use specta::Type;
 
+/// Per-packet wire logging, off unless `AMPCORE_WIRE_LOG` is set to a
+/// non-empty, non-"0" value. Read once and cached.
+///
+/// This exists because every `println!` is a synchronous, lock-taking write to
+/// stdout made from *inside* the driver's `select!` loop. The FC=27 line alone
+/// fires ~5x/s per device, and on Windows with a console attached that is
+/// enough to stall the loop — which delays exactly the `recv` branch that
+/// correlates write ACKs, causing writes to refire against a device that
+/// already applied them.
+///
+/// Genuine faults (write failures, request timeouts, parse failures) are
+/// logged unconditionally and ignore this flag.
+pub fn wire_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("AMPCORE_WIRE_LOG").map(|v| !v.is_empty() && v != "0").unwrap_or(false))
+}
+
 pub const PC_LISTEN_PORT: u16 = 45454;
 pub const AMP_PORT: u16 = 45455;
 
@@ -116,8 +133,17 @@ pub fn build_network_data_header(
     buf
 }
 
-/// byte0=0x55 sentinel, byte1=FC, byte2=status(0=response,1=write,2=request,3=fire-and-forget),
-/// byte3=chx, byte4=segment, bytes5-8=link (i32 LE), byte9=inOutFlag(0=in,1=out).
+/// byte0=0x55 sentinel, byte1=FC, byte2=status, byte3=chx, byte4=segment,
+/// bytes5-8=link (i32 LE), byte9=inOutFlag(0=in,1=out).
+///
+/// `status` is the vendor reference's `Responsed` enum, in full:
+/// 0=`Response`, 1=`NOT_Response`, 2=`Request`, 3=`Response_aa`,
+/// 4=`Response_error`, 5=`Response_bb`, 6=`Response_cc`, 7=`Response_dd`.
+/// This app only ever sends 1 (writes, via `build_control_packet`) and 2
+/// (queries, via `build_protocol_packet`). Note 4 is an explicit *error*
+/// status a device can reply with; nothing here inspects it yet, and doing
+/// so would be an application-level check entirely separate from the
+/// transport ACK that `request.rs`'s `WriteRegistry` waits on.
 pub fn build_struct_header(
     function_code: u8,
     status_code: u8,

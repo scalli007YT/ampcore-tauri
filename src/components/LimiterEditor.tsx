@@ -4,6 +4,7 @@ import { type AmpAssignment, type AmpCapability_Serialize as AmpCapability, type
 import type { ConfigureActions, ConfigureCapabilities } from "../lib/configureActions";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark, type VuMeterZone } from "./VuMeter";
 import { limiterThresholdToDb, type ChannelTelemetry } from "../lib/channelTelemetry";
+import { useIsTight } from "../lib/breakpoints";
 
 const EDITOR_MAX_WIDTH = 640;
 const SLIDER_HEIGHT = 220;
@@ -127,6 +128,7 @@ export function LimiterEditor({
   capabilities,
   telemetry,
 }: LimiterEditorProps) {
+  const tight = useIsTight();
   const channel = assignment.channels.find((c) => c.channelIndex === channelIndex) ?? assignment.channels[0];
   const limiter = channel.limiter ?? FALLBACK_LIMITER;
   const ohms = channel.ohms ?? 8;
@@ -304,7 +306,7 @@ export function LimiterEditor({
   }
 
   return (
-    <Stack gap="md" p="md" align="center" style={{ maxWidth: EDITOR_MAX_WIDTH, margin: "0 auto" }}>
+    <Stack gap="md" p="md" align="center" className="min-w-0" style={{ maxWidth: EDITOR_MAX_WIDTH, margin: "0 auto" }}>
       {isBridged && (
         <Text size="xs" fw={700} c="green" ta="center">
           Bridged with Out{partnerLetter} — showing combined values
@@ -376,7 +378,17 @@ export function LimiterEditor({
 
       <Divider w="100%" />
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, width: "100%" }}>
+      {/* RMS and Peak field columns sit side by side while both fit; below
+       * `useIsTight` a label + 140px input pair per column no longer does,
+       * so they stack into one column. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: tight ? "1fr" : "1fr 1fr",
+          gap: tight ? 12 : 24,
+          width: "100%",
+        }}
+      >
         <Stack gap="xs">
           <LimiterFieldRow
             label="Threshold"
@@ -649,7 +661,7 @@ function LimiterFieldRow({
       </Text>
       <NumberInput
         size="sm"
-        w={140}
+        style={{ flex: "0 1 140px", minWidth: 92 }}
         suffix={` ${unit}`}
         min={min}
         max={max}

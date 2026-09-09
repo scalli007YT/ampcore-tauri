@@ -2,9 +2,41 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <!--
+      Mantine's ColorSchemeScript, inlined.
+
+      `main.tsx` sets `defaultColorScheme="auto"`, which Mantine can only
+      resolve in JS *after* first paint — so without this the app flashes the
+      wrong theme on every launch before snapping to the right one. Because
+      `src/styles/tailwind.css` binds its `dark:` variant to
+      `data-mantine-color-scheme`, that flash hits Tailwind-styled elements too.
+
+      `<ColorSchemeScript />` is a React component and this is a static Vite
+      SPA shell, so it cannot be rendered here. The body below is copied
+      verbatim from @mantine/core's `ColorSchemeScript.mjs` (v9.4.1) with
+      defaultColorScheme "auto" baked in. Two things must stay in sync with
+      Mantine or the attribute silently stops matching:
+        - the storage key "mantine-color-scheme-value"
+        - the "auto" default, which must equal `main.tsx`'s prop
+      Keep this first in <head>, before any stylesheet, so it wins the race.
+    -->
+    <script data-mantine-script="true">
+      try {
+        var _colorScheme = window.localStorage.getItem("mantine-color-scheme-value");
+        var colorScheme =
+          _colorScheme === "light" || _colorScheme === "dark" || _colorScheme === "auto" ? _colorScheme : "auto";
+        var computedColorScheme =
+          colorScheme !== "auto"
+            ? colorScheme
+            : window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        document.documentElement.setAttribute("data-mantine-color-scheme", computedColorScheme);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/png" href="/icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>AmpCore</title>
   </head>
 
   <body>

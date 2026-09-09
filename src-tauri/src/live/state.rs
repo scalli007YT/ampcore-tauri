@@ -10,7 +10,7 @@ use crate::data::common::now_millis;
 
 use super::cvr::channel_config::ChannelConfigSnapshot;
 use super::cvr::preset::DevicePresetsSnapshot;
-use super::cvr::request::RequestSpec;
+use super::cvr::request::{RequestSpec, WriteSpec};
 use super::cvr::telemetry::Telemetry;
 use super::driver::DriverHandle;
 
@@ -63,6 +63,11 @@ pub struct LiveDeviceInner {
     /// task (e.g. a future Tauri command) — `None` whenever no driver is
     /// running. `Some` while `CvrDriver::start`'s spawned task is alive.
     pub request_tx: Option<mpsc::UnboundedSender<RequestSpec>>,
+    /// Write counterpart to `request_tx` — routes control packets through the
+    /// driver's single long-lived socket (bound to `PC_LISTEN_PORT`) so the
+    /// device's ACK echo comes back to a socket that still exists and can be
+    /// correlated. `None` whenever no driver is running.
+    pub write_tx: Option<mpsc::UnboundedSender<WriteSpec>>,
 }
 
 /// Arc-wrapped (unlike `ProjectDataState`'s bare `Mutex<T>`) because a clone
@@ -79,6 +84,7 @@ impl LiveDeviceState {
             channel_config: HashMap::new(),
             presets: HashMap::new(),
             request_tx: None,
+            write_tx: None,
         })))
     }
 }
@@ -87,6 +93,26 @@ impl Default for LiveDeviceState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What a live write reports back so the frontend can confirm delivery in the
+/// UI, not just in the console. Aggregated across every packet one command
+/// puts on the wire — an EQ band patch is up to 4, a crossover slot up to 3.
+#[derive(Debug, Clone, Copy, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveWriteAck {
+    /// Packets this command produced, coalesced ones included.
+    pub packets: u32,
+    /// Highest transmission count any one packet needed. 1 means everything
+    /// was acknowledged on its first send; higher means refires were spent.
+    pub attempts: u32,
+    /// Summed ACK round-trip over the packets that actually went out.
+    pub elapsed_ms: u32,
+    /// Packets superseded by a newer write to the same parameter before they
+    /// were ever transmitted (see `WriteOutcome::attempts == 0`). A command
+    /// whose packets were *all* coalesced did nothing on the wire, and the
+    /// UI should stay quiet about it — the write that replaced it reports.
+    pub coalesced: u32,
 }
 
 /// Event/command payload pairing a device id with its latest telemetry —

@@ -8,7 +8,6 @@ import {
   Loader,
   Menu,
   NumberInput,
-  Paper,
   Popover,
   ScrollArea,
   Select,
@@ -26,10 +25,8 @@ import {
 import {
   Activity,
   ArrowDownToLine,
-  ArrowRight,
   ArrowUpFromLine,
   ChevronRight,
-  CircuitBoard,
   FlipVertical2,
   Link2,
   RefreshCw,
@@ -42,12 +39,14 @@ import {
   Waves,
   X,
 } from "lucide-react";
+import { CommitNumberInput } from "./CommitNumberInput";
 import { EqEditor } from "./EqEditor";
 import { LimiterEditor } from "./LimiterEditor";
 import { LoadSpeakerConfigDialog } from "./LoadSpeakerConfigDialog";
 import { SpeakerFormModal } from "./SpeakerFormModal";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { useLivePresets } from "../hooks/useLivePresets";
+import { useIsCompact } from "../lib/breakpoints";
 import {
   commands,
   type AmpAssignment,
@@ -106,15 +105,14 @@ interface AmpConfigureViewProps {
   source?: ConfigureSource;
 }
 
-type SkeletonVariant = "scheme" | "list" | "grid";
+type SkeletonVariant = "list" | "grid";
 
-const DEFAULT_SCHEME_CHANNEL_COUNT = 4;
+const DEFAULT_CHANNEL_COUNT = 4;
 
 const TABS = [
-  { value: "scheme", label: "Scheme", icon: CircuitBoard, skeleton: "scheme" },
-  { value: "routing", label: "Routing", icon: Route, skeleton: "grid" },
   { value: "input", label: "Input", icon: ArrowDownToLine, skeleton: "list" },
   { value: "output", label: "Output", icon: ArrowUpFromLine, skeleton: "list" },
+  { value: "routing", label: "Routing", icon: Route, skeleton: "grid" },
   {
     value: "speakerConfiguration",
     label: "Speaker Configuration",
@@ -140,7 +138,7 @@ const TABS = [
  * at all (FC=59 is a live wire-protocol feature, not model-catalog-driven),
  * so it's special-cased in the render loop below instead of going through
  * the capability-gated dispatch every other tab here shares. */
-const CONFIGURABLE_TABS = new Set(["scheme", "routing", "input", "output", "speakerConfiguration"]);
+const CONFIGURABLE_TABS = new Set(["input", "output", "routing", "speakerConfiguration"]);
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
@@ -225,48 +223,33 @@ function SourcePicker({
   );
 }
 
-function SchemeRowSkeleton() {
+/** The standard content shell for a tab whose body is a stack of rows:
+ * vertically centered while it fits, plainly scrollable once it doesn't.
+ * `Center` alone can't do both — a `Center` taller than its content clips
+ * the overflow at *both* ends, so on a short or narrow window the first
+ * rows became unreachable. The nested `min-h-full` column is what keeps
+ * centering and scrolling from fighting each other. Padding steps down on
+ * small windows, where 32px of gutter is a meaningful share of the width. */
+function CenteredScrollPane({ children }: { children: ReactNode }) {
   return (
-    <Group gap="xs" wrap="nowrap" align="stretch">
-      <Skeleton height={60} width={50} radius="sm" />
-      <Center>
-        <ArrowRight size={14} />
-      </Center>
-      <Skeleton height={60} width={90} radius="sm" />
-      <Center>
-        <ArrowRight size={14} />
-      </Center>
-      <Skeleton height={60} className="flex-1" radius="sm" />
-      <Center>
-        <ArrowRight size={14} />
-      </Center>
-      <Skeleton height={60} width={160} radius="sm" />
-    </Group>
+    <div className="h-full min-h-0 overflow-auto">
+      <div className="flex min-h-full min-w-0 flex-col justify-center gap-4 p-3 md:p-8">{children}</div>
+    </div>
   );
 }
 
 function TabSkeleton({
   label,
   variant,
-  channelCount,
 }: {
   label: string;
   variant: SkeletonVariant;
-  channelCount: number;
 }) {
   return (
     <Stack h="100%" p="xl" gap="md">
       <Text fw={600}>{label}</Text>
 
       <Stack className="flex-1 opacity-50 pointer-events-none" gap="md">
-        {variant === "scheme" && (
-          <Stack gap="lg" className="flex-1" justify="center">
-            {Array.from({ length: channelCount }).map((_, i) => (
-              <SchemeRowSkeleton key={i} />
-            ))}
-          </Stack>
-        )}
-
         {variant === "list" && (
           <Stack gap="xs" className="flex-1">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -276,7 +259,7 @@ function TabSkeleton({
         )}
 
         {variant === "grid" && (
-          <SimpleGrid cols={4} spacing="md" className="flex-1 content-start">
+          <SimpleGrid cols={{ base: 2, xs: 3, sm: 4 }} spacing="md" className="flex-1 content-start">
             {Array.from({ length: 8 }).map((_, i) => (
               <Skeleton key={i} height={80} radius="md" />
             ))}
@@ -329,8 +312,8 @@ interface ConfigurableTabProps {
 }
 
 /** "Brand Model — WayLabel" for a channel's speaker assignment — shared by
- * the Speaker Configuration tab's own tile and the Scheme tab's read-only
- * summary so the resolution logic (including the single-way-speaker
+ * the Speaker Configuration tab's own tile and the Output tab so the
+ * resolution logic (including the single-way-speaker
  * suffix-omission rule) isn't duplicated. Resolves against the *full*
  * speaker list (archived included) so an assignment made before a speaker
  * was archived still displays correctly instead of going blank. */
@@ -410,11 +393,11 @@ const METER_FLOOR_DB = -60;
 
 /** Shared dB scale for every channel level meter in this view. `0` is the
  * top for all of them, but means different things per tab: rated max output
- * on Output/Scheme/Routing (`outputLevelDb`), and 1V on Input (`inputDbv`).
+ * on Output/Routing (`outputLevelDb`), and 1V on Input (`inputDbv`).
  * `-60` is `METER_FLOOR_DB`, the value a `null` reading renders at. */
 const LEVEL_MARKS: VuMeterMark[] = [-60, -48, -36, -24, -12, 0].map((value) => ({ value, label: String(value) }));
 
-/** The one channel level meter used by every tab — Input, Output, Scheme and
+/** The one channel level meter used by every tab — Input, Output and
  * Routing all render this, so a meter reads identically wherever it appears
  * rather than each tab styling its own. `VuMeter` itself stays the generic
  * primitive (orientation, gradient, scale, thickness are all its props);
@@ -439,7 +422,7 @@ function ChannelLevelMeter({
   wide?: boolean;
 }) {
   return (
-    <div className="min-w-0 flex-1" style={{ minWidth: 160, maxWidth: wide ? undefined : 260 }}>
+    <div className="min-w-0" style={{ flex: "1 1 200px", minWidth: 120, maxWidth: wide ? undefined : 260 }}>
       <VuMeter
         orientation="horizontal"
         min={METER_FLOOR_DB}
@@ -609,7 +592,7 @@ function InputChannelRow({
         maxLength={nameMaxLength}
         onRename={onRename}
       />
-      <Group gap="xs" wrap="nowrap" align="center">
+      <Group gap="xs" wrap="wrap" align="center">
         <ChannelLevelMeter levelDb={telemetry.inputDbv} disabled={muted} />
         <InputStatTile
           value={telemetry.inputDbv === null ? "—" : telemetry.inputDbv.toFixed(1)}
@@ -645,13 +628,13 @@ function InputChannelRow({
               <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
                 Input Delay
               </Text>
-              <NumberInput
+              <CommitNumberInput
                 value={delayInMs}
                 min={delayMin ?? undefined}
                 max={delayMax ?? undefined}
                 step={0.5}
                 suffix=" ms"
-                onChange={(value) => typeof value === "number" && onDelayChange(value)}
+                onCommit={onDelayChange}
               />
             </Stack>
           </Popover.Dropdown>
@@ -737,7 +720,7 @@ function InputTab({ assignment, capability, actions, telemetry }: ConfigurableTa
   }
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-w-0">
       {view === "eq" && (
         <ChannelRail
           channels={assignment.channels}
@@ -766,8 +749,11 @@ function InputTab({ assignment, capability, actions, telemetry }: ConfigurableTa
               />
             </div>
           ) : (
-            <Center h="100%" p="xl" className="overflow-y-auto">
-              <Stack gap="md">
+            <CenteredScrollPane>
+              {/* Rows stretch to the pane so their tiles can wrap, but stop
+               * at the width the meter's own cap plus four tiles actually
+               * need — past that they'd sit in a sea of empty gutter. */}
+              <Stack gap="md" w="100%" maw={760} mx="auto" className="min-w-0">
                 {assignment.channels.map((channel) => (
                   <InputChannelRow
                     key={channel.channelIndex}
@@ -783,7 +769,7 @@ function InputTab({ assignment, capability, actions, telemetry }: ConfigurableTa
                   />
                 ))}
               </Stack>
-            </Center>
+            </CenteredScrollPane>
           )}
         </div>
       </Stack>
@@ -867,7 +853,7 @@ function OutputChannelRow({
         maxLength={nameMaxLength}
         onRename={onRename}
       />
-      <Group gap="xs" wrap="nowrap" align="center" className="overflow-x-auto">
+      <Group gap="xs" wrap="wrap" align="center">
         <ChannelLevelMeter levelDb={telemetry.outputLevelDb} disabled={muted} wide />
         <InputStatTile
           value={telemetry.gainReductionDb === null ? "" : telemetry.gainReductionDb.toFixed(1)}
@@ -908,13 +894,13 @@ function OutputChannelRow({
               <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
                 {splitTrimVolume ? "Output Volume" : "Output Level"}
               </Text>
-              <NumberInput
+              <CommitNumberInput
                 value={volumeDb}
                 min={volumeMin ?? undefined}
                 max={volumeMax ?? undefined}
                 step={0.5}
                 suffix=" dB"
-                onChange={(value) => typeof value === "number" && onChange("volume", value)}
+                onCommit={(value) => onChange("volume", value)}
               />
             </Stack>
           </Popover.Dropdown>
@@ -943,13 +929,13 @@ function OutputChannelRow({
                 <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
                   Output Trim
                 </Text>
-                <NumberInput
+                <CommitNumberInput
                   value={trimDb}
                   min={trimMin ?? undefined}
                   max={trimMax ?? undefined}
                   step={0.5}
                   suffix=" dB"
-                  onChange={(value) => typeof value === "number" && onChange("trim", value)}
+                  onCommit={(value) => onChange("trim", value)}
                 />
               </Stack>
             </Popover.Dropdown>
@@ -978,13 +964,13 @@ function OutputChannelRow({
               <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
                 Output Delay
               </Text>
-              <NumberInput
+              <CommitNumberInput
                 value={delayMs}
                 min={delayMin ?? undefined}
                 max={delayMax ?? undefined}
                 step={0.5}
                 suffix=" ms"
-                onChange={(value) => typeof value === "number" && onChange("delay", value)}
+                onCommit={(value) => onChange("delay", value)}
               />
             </Stack>
           </Popover.Dropdown>
@@ -1237,7 +1223,7 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
   }
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-w-0">
       {(view === "fir" || view === "eq" || view === "limiter") && (
         <ChannelRail
           channels={assignment.channels}
@@ -1274,7 +1260,7 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
               />
             </div>
           ) : view === "limiter" ? (
-            <Center h="100%" p="xl" className="overflow-y-auto">
+            <CenteredScrollPane>
               <LimiterEditor
                 key={subChannel.channelIndex}
                 assignment={assignment}
@@ -1284,10 +1270,10 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
                 actions={actions}
                 capabilities={capabilities}
               />
-            </Center>
+            </CenteredScrollPane>
           ) : (
-            <Center h="100%" p="xl" className="overflow-y-auto">
-              <Stack gap="md">
+            <CenteredScrollPane>
+              <Stack gap="md" className="min-w-0">
                 {channelPairs.map(([leader, follower]) => {
                   const bridged = Boolean(follower && (leader.outputBridged ?? false));
                   const row = (channel: AmpAssignment["channels"][number]) => (
@@ -1349,89 +1335,11 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
                   );
                 })}
               </Stack>
-            </Center>
+            </CenteredScrollPane>
           )}
         </div>
       </Stack>
     </div>
-  );
-}
-
-/** One channel's signal-flow summary row on the Scheme tab — same
- * proportions as `SchemeRowSkeleton` (50px / 90px / flex-1 / 160px), filled
- * with real values pulled from Source Selection and the Input/Output tabs.
- * Purely a read-only overview: nothing here is directly editable. */
-function SchemeRow({
-  channel,
-  speakers,
-  telemetry,
-}: {
-  channel: AmpAssignment["channels"][number];
-  speakers: SpeakerLibraryEntry[];
-  telemetry: ChannelTelemetry;
-}) {
-  const sourceLabel = formatSourceLabel(channel.source);
-  const speakerLabel = formatSpeakerAssignment(speakers, channel.speakerLibraryId, channel.wayIndex);
-  const ioSummary = `Delay ${channel.delayInMs ?? 0}ms · Trim ${channel.outputTrimDb ?? 0}dB · Vol ${channel.outputVolumeDb ?? 0}dB`;
-
-  return (
-    <Group gap="xs" wrap="nowrap" align="stretch">
-      <Paper withBorder radius="sm" h={60} w={50}>
-        <Center h="100%">
-          <Text size="sm" fw={700}>
-            {channel.channelIndex + 1}
-          </Text>
-        </Center>
-      </Paper>
-      <Center>
-        <ArrowRight size={14} />
-      </Center>
-      <Paper withBorder radius="sm" h={60} w={90}>
-        <Center h="100%" p={4}>
-          <Text size="sm" ta="center">
-            {sourceLabel}
-          </Text>
-        </Center>
-      </Paper>
-      <Center>
-        <ArrowRight size={14} />
-      </Center>
-      <Paper withBorder radius="sm" h={60} className="flex-1">
-        <Stack h="100%" gap={2} justify="center" p={4}>
-          <Text size="sm" fw={600} ta="center" lineClamp={1}>
-            {speakerLabel}
-          </Text>
-          <Text size="xs" c="dimmed" ta="center" lineClamp={1}>
-            {ioSummary}
-          </Text>
-        </Stack>
-      </Paper>
-      <Center>
-        <ArrowRight size={14} />
-      </Center>
-      <Center w={160}>
-        <ChannelLevelMeter levelDb={telemetry.outputLevelDb} />
-      </Center>
-    </Group>
-  );
-}
-
-function SchemeTab({ assignment, speakers, telemetry, capability }: ConfigurableTabProps) {
-  const ratedRmsVoltage = capability.topology.ratedRmsVoltage;
-  return (
-    <Stack h="100%" p="xl" gap="md">
-      <Text fw={600}>Scheme</Text>
-      <Stack gap="lg" className="flex-1" justify="center">
-        {assignment.channels.map((channel) => (
-          <SchemeRow
-            key={channel.channelIndex}
-            channel={channel}
-            speakers={speakers}
-            telemetry={channelTelemetry(telemetry, channel.channelIndex, ratedRmsVoltage)}
-          />
-        ))}
-      </Stack>
-    </Stack>
   );
 }
 
@@ -1541,6 +1449,11 @@ const SPEAKER_DRAG_MIME = "application/x-ampcore-speaker-id";
  * filter in `AmpConfigureView`), so `project`/`onProjectUpdate` are always
  * defined in practice despite being typed optional on `ConfigurableTabProps`
  * for the benefit of the other (dual-mode) tabs. */
+/** Grow-to-fill, but never below a readable width — `Group grow` alone
+ * divides the row evenly no matter how narrow it gets, which turned the
+ * four Library filters into unusable slivers on a small window. */
+const FILTER_FIELD_FLEX = { flex: "1 1 120px" } as const;
+
 function SpeakerConfigurationTab({
   assignment,
   project: projectProp,
@@ -1548,6 +1461,7 @@ function SpeakerConfigurationTab({
   onSpeakersUpdate,
   onProjectUpdate: onProjectUpdateProp,
 }: ConfigurableTabProps) {
+  const compact = useIsCompact();
   const [selectedChannelIndexes, setSelectedChannelIndexes] = useState<number[]>([]);
   const lastClickedChannelRef = useRef<number | null>(null);
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
@@ -1858,8 +1772,22 @@ function SpeakerConfigurationTab({
   );
 
   return (
-    <div className="flex h-full" style={{ gap: 16, padding: 24 }}>
-      <Stack gap="sm" h="100%" justify="center" className="flex-1" style={{ flexGrow: 2 }}>
+    <div
+      className={`flex min-h-0 gap-4 p-3 md:p-6 ${
+        // Three side-by-side panes only work while there's width for all
+        // three; below `useIsCompact` they become one scrolling column in
+        // the same order (outputs → controls → library) instead of three
+        // unusably narrow ones.
+        compact ? "h-full flex-col overflow-y-auto" : "h-full"
+      }`}
+    >
+      <Stack
+        gap="sm"
+        h={compact ? undefined : "100%"}
+        justify={compact ? undefined : "center"}
+        className="min-w-0 flex-1"
+        style={{ flexGrow: 2 }}
+      >
         <Text size="sm" fw={600}>
           Physical Outputs
         </Text>
@@ -1893,7 +1821,13 @@ function SpeakerConfigurationTab({
         </Stack>
       </Stack>
 
-      <Stack gap="lg" w={150} h="100%" justify="center" className="shrink-0">
+      <Stack
+        gap="lg"
+        w={compact ? "100%" : 150}
+        h={compact ? undefined : "100%"}
+        justify={compact ? undefined : "center"}
+        className="shrink-0"
+      >
         <Stack gap="xs">
           <Text size="sm" fw={600}>
             Controls
@@ -1989,20 +1923,43 @@ function SpeakerConfigurationTab({
         </Stack>
       </Stack>
 
-      <Stack gap="sm" className="flex-1 min-w-0" style={{ flexGrow: 3 }}>
+      <Stack gap="sm" className="min-w-0 flex-1" style={{ flexGrow: 3 }} mih={compact ? 260 : undefined}>
         <Text size="sm" fw={600}>
           Library
         </Text>
-        <Group gap="xs" grow>
-          <TextInput size="xs" placeholder="Filter brand" value={brandFilter} onChange={(e) => setBrandFilter(e.currentTarget.value)} />
+        {/* Four filter fields side by side need ~400px to stay legible;
+         * below that they wrap into rows rather than shrinking. */}
+        <Group gap="xs" wrap="wrap" align="flex-end">
+          <TextInput
+            size="xs"
+            placeholder="Filter brand"
+            value={brandFilter}
+            onChange={(e) => setBrandFilter(e.currentTarget.value)}
+            style={FILTER_FIELD_FLEX}
+          />
           <TextInput
             size="xs"
             placeholder="Filter family"
             value={familyFilter}
             onChange={(e) => setFamilyFilter(e.currentTarget.value)}
+            style={FILTER_FIELD_FLEX}
           />
-          <TextInput size="xs" placeholder="Filter model" value={modelFilter} onChange={(e) => setModelFilter(e.currentTarget.value)} />
-          <Select size="xs" label="Ways°" data={waysFilterOptions} value={waysFilter} onChange={setWaysFilter} allowDeselect={false} />
+          <TextInput
+            size="xs"
+            placeholder="Filter model"
+            value={modelFilter}
+            onChange={(e) => setModelFilter(e.currentTarget.value)}
+            style={FILTER_FIELD_FLEX}
+          />
+          <Select
+            size="xs"
+            label="Ways°"
+            data={waysFilterOptions}
+            value={waysFilter}
+            onChange={setWaysFilter}
+            allowDeselect={false}
+            style={FILTER_FIELD_FLEX}
+          />
         </Group>
         <Table.ScrollContainer minWidth={420} className="flex-1 overflow-y-auto">
           <Table highlightOnHover verticalSpacing="xs" stickyHeader>
@@ -2200,14 +2157,19 @@ function RoutingTab({
   }
 
   return (
-    <Center h="100%" p="xl">
-      <Stack gap="md" align="center">
+    <CenteredScrollPane>
+      <Stack gap="md" align="center" className="min-w-0">
         <Text fw={600}>Routing</Text>
-        <ScrollArea offsetScrollbars type="auto" scrollbarSize={8}>
+        {/* The matrix has an irreducible width (one 88px column per source),
+         * so it stays a fixed grid and scrolls sideways inside its own
+         * `ScrollArea` on a narrow window rather than squeezing columns to
+         * illegibility. `max-w-full`/`min-w-0` is what stops that intrinsic
+         * width from instead pushing the whole page wider than the window. */}
+        <ScrollArea offsetScrollbars type="auto" scrollbarSize={8} className="min-w-0 max-w-full">
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: `20px 150px 28px repeat(${sourceCount}, 88px) 230px`,
+              gridTemplateColumns: `20px 150px 28px repeat(${sourceCount}, 88px) minmax(150px, 230px)`,
               alignItems: "center",
               columnGap: 12,
               rowGap: 8,
@@ -2363,7 +2325,7 @@ function RoutingTab({
           </div>
         </ScrollArea>
       </Stack>
-    </Center>
+    </CenteredScrollPane>
   );
 }
 
@@ -2398,8 +2360,8 @@ function PresetConfigurationTab({ deviceId, firmwareFamily }: { deviceId?: strin
   }
 
   return (
-    <Stack p="md" gap="md" h="100%">
-      <Group justify="space-between">
+    <Stack p="md" gap="md" h="100%" className="min-w-0">
+      <Group justify="space-between" wrap="wrap" gap="xs">
         <Text fw={600}>Preset Configuration</Text>
         <Button size="xs" leftSection={<RefreshCw size={14} />} loading={loading} onClick={refresh}>
           Refresh
@@ -2419,6 +2381,8 @@ function PresetConfigurationTab({ deviceId, firmwareFamily }: { deviceId?: strin
               <Group
                 key={slot.index}
                 justify="space-between"
+                wrap="wrap"
+                gap="xs"
                 p="xs"
                 style={{ border: "1px solid var(--mantine-color-default-border)", borderRadius: 4 }}
               >
@@ -2446,7 +2410,6 @@ const TAB_COMPONENTS: Record<
   string,
   (props: ConfigurableTabProps) => ReactNode
 > = {
-  scheme: SchemeTab,
   routing: RoutingTab,
   input: InputTab,
   output: OutputTab,
@@ -2456,14 +2419,13 @@ const TAB_COMPONENTS: Record<
 export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const ampModel = source?.ampModel;
   const liveChannelCount =
-    source?.kind === "live" ? source.device.outputChannels || DEFAULT_SCHEME_CHANNEL_COUNT : DEFAULT_SCHEME_CHANNEL_COUNT;
+    source?.kind === "live" ? source.device.outputChannels || DEFAULT_CHANNEL_COUNT : DEFAULT_CHANNEL_COUNT;
   const assignment: AmpAssignment | undefined =
     source?.kind === "project"
       ? source.assignment
       : source?.kind === "live"
         ? buildLiveAssignmentViewModel(source.device, source.channelConfig, liveChannelCount)
         : undefined;
-  const channelCount = assignment?.channels.length ?? DEFAULT_SCHEME_CHANNEL_COUNT;
   const firmwareVersion =
     source?.kind === "project" ? (source.assignment.firmwareVersion ?? null) : source?.kind === "live" ? source.device.firmwareVersion : null;
 
@@ -2524,8 +2486,12 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const firmwareFamily = source?.kind === "live" ? source.device.firmwareFamily : undefined;
 
   return (
-    <Tabs defaultValue="scheme" orientation="vertical" className="h-full">
-      <Tabs.List className="justify-center">
+    <Tabs defaultValue="input" orientation="vertical" className="h-full">
+      {/* `min-w-0` on the panel is what lets the tab body shrink below its
+          content's intrinsic width instead of pushing the whole window into
+          a horizontal scroll; the rail itself scrolls once five tabs no
+          longer fit a short window. */}
+      <Tabs.List className="shrink-0 justify-center overflow-y-auto">
         {visibleTabs.map(({ value, label, icon: Icon }) => (
           <Tooltip
             key={value}
@@ -2552,11 +2518,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
           !actions
         ) {
           content = (
-            <TabSkeleton
-              label={label}
-              variant={skeleton}
-              channelCount={channelCount}
-            />
+            <TabSkeleton label={label} variant={skeleton} />
           );
         } else if (!ampModel) {
           content = (
@@ -2590,7 +2552,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         }
 
         return (
-          <Tabs.Panel key={value} value={value} className="min-h-0">
+          <Tabs.Panel key={value} value={value} className="min-h-0 min-w-0 flex-1">
             {content}
           </Tabs.Panel>
         );
