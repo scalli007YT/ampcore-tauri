@@ -6,6 +6,7 @@ import { useLiveChannelConfig } from "../hooks/useLiveChannelConfig";
 import { useLiveDevices } from "../hooks/useLiveDevices";
 import { useLiveTelemetry } from "../hooks/useLiveTelemetry";
 import { commands, type AmpModelCatalogEntry, type DiscoveredDevice } from "../lib/bindings";
+import { useIsCompact } from "../lib/breakpoints";
 
 /** Resolves which catalog `AmpModelCatalogEntry` a live device should be
  * configured as — Direct Edit's counterpart to a Project's
@@ -57,6 +58,7 @@ function useDeviceModelLink(device: DiscoveredDevice | null) {
 }
 
 export function LiveControlView() {
+  const compact = useIsCompact();
   const { devices, ready } = useLiveDevices();
   const telemetryById = useLiveTelemetry();
   const channelConfigById = useLiveChannelConfig();
@@ -71,6 +73,87 @@ export function LiveControlView() {
       <Center h="100%">
         <Loader size="sm" />
       </Center>
+    );
+  }
+
+  const modelSelect = (
+    <Select
+      size="xs"
+      placeholder="Assign amp model…"
+      className="min-w-0"
+      style={{ flex: compact ? "1 1 160px" : "0 0 240px" }}
+      data={ampModels.filter((m) => !m.archived).map((m) => ({ value: m.id, label: `${m.brand} ${m.model}` }))}
+      value={ampModel?.id ?? null}
+      onChange={setManualModel}
+      clearable
+      searchable
+    />
+  );
+
+  const viewSwitch = (
+    <SegmentedControl
+      size="xs"
+      value={view}
+      onChange={setView}
+      data={[
+        { label: "Configure", value: "configure" },
+        { label: "Raw Telemetry", value: "telemetry" },
+      ]}
+    />
+  );
+
+  const deviceContent = selectedDevice ? (
+    view === "telemetry" ? (
+      <DeviceTelemetryPanel
+        device={selectedDevice}
+        telemetry={telemetryById[selectedDevice.id]}
+        channelConfig={channelConfigById[selectedDevice.id]}
+      />
+    ) : (
+      <AmpConfigureView
+        source={{
+          kind: "live",
+          device: selectedDevice,
+          channelConfig: channelConfigById[selectedDevice.id],
+          telemetry: telemetryById[selectedDevice.id],
+          ampModel: ampModel ?? undefined,
+        }}
+      />
+    )
+  ) : (
+    <Center h="100%" p="md">
+      <Text c="dimmed" ta="center">
+        {devices.length === 0 ? "Scanning for amplifiers on the network…" : "Select an amp from the list"}
+      </Text>
+    </Center>
+  );
+
+  // Compact layout: the 260px discovery rail costs a third of a small
+  // window, so it collapses into a Select in the toolbar. Same data, same
+  // selection state — only the affordance changes.
+  if (compact) {
+    return (
+      <Stack h="100%" gap={0} className="min-w-0">
+        <Group px="sm" py="xs" gap="xs" wrap="wrap" align="center">
+          <Select
+            size="xs"
+            className="min-w-0"
+            style={{ flex: "1 1 160px" }}
+            placeholder={devices.length === 0 ? "Scanning…" : "Discovered amps…"}
+            data={devices.map((d) => ({
+              value: d.id,
+              label: `${d.name || d.mac}${d.online ? "" : " (offline)"}`,
+            }))}
+            value={selectedId}
+            onChange={setSelectedId}
+            searchable
+          />
+          {selectedDevice && viewSwitch}
+          {selectedDevice && modelSelect}
+        </Group>
+        <Divider />
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto">{deviceContent}</div>
+      </Stack>
     );
   }
 
@@ -127,46 +210,11 @@ export function LiveControlView() {
         {selectedDevice ? (
           <Stack h="100%" gap={0}>
             <Group justify="space-between" wrap="nowrap" gap="xs" px="md" py="xs">
-              <SegmentedControl
-                size="xs"
-                value={view}
-                onChange={setView}
-                data={[
-                  { label: "Configure", value: "configure" },
-                  { label: "Raw Telemetry", value: "telemetry" },
-                ]}
-              />
-              <Select
-                size="xs"
-                w={240}
-                placeholder="Assign amp model…"
-                data={ampModels.filter((m) => !m.archived).map((m) => ({ value: m.id, label: `${m.brand} ${m.model}` }))}
-                value={ampModel?.id ?? null}
-                onChange={setManualModel}
-                clearable
-                searchable
-              />
+              {viewSwitch}
+              {modelSelect}
             </Group>
             <Divider />
-            <div className="min-h-0 flex-1 overflow-auto">
-              {view === "telemetry" ? (
-                <DeviceTelemetryPanel
-                  device={selectedDevice}
-                  telemetry={telemetryById[selectedDevice.id]}
-                  channelConfig={channelConfigById[selectedDevice.id]}
-                />
-              ) : (
-                <AmpConfigureView
-                  source={{
-                    kind: "live",
-                    device: selectedDevice,
-                    channelConfig: channelConfigById[selectedDevice.id],
-                    telemetry: telemetryById[selectedDevice.id],
-                    ampModel: ampModel ?? undefined,
-                  }}
-                />
-              )}
-            </div>
+            <div className="min-h-0 min-w-0 flex-1 overflow-auto">{deviceContent}</div>
           </Stack>
         ) : (
           <Center h="100%">

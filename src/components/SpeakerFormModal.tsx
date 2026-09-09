@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ActionIcon, Button, Group, Modal, Stack, Text, Textarea, TextInput } from "@mantine/core";
 import { Plus, X } from "lucide-react";
 import { commands, type SpeakerLibraryEntry_Serialize, type SpeakerWay } from "../lib/bindings";
+import { useIsTight } from "../lib/breakpoints";
 
 interface SpeakerFormModalProps {
   opened: boolean;
@@ -11,6 +12,7 @@ interface SpeakerFormModalProps {
 }
 
 export function SpeakerFormModal({ opened, onClose, editEntry, onSaved }: SpeakerFormModalProps) {
+  const tight = useIsTight();
   const [brand, setBrand] = useState("");
   const [family, setFamily] = useState("");
   const [model, setModel] = useState("");
@@ -77,9 +79,18 @@ export function SpeakerFormModal({ opened, onClose, editEntry, onSaved }: Speake
   }
 
   return (
-    <Modal opened={opened} onClose={onClose} title={editEntry ? "Edit Speaker" : "Add Speaker"} centered size="lg">
-      <Group align="flex-start" gap="lg" wrap="nowrap">
-        <Stack gap="sm" className="flex-1">
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={editEntry ? "Edit Speaker" : "Add Speaker"}
+      centered
+      size="lg"
+      fullScreen={tight}
+    >
+      {/* Details and Ways sit side by side while both fit, and stack below
+       * ~460px rather than shrinking two form columns past readability. */}
+      <Group align="flex-start" gap="lg" wrap="wrap">
+        <Stack gap="sm" style={{ flex: "1 1 220px" }} className="min-w-0">
           <TextInput
             label="Brand"
             required
@@ -104,7 +115,7 @@ export function SpeakerFormModal({ opened, onClose, editEntry, onSaved }: Speake
             minRows={2}
           />
         </Stack>
-        <Stack gap="sm" className="flex-1">
+        <Stack gap="sm" style={{ flex: "1 1 220px" }} className="min-w-0">
           <Text size="sm" fw={500}>
             Ways
           </Text>

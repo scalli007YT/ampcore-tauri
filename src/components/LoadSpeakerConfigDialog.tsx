@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Group, Modal, Select, Stack, Table, Text } from "@mantine/core";
 import { type AmpAssignment, type SpeakerLibraryEntry_Serialize as SpeakerLibraryEntry } from "../lib/bindings";
+import { useIsTight } from "../lib/breakpoints";
 import { formatSpeakerAssignment, SPEAKER_OUTPUT_LETTER } from "./AmpConfigureView";
 
 const NO_CHANGE = "__no_change__";
@@ -60,6 +61,7 @@ export function LoadSpeakerConfigDialog({
   profile,
   onApply,
 }: LoadSpeakerConfigDialogProps) {
+  const tight = useIsTight();
   const [selections, setSelections] = useState<Record<number, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -105,7 +107,14 @@ export function LoadSpeakerConfigDialog({
   }
 
   return (
-    <Modal opened={opened} onClose={onClose} title={`Load "${profile.brand} ${profile.model}"`} centered size="lg">
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={`Load "${profile.brand} ${profile.model}"`}
+      centered
+      size="lg"
+      fullScreen={tight}
+    >
       <Stack gap="sm">
         <Text size="xs" c="dimmed">
           Pick a way for each physical output independently, or leave "No change" to skip it.

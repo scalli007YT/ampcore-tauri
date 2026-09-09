@@ -20,6 +20,7 @@ import { Pencil, Server, X } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
+import { useIsCompact } from "../lib/breakpoints";
 
 interface WorkspaceViewProps {
   project: Project;
@@ -29,6 +30,7 @@ interface WorkspaceViewProps {
 }
 
 export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevice }: WorkspaceViewProps) {
+  const compact = useIsCompact();
   const [catalogueOpen, setCatalogueOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AmpAssignment | null>(null);
@@ -104,10 +106,23 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   const editFirmwareOptions = firmwareOptionsFor(editModel?.protocol);
 
   return (
-    <Group h="100%" gap={0} align="stretch" wrap="nowrap">
+    <div
+      className={`flex h-full min-h-0 min-w-0 ${
+        // Two side-by-side panes below ~900px would leave the Amplifiers
+        // grid too narrow for even one tile row, so they stack and the page
+        // scrolls instead.
+        compact ? "flex-col overflow-y-auto" : "flex-row items-stretch"
+      }`}
+    >
       {/* Amplifiers pane */}
-      <Stack w={340} h="100%" p="md" gap="md" className="shrink-0">
-        <Group justify="space-between">
+      <Stack
+        w={compact ? "100%" : 340}
+        h={compact ? undefined : "100%"}
+        p="md"
+        gap="md"
+        className="min-w-0 shrink-0"
+      >
+        <Group justify="space-between" wrap="wrap" gap="xs">
           <Text fw={500} size="sm" c="dimmed">
             Amplifiers
           </Text>
@@ -133,7 +148,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
             </Text>
           </Center>
         ) : (
-          <SimpleGrid cols={3} spacing="md" className="flex-1 content-start">
+          <SimpleGrid cols={compact ? { base: 3, xs: 5, sm: 6 } : 3} spacing="md" className="flex-1 content-start">
             {assignments.map((assignment) => {
               const displayName = nameFor(assignment);
               const modelName = assignment.label ? modelNameFor(assignment) : null;
@@ -226,15 +241,17 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
         )}
       </Stack>
 
-      <Divider orientation="vertical" />
+      <Divider orientation={compact ? "horizontal" : "vertical"} />
 
       {/* Speakers pane — mock only, no real data/functionality yet */}
-      <Stack className="flex-1" h="100%" p="md" gap="md">
+      <Stack className="min-w-0 flex-1" h={compact ? undefined : "100%"} mih={compact ? 140 : undefined} p="md" gap="md">
         <Text fw={500} size="sm" c="dimmed">
           Speakers
         </Text>
         <Center className="flex-1">
-          <Text c="dimmed">Speaker assignment — coming soon</Text>
+          <Text c="dimmed" ta="center">
+            Speaker assignment — coming soon
+          </Text>
         </Center>
       </Stack>
 
@@ -302,6 +319,6 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
           </Group>
         </Stack>
       </Modal>
-    </Group>
+    </div>
   );
 }

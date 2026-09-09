@@ -27,6 +27,7 @@ import {
 } from "../lib/bindings";
 import { getAmpSpecSheet } from "../lib/ampSpecSheets";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
+import { useIsCompact } from "../lib/breakpoints";
 
 interface AmpCatalogueModalProps {
   opened: boolean;
@@ -64,6 +65,7 @@ export function AmpCatalogueModal({
   ampModels,
   onProjectUpdate,
 }: AmpCatalogueModalProps) {
+  const compact = useIsCompact();
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [specsExpanded, setSpecsExpanded] = useState(false);
   const [label, setLabel] = useState("");
@@ -303,9 +305,17 @@ export function AmpCatalogueModal({
   }
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Add Amp" size="xl" centered>
-      <Group align="stretch" wrap="nowrap" gap="md" className="min-h-[420px]">
-        <Box w={260}>
+    <Modal opened={opened} onClose={onClose} title="Add Amp" size="xl" centered fullScreen={compact}>
+      {/* Model tree beside the detail pane on a roomy window; on a small one
+       * the modal goes full-screen and the two stack, since a 260px tree
+       * plus a spec sheet can't share a narrow dialog. */}
+      <Group
+        align="stretch"
+        wrap={compact ? "wrap" : "nowrap"}
+        gap="md"
+        className={compact ? "min-h-0" : "min-h-[420px]"}
+      >
+        <Box w={compact ? "100%" : 260} className={compact ? "max-h-[40vh] overflow-y-auto" : undefined}>
           <Tree
             data={treeData}
             tree={tree}
@@ -314,7 +324,7 @@ export function AmpCatalogueModal({
           />
         </Box>
 
-        <Box className="flex flex-1 flex-col">
+        <Box className="flex min-w-0 flex-1 flex-col">
           {selectedModel ? (
             <Stack className="flex-1">
               {selectedModel.brand === "CVR" && (

@@ -116,7 +116,7 @@ function clampFraction(value: number, min: number, max: number): number {
  * (classic VU/LED-meter look), with `marks` positioned by actual value
  * (not array index) so unevenly-spaced scales stay correct. Orientation
  * switches both the gradient direction and the fill/mark axis: horizontal
- * fills left→right for the Input/Output/Scheme/Routing row meters,
+ * fills left→right for the Input/Output/Routing row meters,
  * vertical fills bottom→top (max at the top, like a real meter) for the
  * Limiter panel's Out dB/Limit dB columns. */
 export function VuMeter({

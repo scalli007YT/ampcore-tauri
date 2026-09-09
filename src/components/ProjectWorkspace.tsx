@@ -102,7 +102,7 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
           </Stack>
         )}
 
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto">
           {activeTab === "workspace" && (
             <WorkspaceView
               project={project}

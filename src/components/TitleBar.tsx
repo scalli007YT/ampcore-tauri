@@ -65,7 +65,10 @@ export function TitleBar({
             )}
           </Menu.Dropdown>
         </Menu>
-        <Text data-tauri-drag-region size="sm" fw={500} truncate className="min-w-0 flex-1">
+        {/* Below 640px the File menu, the centered tabs and the three window
+            buttons already fill the bar, so the title (also shown in the OS
+            taskbar) is the one thing that gives up its space. */}
+        <Text data-tauri-drag-region size="sm" fw={500} truncate className="hidden min-w-0 flex-1 sm:block">
           {title}
         </Text>
       </Group>

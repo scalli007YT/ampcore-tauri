@@ -56,7 +56,8 @@ function EqTable({ label, eq }: { label: string; eq: ChannelEq }) {
       <Text size="xs" c="dimmed" mb={4}>
         {label}
       </Text>
-      <Table withRowBorders={false} mb="sm">
+      <Table.ScrollContainer minWidth={380}>
+        <Table withRowBorders={false} mb="sm">
         <Table.Thead>
           <Table.Tr>
             <Table.Th>Band</Table.Th>
@@ -81,7 +82,8 @@ function EqTable({ label, eq }: { label: string; eq: ChannelEq }) {
             </Table.Tr>
           ))}
         </Table.Tbody>
-      </Table>
+        </Table>
+      </Table.ScrollContainer>
     </div>
   );
 }
@@ -239,7 +241,7 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
 
   return (
     <ScrollArea h="100%">
-      <Stack p="md" gap="lg">
+      <Stack p="md" gap="lg" className="min-w-0">
         <Group justify="space-between" align="flex-start">
           <Text fw={600}>{device.name || device.mac}</Text>
           <Badge color={device.online ? "green" : "gray"} variant="light">
@@ -289,7 +291,11 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
               <Text fw={500} size="sm" c="dimmed" mb="xs">
                 Outputs
               </Text>
-              <Table withRowBorders={false}>
+              {/* Seven columns of monospace readings don't compress; below
+                * their natural width the table scrolls sideways in place
+                * instead of widening the whole panel. */}
+              <Table.ScrollContainer minWidth={420}>
+                <Table withRowBorders={false}>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Ch</Table.Th>
@@ -328,14 +334,16 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                     );
                   })}
                 </Table.Tbody>
-              </Table>
+                </Table>
+              </Table.ScrollContainer>
             </div>
 
             <div>
               <Text fw={500} size="sm" c="dimmed" mb="xs">
                 Inputs
               </Text>
-              <Table withRowBorders={false}>
+              <Table.ScrollContainer minWidth={320}>
+                <Table withRowBorders={false}>
                 <Table.Thead>
                   <Table.Tr>
                     <Table.Th>Ch</Table.Th>
@@ -365,7 +373,8 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                     );
                   })}
                 </Table.Tbody>
-              </Table>
+                </Table>
+              </Table.ScrollContainer>
             </div>
 
             <Group gap="lg" wrap="wrap">
