@@ -27,6 +27,14 @@ dist-ssr
 /src-tauri/target/
 /src-tauri/gen/
 
+# TypeScript incremental build state (tsconfig.node.json is a composite
+# project, so `tsc -b` drops a .tsbuildinfo next to it)
+*.tsbuildinfo
+
+# Claude Code per-machine settings — the shared .claude/settings.json,
+# if one is ever added, stays tracked
+.claude/settings.local.json
+
 # Secrets - never commit signing material
 *.key
 *.pem
