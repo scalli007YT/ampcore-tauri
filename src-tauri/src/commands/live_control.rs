@@ -159,7 +159,8 @@ pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Resu
     // locks this same `Arc<Mutex<LiveDeviceInner>>` itself (to store
     // `request_tx`), and `std::sync::Mutex` isn't reentrant: holding it
     // across the call deadlocks the very first `live_control_start`
-    // invocation, which fires automatically on app load.
+    // invocation, which fires when the first live-aware view mounts (see
+    // `useLiveDriver`).
     let sink = LiveEventSink {
         app,
         state: state.0.clone(),
@@ -181,6 +182,38 @@ pub fn live_control_stop(state: State<LiveDeviceState>) -> Result<(), AppError> 
     };
     for h in handles {
         h.request_stop();
+    }
+    Ok(())
+}
+
+/// Declares which devices one live consumer needs the heavy polls (heartbeat,
+/// FC=27, FC=50) for. Devices no consumer has asked for get discovery alone.
+///
+/// `token` identifies one subscription, and `device_ids` replaces that
+/// token's whole set; an empty list removes the token. The driver polls the
+/// union of every token's set, so any number of views can subscribe at once
+/// — Live Control today, project mode once offline/online amp fusion lands —
+/// without overwriting each other, and two views on the same amp never
+/// double-poll it. The frontend mints a fresh token per effect run (see
+/// `useLivePolling`), which keeps this correct even when a subscribe and a
+/// clear arrive out of order.
+///
+/// Pure state, no wire I/O: the ticks read it on their next pass, so a newly
+/// subscribed device gets its first heartbeat within ~50ms and its first
+/// FC=27 within ~200ms. On-demand commands (preset fetch, refresh, writes and
+/// the post-bridge-write refetch) do not depend on it.
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_set_poll_subscription(
+    state: State<LiveDeviceState>,
+    token: String,
+    device_ids: Vec<String>,
+) -> Result<(), AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    if device_ids.is_empty() {
+        inner.poll_subscriptions.remove(&token);
+    } else {
+        inner.poll_subscriptions.insert(token, device_ids.into_iter().collect());
     }
     Ok(())
 }

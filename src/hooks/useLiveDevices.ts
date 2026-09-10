@@ -16,16 +16,15 @@ export function useLiveDevices() {
       });
       const initial = await commands.liveControlListDevices();
       if (!cancelled && initial.status === "ok") setDevices(initial.data);
-      await commands.liveControlStart(); // idempotent no-op if already running
       if (!cancelled) setReady(true);
     })();
 
+    // Only listens — starting the driver is `useLiveDriver`'s job, so any
+    // view can read the device list without that implying it wants network
+    // traffic.
     return () => {
       cancelled = true;
       unlisten?.();
-      // Deliberately NOT calling a stop command here — discovery should keep
-      // running in the background across view switches within a session,
-      // not restart from zero every time the user tabs back into Live Control.
     };
   }, []);
 

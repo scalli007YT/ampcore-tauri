@@ -26,7 +26,11 @@ use super::telemetry;
 // has no event-loop/GC contention to worry about at this rate.
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(4000);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
-const OFFLINE_TIMEOUT_MS: f64 = 8_000.0;
+// Three discovery cycles. Only subscribed amps get heartbeats now, so every
+// other discovered amp stays "online" purely on its 4s discovery reply — at
+// two cycles (8s), two lost broadcast replies in a row would flicker it
+// offline in the device list.
+const OFFLINE_TIMEOUT_MS: f64 = 12_000.0;
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// FC=27 is far heavier than a 6-byte heartbeat (~2.4KB for a 4-channel amp,
 /// requiring fragmentation + reassembly + a full round trip), but the
@@ -312,7 +316,13 @@ async fn run(
                 if writes.has_pending() { continue; }
                 let targets: Vec<(String, String)> = {
                     let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
+                    // Only devices some live consumer has subscribed to (`is_polled`, see
+                    // `live_control_set_poll_subscription`), and only while online. Every
+                    // other discovered amp gets discovery alone. The online check still
+                    // matters for a subscribed amp: `mark_stale_offline` never removes
+                    // entries, so an unplugged amp would otherwise keep being polled.
+                    // Recovery goes through discovery either way.
+                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| (d.id.clone(), d.ip.clone())).collect()
                 };
                 for (_id, ip) in targets {
                     // Any pending request for this ip (not just FC=27) blocks a
@@ -358,7 +368,13 @@ async fn run(
                 let pair = bridge_poll_pair;
                 let targets: Vec<String> = {
                     let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| d.ip.clone()).collect()
+                    // Only devices some live consumer has subscribed to (`is_polled`, see
+                    // `live_control_set_poll_subscription`), and only while online. Every
+                    // other discovered amp gets discovery alone. The online check still
+                    // matters for a subscribed amp: `mark_stale_offline` never removes
+                    // entries, so an unplugged amp would otherwise keep being polled.
+                    // Recovery goes through discovery either way.
+                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| d.ip.clone()).collect()
                 };
                 if targets.is_empty() && wire_log_enabled() {
                     println!("[cvr driver] FC=50 poll (pair {pair}): no devices discovered yet");
@@ -400,7 +416,9 @@ async fn run(
                 if writes.has_pending() { continue; }
                 let targets: Vec<(String, String)> = {
                     let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
+                    // Subscribed + online only — see the config poll above. Matters most
+                    // here: at 50ms this is 20 packets/s per amp it reaches.
+                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| (d.id.clone(), d.ip.clone())).collect()
                 };
                 let query = build_heartbeat_query();
                 for (id, ip) in targets {
@@ -424,6 +442,17 @@ async fn run(
             }
 
             _ = stats_tick.tick() => {
+                // Per-device link quality, once a second. Gated behind
+                // `AMPCORE_WIRE_LOG` like the rest of the routine wire chatter —
+                // it printed unconditionally and drowned out real errors. The
+                // window is still reset when logging is off, so enabling the
+                // env var never reports an accumulated backlog.
+                if !wire_log_enabled() {
+                    for s in stats.values_mut() {
+                        s.reset_window();
+                    }
+                    continue;
+                }
                 for (id, s) in stats.iter_mut() {
                     if s.sent == 0 {
                         continue;

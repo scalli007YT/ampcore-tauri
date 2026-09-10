@@ -165,6 +165,25 @@ export const commands = {
 	/**  Soft-delete — see SpeakerLibraryEntry.archived for rationale. */
 	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
 	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
+	/**
+	 *  Declares which devices one live consumer needs the heavy polls (heartbeat,
+	 *  FC=27, FC=50) for. Devices no consumer has asked for get discovery alone.
+	 * 
+	 *  `token` identifies one subscription, and `device_ids` replaces that
+	 *  token's whole set; an empty list removes the token. The driver polls the
+	 *  union of every token's set, so any number of views can subscribe at once
+	 *  — Live Control today, project mode once offline/online amp fusion lands —
+	 *  without overwriting each other, and two views on the same amp never
+	 *  double-poll it. The frontend mints a fresh token per effect run (see
+	 *  `useLivePolling`), which keeps this correct even when a subscribe and a
+	 *  clear arrive out of order.
+	 * 
+	 *  Pure state, no wire I/O: the ticks read it on their next pass, so a newly
+	 *  subscribed device gets its first heartbeat within ~50ms and its first
+	 *  FC=27 within ~200ms. On-demand commands (preset fetch, refresh, writes and
+	 *  the post-bridge-write refetch) do not depend on it.
+	 */
+	liveControlSetPollSubscription: (token: string, deviceIds: string[]) => typedError<null, AppError>(__TAURI_INVOKE("live_control_set_poll_subscription", { token, deviceIds })),
 	liveControlStop: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_stop")),
 	liveControlListDevices: () => typedError<DiscoveredDevice[], AppError>(__TAURI_INVOKE("live_control_list_devices")),
 	liveControlGetTelemetry: () => typedError<DeviceTelemetry[], AppError>(__TAURI_INVOKE("live_control_get_telemetry")),

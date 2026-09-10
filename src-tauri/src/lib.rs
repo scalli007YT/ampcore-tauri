@@ -17,7 +17,7 @@ use commands::live_control::{
     live_control_set_output_bridge,
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
-    live_control_set_eq_band, live_control_set_output_mute, live_control_start, live_control_stop,
+    live_control_set_eq_band, live_control_set_output_mute, live_control_start, live_control_stop, live_control_set_poll_subscription,
 };
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
@@ -83,6 +83,7 @@ pub fn run() {
             amp_models_update,
             amp_models_archive,
             live_control_start,
+            live_control_set_poll_subscription,
             live_control_stop,
             live_control_list_devices,
             live_control_get_telemetry,

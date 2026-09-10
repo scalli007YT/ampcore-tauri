@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -63,6 +63,14 @@ pub struct LiveDeviceInner {
     /// Latest FC=50 bridge state per device id. Polled by the driver on its
     /// own tick (see `bridge.rs` for why this is not read out of FC=27).
     pub bridge: HashMap<String, DeviceBridgeSnapshot>,
+    /// Which devices receive the heavy polls (heartbeat, FC=27, FC=50), keyed
+    /// by subscription token. Every discovered amp not in any set gets
+    /// discovery alone. One token per live consumer — Live Control's current
+    /// selection today, project mode once offline/online amp fusion exists —
+    /// so consumers add to each other instead of overwriting one shared slot.
+    /// Maintained by `live_control_set_poll_subscription`; read through
+    /// `is_polled`.
+    pub poll_subscriptions: HashMap<String, HashSet<String>>,
     /// Reaches into the running CVR driver's request engine from outside its
     /// task (e.g. a future Tauri command) — `None` whenever no driver is
     /// running. `Some` while `CvrDriver::start`'s spawned task is alive.
@@ -72,6 +80,15 @@ pub struct LiveDeviceInner {
     /// device's ACK echo comes back to a socket that still exists and can be
     /// correlated. `None` whenever no driver is running.
     pub write_tx: Option<mpsc::UnboundedSender<WriteSpec>>,
+}
+
+impl LiveDeviceInner {
+    /// Whether any live consumer currently wants the heavy polls for this
+    /// device — the union across every `poll_subscriptions` entry, so a device
+    /// two views both subscribe to is still polled exactly once.
+    pub fn is_polled(&self, device_id: &str) -> bool {
+        self.poll_subscriptions.values().any(|ids| ids.contains(device_id))
+    }
 }
 
 /// Arc-wrapped (unlike `ProjectDataState`'s bare `Mutex<T>`) because a clone
@@ -88,6 +105,7 @@ impl LiveDeviceState {
             channel_config: HashMap::new(),
             presets: HashMap::new(),
             bridge: HashMap::new(),
+            poll_subscriptions: HashMap::new(),
             request_tx: None,
             write_tx: None,
         })))

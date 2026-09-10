@@ -1168,39 +1168,46 @@ function OutputChannelRow({
             </Stack>
           </Popover.Dropdown>
         </Popover>
-        <Popover
-          opened={openPopover === "gate"}
-          onChange={(o) => setOpenPopover(o ? "gate" : null)}
-          position="bottom"
-          withArrow
-          shadow="md"
-          width={200}
-        >
-          <Popover.Target>
-            <div>
-              {/* A hybrid — it opens a popover, but its enabled/disabled state
-               * is what matters at a glance, so it wears the toggle styling. */}
-              <StatToggle
-                label="Gate"
-                engaged={noiseGateEnabled}
-                accent="var(--mantine-color-amber-6)"
-                onClick={() => setOpenPopover((o) => (o === "gate" ? null : "gate"))}
-                icon={<ShieldAlert size={16} />}
-              />
-            </div>
-          </Popover.Target>
-          <Popover.Dropdown>
-            <Stack gap="sm">
-              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
-                Noise Gate
-              </Text>
-              <Switch
-                size="sm"
-                label="Enabled"
-                checked={noiseGateEnabled}
-                onChange={(e) => onNoiseGateChange(e.currentTarget.checked, noiseGateThresholdDbu)}
-              />
-              {noiseGateThresholdAdjustable && (
+        {/* Firmware without an adjustable threshold (1.1.8) has nothing to
+         * put in a dropdown but the same on/off state the pill already
+         * shows — a popover there was a second click to reach a switch that
+         * duplicates the pill itself. That firmware gets a direct toggle;
+         * only firmware with a real threshold field (`noiseGateThresholdAdjustable`)
+         * gets the popover. */}
+        {noiseGateThresholdAdjustable ? (
+          <Popover
+            opened={openPopover === "gate"}
+            onChange={(o) => setOpenPopover(o ? "gate" : null)}
+            position="bottom"
+            withArrow
+            shadow="md"
+            width={200}
+          >
+            <Popover.Target>
+              <div>
+                {/* A hybrid — it opens a popover, but its enabled/disabled
+                 * state is what matters at a glance, so it wears the toggle
+                 * styling. */}
+                <StatToggle
+                  label="Gate"
+                  engaged={noiseGateEnabled}
+                  accent="var(--mantine-color-amber-6)"
+                  onClick={() => setOpenPopover((o) => (o === "gate" ? null : "gate"))}
+                  icon={<ShieldAlert size={16} />}
+                />
+              </div>
+            </Popover.Target>
+            <Popover.Dropdown>
+              <Stack gap="sm">
+                <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
+                  Noise Gate
+                </Text>
+                <Switch
+                  size="sm"
+                  label="Enabled"
+                  checked={noiseGateEnabled}
+                  onChange={(e) => onNoiseGateChange(e.currentTarget.checked, noiseGateThresholdDbu)}
+                />
                 <NumberInput
                   size="sm"
                   value={noiseGateThresholdDbu}
@@ -1210,10 +1217,18 @@ function OutputChannelRow({
                   suffix=" dBu"
                   onChange={(value) => typeof value === "number" && onNoiseGateChange(noiseGateEnabled, value)}
                 />
-              )}
-            </Stack>
-          </Popover.Dropdown>
-        </Popover>
+              </Stack>
+            </Popover.Dropdown>
+          </Popover>
+        ) : (
+          <StatToggle
+            label="Gate"
+            engaged={noiseGateEnabled}
+            accent="var(--mantine-color-amber-6)"
+            onClick={() => onNoiseGateChange(!noiseGateEnabled, noiseGateThresholdDbu)}
+            icon={<ShieldAlert size={16} />}
+          />
+        )}
       </Group>
     </div>
   );
