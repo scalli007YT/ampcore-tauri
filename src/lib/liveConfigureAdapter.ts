@@ -7,6 +7,7 @@ import {
   type AppError,
   type ChannelConfig,
   type ChannelConfigSnapshot,
+  type DeviceBridgeSnapshot,
   type DiscoveredDevice,
   type LiveWriteAck,
 } from "./bindings";
@@ -32,7 +33,7 @@ export const LIVE_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
  * never a value implied to be live-accurate. `channelIndex` with no config
  * yet (poll still pending) synthesizes an all-default channel rather than
  * leaving a hole for callers to crash on. */
-function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number): AmpChannel {
+function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number, bridged: boolean): AmpChannel {
   if (!config) {
     return { channelIndex, ohms: 8, speakerLibraryId: null, wayIndex: null };
   }
@@ -58,7 +59,10 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number)
     inputName: config.inputName,
     outputName: config.outputName,
     outputMuted: config.outputMuted,
-    outputBridged: false,
+    // Real device state, from the FC=50 poll. Both channels of a pair report
+    // the pair's single flag — the wire has one byte per pair, not per
+    // channel.
+    outputBridged: bridged,
     powerMode: config.powerMode ?? "lowOhm",
   };
 }
@@ -70,9 +74,19 @@ export function buildLiveAssignmentViewModel(
   device: DiscoveredDevice,
   snapshot: ChannelConfigSnapshot | undefined,
   channelCount: number,
+  bridge?: DeviceBridgeSnapshot,
 ): AmpAssignment {
+  // Bridge state comes from the FC=50 poll, not the FC=27 snapshot — see
+  // `live/cvr/bridge.rs`. Indexed by pair, so channels 0/1 both read pair 0
+  // and channels 2/3 both read pair 1, matching the vendor's own mapping
+  // (`bridges[0]` = out 1, `bridges[1]` = out 3). A pair the device has not
+  // answered for yet is `null`, which reads as not bridged here.
   const channels: AmpChannel[] = Array.from({ length: channelCount }, (_, i) =>
-    mapLiveChannel(snapshot?.channels.find((c) => c.channelIndex === i), i),
+    mapLiveChannel(
+      snapshot?.channels.find((c) => c.channelIndex === i),
+      i,
+      bridge?.bridged?.[Math.floor(i / 2)] ?? false,
+    ),
   );
   return {
     id: device.id,
@@ -198,6 +212,44 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     },
     async setCrossoverSlot(channelIndex, direction, slot, patch) {
       await reportWrite("Set crossover", commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch));
+    },
+    async setMatrixCrosspoint(channelIndex, sourceIndex, gainDb, active) {
+      await reportWrite(
+        "Set matrix crosspoint",
+        commands.liveControlSetMatrixCrosspoint(deviceId, channelIndex, sourceIndex, gainDb, active),
+      );
+    },
+    async setChannelNoiseGate(channelIndex, enabled, thresholdDbu) {
+      await reportWrite("Set noise gate", commands.liveControlSetChannelNoiseGate(deviceId, channelIndex, enabled, thresholdDbu));
+    },
+    async setChannelLimiter(channelIndex, patch) {
+      await reportWrite("Set limiter", commands.liveControlSetChannelLimiter(deviceId, channelIndex, patch));
+    },
+    async setChannelName(channelIndex, side, name) {
+      await reportWrite("Set channel name", commands.liveControlSetChannelName(deviceId, channelIndex, side, name));
+    },
+    /** FC=11 carries only the source *kind*. The positional `index` this
+     * app tracks alongside it has no wire equivalent, and clearing a source
+     * (`kind === null`) is not something FC=11 can express — a live channel
+     * always has some source selected. Both are rejected up front rather
+     * than sent as a packet that would mean something else. */
+    /** Re-enabled now that `bridgedPairs` gives the UI a real readback —
+     * see the `outputBridged` note in `mapLiveChannel`. `channelIndex` is
+     * the pair's leader; FC=50 addresses pairs by their leader channel. */
+    async setOutputBridge(pairLeaderChannelIndex, bridged) {
+      await reportWrite("Set bridge", commands.liveControlSetOutputBridge(deviceId, pairLeaderChannelIndex, bridged));
+    },
+    async setChannelSource(channelIndex, kind) {
+      if (kind === null) {
+        notifications.show({
+          color: "red",
+          title: "Set source failed",
+          message: "A live channel always has a source — pick Analog, Dante or AES3 instead of clearing it.",
+          autoClose: false,
+        });
+        return;
+      }
+      await reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind));
     },
   };
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Menu, Select, Stack, Text } from "@mantine/core";
+import { Menu, Select, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { buildBandResponseCurve, buildResponseCurve, type EqStageRef, type ResponsePoint } from "../lib/filterResponse";
 import {
@@ -834,49 +834,65 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
   );
 }
 
-/** Status pill for a crossover slot's/band's `active` flag — labels the
- * *current state* ("Enabled"/"Bypassed"), not the click action. Enabled
- * uses a green tint at half the intensity of Mantine's own `variant="light"`
- * (via `color-mix` against its own light-variant background var, so it
- * still adapts correctly to light/dark scheme); bypassed stays a plain
- * muted/default button. */
-function ActiveStateButton({ active, onClick }: { active: boolean; onClick: () => void }) {
+/** Bypass toggle for a crossover slot / band. Was a full-width
+ * "Enabled"/"Bypassed" pill, which spent a whole 36px row and a lot of
+ * contrast per column on what is a checkbox-weight decision — ten of them
+ * across the strip were most of the visual noise. Now a single dot: filled
+ * green when engaged, hollow and muted when bypassed. The word survives in
+ * the tooltip so nothing is actually lost. */
+function ActiveDotToggle({ active, onClick }: { active: boolean; onClick: () => void }) {
   return (
-    <Button
-      size="sm"
-      fullWidth
-      variant="default"
-      onClick={onClick}
-      styles={
-        active
-          ? {
-              root: {
-                backgroundColor: "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)",
-                color: "var(--mantine-color-green-6)",
-                border: "1px solid color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)",
-              },
-            }
-          : undefined
-      }
-    >
-      {active ? "Enabled" : "Bypassed"}
-    </Button>
+    <Tooltip label={active ? "Enabled — click to bypass" : "Bypassed — click to enable"} openDelay={400} withArrow>
+      <UnstyledButton
+        onClick={onClick}
+        h={20}
+        className="flex w-full cursor-pointer items-center justify-center focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--mantine-color-amber-filled)]"
+        aria-pressed={active}
+        aria-label={active ? "Enabled" : "Bypassed"}
+      >
+        <span
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: "50%",
+            border: `1px solid ${active ? "var(--mantine-color-green-6)" : "var(--mantine-color-dimmed)"}`,
+            background: active ? "var(--mantine-color-green-6)" : "transparent",
+          }}
+        />
+      </UnstyledButton>
+    </Tooltip>
   );
 }
 
-/** One compact vertical control column — shared visual shell for both the
- * crossover slots and the parametric bands, so the 10-column strip lines up
- * evenly regardless of which fields a given filter type exposes. Highlights
- * (and clicking it selects) whichever stage is currently selected on the
- * graph above, so the two stay visually tied together. */
+/** Holds a row's vertical slot in columns whose filter type has no gain or
+ * no Q (and in the crossover columns, which have neither), so every column
+ * keeps the same row grid. Renders a faint middot rather than an empty
+ * 36px void — the blank spacers read as a rendering fault. */
+function EmptyParamSlot() {
+  return (
+    <div style={{ height: 36 }} className="flex items-center justify-center">
+      <Text size="sm" c="dimmed" className="opacity-40">
+        &middot;
+      </Text>
+    </div>
+  );
+}
+
 function StripShell({
   label,
   selected,
+  /** Bypassed stages recede so the two or three columns actually shaping the
+   * signal are the ones that read first — previously all ten columns
+   * competed at identical contrast. Selection always wins over dimming, so a
+   * bypassed stage is fully legible the moment you click it, and hover
+   * lifts it too. */
+  dimmed,
   onSelect,
   children,
 }: {
   label: string;
   selected: boolean;
+  dimmed: boolean;
   onSelect: () => void;
   children: React.ReactNode;
 }) {
@@ -887,7 +903,9 @@ function StripShell({
       bdrs="sm"
       bd={`1px solid ${selected ? "var(--mantine-color-amber-filled)" : "var(--mantine-color-default-border)"}`}
       bg={selected ? "var(--mantine-color-amber-light)" : undefined}
-      className="min-w-0"
+      className={`min-w-0 transition-opacity duration-150 ${
+        dimmed && !selected ? "opacity-[0.55] hover:opacity-100" : ""
+      }`}
       onClick={onSelect}
       style={{ cursor: "pointer" }}
     >
@@ -917,7 +935,7 @@ function CrossoverStrip({
   onChange: (patch: Partial<{ filterType: CrossoverFilterType; freqHz: number; active: boolean }>) => void;
 }) {
   return (
-    <StripShell label={label} selected={selected} onSelect={onSelect}>
+    <StripShell label={label} selected={selected} dimmed={!slot.active} onSelect={onSelect}>
       <Select
         size="sm"
         data={CROSSOVER_FILTER_OPTIONS}
@@ -934,11 +952,10 @@ function CrossoverStrip({
         onCommit={(value) => onChange({ freqHz: value })}
       />
       {/* No gain/Q for crossover slots — Q is implied by filterType, never
-       * user-settable (see CrossoverSlot in filterResponse.ts). Spacers
-       * keep this column's row heights aligned with BandStrip's. */}
-      <div style={{ height: 36 }} />
-      <div style={{ height: 36 }} />
-      <ActiveStateButton active={slot.active} onClick={() => onChange({ active: !slot.active })} />
+       * user-settable (see CrossoverSlot in filterResponse.ts). */}
+      <EmptyParamSlot />
+      <EmptyParamSlot />
+      <ActiveDotToggle active={slot.active} onClick={() => onChange({ active: !slot.active })} />
     </StripShell>
   );
 }
@@ -972,7 +989,7 @@ function BandStrip({
 }) {
   const caps = capsByType[band.filterType];
   return (
-    <StripShell label={label} selected={selected} onSelect={onSelect}>
+    <StripShell label={label} selected={selected} dimmed={!band.active} onSelect={onSelect}>
       <Select
         size="sm"
         data={EQ_FILTER_OPTIONS}
@@ -999,7 +1016,7 @@ function BandStrip({
           onCommit={(value) => onChange({ gainDb: value })}
         />
       ) : (
-        <div style={{ height: 36 }} />
+        <EmptyParamSlot />
       )}
       {caps.supportsQ ? (
         <CommitNumberInput
@@ -1012,9 +1029,9 @@ function BandStrip({
           onCommit={(value) => onChange({ q: value })}
         />
       ) : (
-        <div style={{ height: 36 }} />
+        <EmptyParamSlot />
       )}
-      <ActiveStateButton active={band.active} onClick={() => onChange({ active: !band.active })} />
+      <ActiveDotToggle active={band.active} onClick={() => onChange({ active: !band.active })} />
     </StripShell>
   );
 }

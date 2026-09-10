@@ -14,13 +14,21 @@ import {
  * can make, abstracted away from *how* — Project mode persists to a
  * `Project` file via `commands.projectsSetX`, Direct Edit mode writes
  * straight to a live device via `commands.liveControlSetX` (see
- * `liveConfigureAdapter.ts`). Only the fields with a real live-wire write
- * command this phase are required; everything else is optional so "not
- * available for this source" is just `undefined` — the same mechanism
- * whether the reason is "this is a Project-only planning concept" (Speaker/
- * Join/Ohms) or "no live write command exists for this yet" (EQ, Limiter,
- * Matrix, Source Select, Bridge, Noise Gate, rename). Filling one in later
- * is purely additive — no call-site rewiring needed. */
+ * `liveConfigureAdapter.ts`). Optional members mean "not available for this
+ * source", signalled by plain `undefined` — call sites early-return on it.
+ *
+ * As of the 1.1.8 Tier-A pass the only members Direct Edit mode still leaves
+ * undefined are the three genuinely Project-only planning concepts
+ * (`setChannelSpeaker`, `setOutputJoin`, `setChannelOhms` — gated as a group
+ * by `ConfigureCapabilities` so they explain themselves rather than sitting
+ * inert). Every other member now has a live wire command; FIR is the one
+ * remaining device feature with no action here at all, and its tab says so
+ * explicitly instead of offering dead controls.
+ *
+ * Note that an early-return on `undefined` is silent by design *only* where
+ * a capability flag already explains the absence. Adding a new optional
+ * member without that gating reintroduces a control that looks live and
+ * does nothing. */
 export interface ConfigureActions {
   setChannelDelayIn(channelIndex: number, delayInMs: number): Promise<void>;
   setChannelInputMute(channelIndex: number, muted: boolean): Promise<void>;

@@ -16,20 +16,26 @@ const amber: MantineColorsTuple = [
   "#663f10",
 ];
 
-// Deliberately tight radius scale — this is a control/monitoring tool, not
-// a consumer app, so corners stay close to square rather than Mantine's
-// default rounded look.
+// Radius scale, at double the original values. Still tighter than Mantine's
+// stock scale — this is a control/monitoring tool, not a consumer app — but
+// no longer near-square.
+//
+// These feed the `--mantine-radius-*` CSS vars, so they move more than the
+// components that take a `radius` prop: the channel-strip tiles
+// (`StatReadout`/`StatToggle`/`StatEditorTile`), `PresetActionTile`, and the
+// `bdrs="sm"` containers all read `var(--mantine-radius-sm)` directly and
+// follow this scale too.
 export const theme = createTheme({
   primaryColor: "amber",
   primaryShade: { light: 6, dark: 5 },
 
   defaultRadius: "xs",
   radius: {
-    xs: "3px",
-    sm: "4px",
-    md: "6px",
-    lg: "8px",
-    xl: "10px",
+    xs: "4px",
+    sm: "6px",
+    md: "8px",
+    lg: "12px",
+    xl: "16px",
   },
 
   colors: {

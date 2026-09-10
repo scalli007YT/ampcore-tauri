@@ -7,6 +7,7 @@ import {
   Group,
   Loader,
   Menu,
+  MultiSelect,
   NumberInput,
   Popover,
   ScrollArea,
@@ -45,6 +46,7 @@ import { LimiterEditor } from "./LimiterEditor";
 import { LoadSpeakerConfigDialog } from "./LoadSpeakerConfigDialog";
 import { SpeakerFormModal } from "./SpeakerFormModal";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
+import { useLiveBridge } from "../hooks/useLiveBridge";
 import { useLivePresets } from "../hooks/useLivePresets";
 import { useIsCompact } from "../lib/breakpoints";
 import {
@@ -53,9 +55,11 @@ import {
   type AmpCapability_Serialize as AmpCapability,
   type AmpModelCatalogEntry,
   type ChannelConfigSnapshot,
+  type ChannelEq,
   type ChannelSource,
   type DiscoveredDevice,
   type PowerMode,
+  type PresetSlot,
   type Project,
   type SourceChannelCount,
   type SourceKind,
@@ -230,6 +234,20 @@ function SourcePicker({
  * rows became unreachable. The nested `min-h-full` column is what keeps
  * centering and scrolling from fighting each other. Padding steps down on
  * small windows, where 32px of gutter is a meaningful share of the width. */
+/* Channel-strip column caps. Both the Input and Output panes render a
+ * centred column of channel rows; without a cap a row's `wrap="wrap"` Group
+ * simply grows to whatever the window gives it, which is why the Output tab
+ * stretched edge-to-edge on a wide window while Input did not.
+ *
+ * The two values differ because the rows genuinely differ: an input row is a
+ * meter plus 4 tiles, an output row a meter plus up to 12 (Mute, LIM, V, °C,
+ * FIR, EQ, Level, Trim, Delay, Pol, Mode, Gate). Each cap is that row's
+ * natural one-line width — 72px per tile, a 10px `gap="xs"` between them,
+ * plus the meter's 200px flex basis — so the row fills its cap exactly and
+ * wraps below it rather than stranding a gutter or stretching. */
+const INPUT_ROW_MAX_WIDTH = 760;
+const OUTPUT_ROW_MAX_WIDTH = 1180;
+
 function CenteredScrollPane({ children }: { children: ReactNode }) {
   return (
     <div className="h-full min-h-0 overflow-auto">
@@ -438,37 +456,152 @@ function ChannelLevelMeter({
   );
 }
 
-/** A small bordered tile matching the Routing tab's crosspoint-cell
- * language — a value/label pair, optionally clickable. */
-function InputStatTile({
-  value,
+/* ---------------------------------------------------------------------------
+ * Channel-strip tiles
+ *
+ * A strip mixes three genuinely different kinds of cell, and they used to
+ * share one component (`InputStatTile`), which rendered an identical
+ * bordered <button> whether or not it had an `onClick`. That made a live
+ * temperature readout look exactly as pressable as Mute, and left the only
+ * highlight (`active`) meaning two contradictory things — "currently muted"
+ * on one tile, "this one is editable" on the next. The three components
+ * below keep the same 72x52 grid rhythm so a strip still lines up, but give
+ * each class its own affordance:
+ *
+ *   StatReadout      passive, recessed, no border, not focusable
+ *   StatToggle       on/off state, fills with its accent when engaged
+ *   StatEditorTile   opens a popover or a sub-view, corner chevron, and
+ *                    accents itself when its value is off-default
+ *
+ * Accent colours carry one meaning each: red = this channel's audio is being
+ * cut (mute), amber = engaged/off-default but working as intended (gate,
+ * polarity, a non-zero delay, active EQ bands).
+ * ------------------------------------------------------------------------ */
+
+const STAT_TILE_W = 72;
+const STAT_TILE_H = 52;
+/** Tiles are the only focusable things in a strip now that readouts are
+ * plain divs, so they need a visible focus ring — `UnstyledButton` ships
+ * none. */
+const STAT_TILE_FOCUS =
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--mantine-color-amber-filled)]";
+
+/** A passive telemetry display — level, volts, amps, temperature. Rendered
+ * as a recessed <div>, not a button: nothing happens when you click it, so
+ * it must not offer a border, a pointer cursor or a tab stop. Values are
+ * monospaced so a live-updating number doesn't reflow its own tile. */
+function StatReadout({ value, label }: { value: string; label: string }) {
+  return (
+    <div
+      className="shrink-0 text-center"
+      style={{
+        width: STAT_TILE_W,
+        height: STAT_TILE_H,
+        borderRadius: "var(--mantine-radius-sm)",
+        background: "var(--mantine-color-default)",
+      }}
+    >
+      <Stack gap={2} align="center" justify="center" h="100%">
+        <Text size="sm" fw={700} ff="monospace">
+          {value}
+        </Text>
+        <Text size="xs" c="dimmed">
+          {label}
+        </Text>
+      </Stack>
+    </div>
+  );
+}
+
+/** An on/off control (mute, polarity, gate). Engaged state is a filled
+ * accent wash plus a matching border and label — a much louder signal than
+ * the old border-colour-only treatment, which mattered because Mute is the
+ * most consequential control on the strip and used to be as quiet as a
+ * temperature readout. Icons inherit `currentColor`, so call sites pass
+ * them uncoloured. */
+function StatToggle({
   label,
-  onClick,
-  active,
-  activeColor,
   icon,
+  engaged,
+  accent = "var(--mantine-color-red-6)",
+  onClick,
 }: {
-  value: ReactNode;
   label: string;
+  icon: ReactNode;
+  engaged: boolean;
+  accent?: string;
   onClick?: () => void;
-  active?: boolean;
-  activeColor?: string;
-  icon?: ReactNode;
 }) {
-  const color = active ? (activeColor ?? "var(--mantine-color-text)") : "var(--mantine-color-dimmed)";
   return (
     <UnstyledButton
       onClick={onClick}
-      h={52}
-      w={72}
-      bdrs="sm"
-      bd={`1px solid ${active ? (activeColor ?? "var(--mantine-color-text)") : "var(--mantine-color-default-border)"}`}
-      className="shrink-0 text-center transition-colors duration-150"
-      style={{ cursor: onClick ? "pointer" : "default" }}
+      className={`shrink-0 cursor-pointer text-center transition-colors duration-150 ${STAT_TILE_FOCUS}`}
+      style={{
+        width: STAT_TILE_W,
+        height: STAT_TILE_H,
+        borderRadius: "var(--mantine-radius-sm)",
+        border: `1px solid ${engaged ? accent : "var(--mantine-color-default-border)"}`,
+        background: engaged ? `color-mix(in srgb, ${accent} 20%, transparent)` : "transparent",
+        color: engaged ? accent : "var(--mantine-color-dimmed)",
+      }}
     >
       <Stack gap={2} align="center" justify="center" h="100%">
-        {icon ?? (
-          <Text size="sm" fw={700} style={{ color }}>
+        {icon}
+        <Text size="xs" fw={engaged ? 700 : 400} style={{ color: "inherit" }}>
+          {label}
+        </Text>
+      </Stack>
+    </UnstyledButton>
+  );
+}
+
+/** A tile that opens something — a popover editor, or a whole sub-view. The
+ * corner chevron is what separates it from a `StatReadout` at a glance
+ * (down = a popover drops from here, right = this navigates away).
+ *
+ * `modified` is the scannability fix: a channel sitting at 12 ms with six
+ * active EQ bands used to look identical to a flat one, so "which channels
+ * are doing something" could only be answered by opening every tile. Now
+ * off-default tiles carry the accent and the strip can be read at a
+ * glance. */
+function StatEditorTile({
+  value,
+  label,
+  icon,
+  modified,
+  accent = "var(--mantine-color-amber-6)",
+  opens = "popover",
+  onClick,
+}: {
+  value?: ReactNode;
+  label: string;
+  icon?: ReactNode;
+  modified?: boolean;
+  accent?: string;
+  opens?: "popover" | "view";
+  onClick?: () => void;
+}) {
+  const color = modified ? accent : "var(--mantine-color-text)";
+  return (
+    <UnstyledButton
+      onClick={onClick}
+      className={`relative shrink-0 cursor-pointer text-center transition-colors duration-150 ${STAT_TILE_FOCUS}`}
+      style={{
+        width: STAT_TILE_W,
+        height: STAT_TILE_H,
+        borderRadius: "var(--mantine-radius-sm)",
+        border: `1px solid ${modified ? accent : "var(--mantine-color-default-border)"}`,
+        background: modified ? `color-mix(in srgb, ${accent} 10%, transparent)` : "transparent",
+      }}
+    >
+      <div className="pointer-events-none absolute right-[3px] top-[3px] opacity-40">
+        <ChevronRight size={10} style={{ transform: opens === "popover" ? "rotate(90deg)" : undefined }} />
+      </div>
+      <Stack gap={2} align="center" justify="center" h="100%">
+        {icon ? (
+          <span style={{ color, display: "flex" }}>{icon}</span>
+        ) : (
+          <Text size="sm" fw={700} ff="monospace" style={{ color }}>
             {value}
           </Text>
         )}
@@ -478,6 +611,18 @@ function InputStatTile({
       </Stack>
     </UnstyledButton>
   );
+}
+
+/** How many filters in a chain are engaged — the parametric bands plus the
+ * two crossover slots. Only ever compared against zero (the EQ tile shows a
+ * binary "is this chain doing anything"), but kept as a count because that
+ * is the cheap thing to compute and callers may want more later. */
+function activeFilterCount(eq: ChannelEq | undefined): number {
+  if (!eq) return 0;
+  let count = eq.bands.filter((band) => band.active).length;
+  if (eq.hp.active) count += 1;
+  if (eq.lp.active) count += 1;
+  return count;
 }
 
 /** Click-to-rename label shared by `InputChannelRow`/`OutputChannelRow` —
@@ -583,6 +728,7 @@ function InputChannelRow({
   const [delayOpened, setDelayOpened] = useState(false);
   const muted = channel.inputMuted ?? false;
   const delayInMs = channel.delayInMs ?? 0;
+  const eqActive = activeFilterCount(channel.inputEq);
 
   return (
     <div>
@@ -594,32 +740,24 @@ function InputChannelRow({
       />
       <Group gap="xs" wrap="wrap" align="center">
         <ChannelLevelMeter levelDb={telemetry.inputDbv} disabled={muted} />
-        <InputStatTile
-          value={telemetry.inputDbv === null ? "—" : telemetry.inputDbv.toFixed(1)}
-          label="dBV"
-        />
-        <InputStatTile
-          value=""
+        <StatReadout value={telemetry.inputDbv === null ? "—" : telemetry.inputDbv.toFixed(1)} label="dBV" />
+        {/* Mute sits immediately after the meter on both the input and the
+         * output strip, so the one control that silences a channel is always
+         * in the same place rather than at the end of a queue of readouts. */}
+        <StatToggle
           label="Mute"
+          engaged={muted}
           onClick={onMuteToggle}
-          active={muted}
-          activeColor="var(--mantine-color-red-6)"
-          icon={
-            muted ? (
-              <VolumeX size={16} color="var(--mantine-color-red-6)" />
-            ) : (
-              <Volume2 size={16} color="var(--mantine-color-dimmed)" />
-            )
-          }
+          icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
         />
         <Popover opened={delayOpened} onChange={setDelayOpened} position="bottom" withArrow shadow="md" width={200}>
           <Popover.Target>
             <div>
-              <InputStatTile
+              <StatEditorTile
                 value={delayInMs.toFixed(1)}
-                label="ms in"
+                label="Delay ms"
+                modified={delayInMs !== 0}
                 onClick={() => setDelayOpened((o) => !o)}
-                active
               />
             </div>
           </Popover.Target>
@@ -639,7 +777,11 @@ function InputChannelRow({
             </Stack>
           </Popover.Dropdown>
         </Popover>
-        <InputStatTile value="" label="EQ In" onClick={onOpenEq} icon={<Activity size={16} />} />
+        {/* Accented when the chain is doing anything at all. Deliberately
+         * binary rather than a band count: a count says how many boxes are
+         * ticked, not whether the channel is shaped — one band at +12 dB and
+         * one at -0.5 dB both read as "2". */}
+        <StatEditorTile label="EQ In" opens="view" modified={eqActive > 0} icon={<Activity size={16} />} onClick={onOpenEq} />
       </Group>
     </div>
   );
@@ -753,7 +895,7 @@ function InputTab({ assignment, capability, actions, telemetry }: ConfigurableTa
               {/* Rows stretch to the pane so their tiles can wrap, but stop
                * at the width the meter's own cap plus four tiles actually
                * need — past that they'd sit in a sea of empty gutter. */}
-              <Stack gap="md" w="100%" maw={760} mx="auto" className="min-w-0">
+              <Stack gap="md" w="100%" maw={INPUT_ROW_MAX_WIDTH} mx="auto" className="min-w-0">
                 {assignment.channels.map((channel) => (
                   <InputChannelRow
                     key={channel.channelIndex}
@@ -844,6 +986,7 @@ function OutputChannelRow({
   const phaseInverted = channel.outputPhaseInverted ?? false;
   const muted = channel.outputMuted ?? false;
   const powerMode = channel.powerMode ?? "lowOhm";
+  const eqActive = activeFilterCount(channel.outputEq);
 
   return (
     <div>
@@ -855,22 +998,31 @@ function OutputChannelRow({
       />
       <Group gap="xs" wrap="wrap" align="center">
         <ChannelLevelMeter levelDb={telemetry.outputLevelDb} disabled={muted} wide />
-        <InputStatTile
-          value={telemetry.gainReductionDb === null ? "" : telemetry.gainReductionDb.toFixed(1)}
-          label="LIM"
-          onClick={onOpenLimiter}
-          // Lit only while the limiter is actually pulling gain down, so the
-          // tile doubles as a live "limiting now" indicator instead of a
-          // permanently-highlighted button.
-          active={telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0}
-          activeColor="var(--mantine-color-red-6)"
-          icon={telemetry.gainReductionDb === null ? <SlidersHorizontal size={16} /> : undefined}
+        {/* Same slot as on the input strip — see the note in InputChannelRow. */}
+        <StatToggle
+          label="Mute"
+          engaged={muted}
+          onClick={onMuteToggle}
+          icon={muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
         />
-        <InputStatTile value={telemetry.outputVoltage === null ? "—" : telemetry.outputVoltage.toFixed(1)} label="V" />
-        <InputStatTile value={telemetry.outputCurrent === null ? "—" : telemetry.outputCurrent.toFixed(2)} label="A" />
-        <InputStatTile value={telemetry.temperatureC === null ? "—" : telemetry.temperatureC.toFixed(1)} label="°C" />
-        <InputStatTile value="" label="FIR" onClick={onOpenFir} icon={<Waves size={16} />} />
-        <InputStatTile value="" label="EQ Out" onClick={onOpenEq} icon={<Activity size={16} />} />
+        <StatEditorTile
+          label="LIM"
+          opens="view"
+          onClick={onOpenLimiter}
+          // Accented only while the limiter is actually pulling gain down, so
+          // the tile doubles as a live "limiting now" indicator instead of a
+          // permanently-highlighted button. Icon-only now — the live gain
+          // reduction dB reads as a precise measurement when it's really a
+          // momentary number that stops mattering the instant you look away;
+          // the accent alone answers "is it limiting right now."
+          modified={telemetry.gainReductionDb !== null && telemetry.gainReductionDb < 0}
+          accent="var(--mantine-color-red-6)"
+          icon={<SlidersHorizontal size={16} />}
+        />
+        <StatReadout value={telemetry.outputVoltage === null ? "—" : telemetry.outputVoltage.toFixed(1)} label="V" />
+        <StatReadout value={telemetry.temperatureC === null ? "—" : telemetry.temperatureC.toFixed(1)} label="°C" />
+        <StatEditorTile label="FIR" opens="view" icon={<Waves size={16} />} onClick={onOpenFir} />
+        <StatEditorTile label="EQ Out" opens="view" modified={eqActive > 0} icon={<Activity size={16} />} onClick={onOpenEq} />
         <Popover
           opened={openPopover === "volume"}
           onChange={(o) => setOpenPopover(o ? "volume" : null)}
@@ -881,11 +1033,11 @@ function OutputChannelRow({
         >
           <Popover.Target>
             <div>
-              <InputStatTile
+              <StatEditorTile
                 value={volumeDb.toFixed(1)}
                 label={splitTrimVolume ? "Vol dB" : "Level dB"}
+                modified={volumeDb !== 0}
                 onClick={() => setOpenPopover((o) => (o === "volume" ? null : "volume"))}
-                active
               />
             </div>
           </Popover.Target>
@@ -916,11 +1068,11 @@ function OutputChannelRow({
           >
             <Popover.Target>
               <div>
-                <InputStatTile
+                <StatEditorTile
                   value={trimDb.toFixed(1)}
                   label="Trim dB"
+                  modified={trimDb !== 0}
                   onClick={() => setOpenPopover((o) => (o === "trim" ? null : "trim"))}
-                  active
                 />
               </div>
             </Popover.Target>
@@ -951,11 +1103,11 @@ function OutputChannelRow({
         >
           <Popover.Target>
             <div>
-              <InputStatTile
+              <StatEditorTile
                 value={delayMs.toFixed(1)}
-                label="ms out"
+                label="Delay ms"
+                modified={delayMs !== 0}
                 onClick={() => setOpenPopover((o) => (o === "delay" ? null : "delay"))}
-                active
               />
             </div>
           </Popover.Target>
@@ -975,18 +1127,14 @@ function OutputChannelRow({
             </Stack>
           </Popover.Dropdown>
         </Popover>
-        <InputStatTile
-          value=""
+        {/* Amber, not red: an inverted polarity is a deliberate setting, and
+         * red is reserved for "this channel's audio is cut". */}
+        <StatToggle
           label="Pol"
+          engaged={phaseInverted}
+          accent="var(--mantine-color-amber-6)"
           onClick={onPhaseInvertToggle}
-          active={phaseInverted}
-          activeColor="var(--mantine-color-red-6)"
-          icon={
-            <FlipVertical2
-              size={16}
-              color={phaseInverted ? "var(--mantine-color-red-6)" : "var(--mantine-color-dimmed)"}
-            />
-          }
+          icon={<FlipVertical2 size={16} />}
         />
         <Popover
           opened={openPopover === "mode"}
@@ -998,11 +1146,10 @@ function OutputChannelRow({
         >
           <Popover.Target>
             <div>
-              <InputStatTile
+              <StatEditorTile
                 value={POWER_MODE_LABELS[powerMode]}
                 label="Mode"
                 onClick={() => setOpenPopover((o) => (o === "mode" ? null : "mode"))}
-                active
               />
             </div>
           </Popover.Target>
@@ -1031,18 +1178,14 @@ function OutputChannelRow({
         >
           <Popover.Target>
             <div>
-              <InputStatTile
-                value=""
+              {/* A hybrid — it opens a popover, but its enabled/disabled state
+               * is what matters at a glance, so it wears the toggle styling. */}
+              <StatToggle
                 label="Gate"
+                engaged={noiseGateEnabled}
+                accent="var(--mantine-color-amber-6)"
                 onClick={() => setOpenPopover((o) => (o === "gate" ? null : "gate"))}
-                active={noiseGateEnabled}
-                activeColor="var(--mantine-color-amber-6)"
-                icon={
-                  <ShieldAlert
-                    size={16}
-                    color={noiseGateEnabled ? "var(--mantine-color-amber-6)" : "var(--mantine-color-dimmed)"}
-                  />
-                }
+                icon={<ShieldAlert size={16} />}
               />
             </div>
           </Popover.Target>
@@ -1071,20 +1214,6 @@ function OutputChannelRow({
             </Stack>
           </Popover.Dropdown>
         </Popover>
-        <InputStatTile
-          value=""
-          label="Mute"
-          onClick={onMuteToggle}
-          active={muted}
-          activeColor="var(--mantine-color-red-6)"
-          icon={
-            muted ? (
-              <VolumeX size={16} color="var(--mantine-color-red-6)" />
-            ) : (
-              <Volume2 size={16} color="var(--mantine-color-dimmed)" />
-            )
-          }
-        />
       </Group>
     </div>
   );
@@ -1094,14 +1223,28 @@ function OutputChannelRow({
  * follower rows. Same halved-green-tint active-state convention as
  * `ActiveStateButton` (EqEditor.tsx) / `OnOffButton` (LimiterEditor.tsx),
  * rather than inventing a third "on" visual language. */
-function BridgeToggle({ label, bridged, onClick }: { label: string; bridged: boolean; onClick: () => void }) {
-  return (
+function BridgeToggle({
+  label,
+  bridged,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  bridged: boolean;
+  /** No `setOutputBridge` for this source. Rendered visibly dead with a
+   * reason rather than accepting the click and dropping it — see
+   * `BRIDGE_UNAVAILABLE_REASON`. */
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const button = (
     <UnstyledButton
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
       w="100%"
       py={6}
       bdrs="sm"
       bd={`1px solid ${bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : "var(--mantine-color-default-border)"}`}
+      className={disabled ? "cursor-not-allowed opacity-[0.45]" : undefined}
       style={{
         backgroundColor: bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : undefined,
       }}
@@ -1111,7 +1254,23 @@ function BridgeToggle({ label, bridged, onClick }: { label: string; bridged: boo
       </Text>
     </UnstyledButton>
   );
+  return disabled ? (
+    <Tooltip label={BRIDGE_UNAVAILABLE_REASON} multiline w={240} withArrow>
+      <div>{button}</div>
+    </Tooltip>
+  ) : (
+    button
+  );
 }
+
+/** Shown on the bridge controls when the active source has no
+ * `setOutputBridge`. Direct Edit mode is the case that matters: the write
+ * command exists, but nothing reads bridge state back off the device (it is
+ * absent from FC=27 — see `liveConfigureAdapter`'s `outputBridged` note), so
+ * offering the toggle would mean changing a power amp's output topology with
+ * no way to confirm or even display that it happened. */
+const BRIDGE_UNAVAILABLE_REASON =
+  "Bridging isn't available for a live device yet — the amp doesn't report bridge state back, so the app can't show whether it took effect.";
 
 /** Colored sidebar spanning a bridged output pair's two rows — matches the
  * reference hardware view's rotated `{A}/{B}` `ON`/`OFF` bar. This app has
@@ -1123,19 +1282,23 @@ function BridgePairSidebar({
   leaderLetter,
   followerLetter,
   bridged,
+  disabled,
   onClick,
 }: {
   leaderLetter: string;
   followerLetter: string;
   bridged: boolean;
+  /** See `BridgeToggle` — same reason, same treatment. */
+  disabled?: boolean;
   onClick: () => void;
 }) {
-  return (
+  const bar = (
     <UnstyledButton
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
       w={28}
       bdrs="sm"
       bd={`1px solid ${bridged ? "var(--mantine-color-green-6)" : "var(--mantine-color-default-border)"}`}
+      className={disabled ? "cursor-not-allowed opacity-[0.45]" : undefined}
       style={{
         display: "flex",
         alignItems: "center",
@@ -1152,6 +1315,13 @@ function BridgePairSidebar({
         {leaderLetter}/{followerLetter} {bridged ? "ON" : "OFF"}
       </Text>
     </UnstyledButton>
+  );
+  return disabled ? (
+    <Tooltip label={BRIDGE_UNAVAILABLE_REASON} multiline w={240} withArrow position="right">
+      <div style={{ display: "flex" }}>{bar}</div>
+    </Tooltip>
+  ) : (
+    bar
   );
 }
 
@@ -1273,7 +1443,9 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
             </CenteredScrollPane>
           ) : (
             <CenteredScrollPane>
-              <Stack gap="md" className="min-w-0">
+              {/* Same centred, width-capped column as the Input tab — see
+               * OUTPUT_ROW_MAX_WIDTH. */}
+              <Stack gap="md" w="100%" maw={OUTPUT_ROW_MAX_WIDTH} mx="auto" className="min-w-0">
                 {channelPairs.map(([leader, follower]) => {
                   const bridged = Boolean(follower && (leader.outputBridged ?? false));
                   const row = (channel: AmpAssignment["channels"][number]) => (
@@ -1317,6 +1489,7 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
                         leaderLetter={letterLabel(leader)}
                         followerLetter={letterLabel(follower)}
                         bridged={bridged}
+                        disabled={!actions.setOutputBridge}
                         onClick={() => handleBridgeToggle(leader.channelIndex, !bridged)}
                       />
                       <Stack gap="md" className="flex-1 min-w-0">
@@ -1456,6 +1629,7 @@ const FILTER_FIELD_FLEX = { flex: "1 1 120px" } as const;
 
 function SpeakerConfigurationTab({
   assignment,
+  actions,
   project: projectProp,
   speakers,
   onSpeakersUpdate,
@@ -1735,8 +1909,13 @@ function SpeakerConfigurationTab({
     );
   }
 
+  // `actions.setOutputBridge` is part of the condition, not just the pair
+  // geometry: without it the toggle would accept clicks and drop them. In
+  // Direct Edit mode it is deliberately undefined — see
+  // `BRIDGE_UNAVAILABLE_REASON`.
   const canBridge = Boolean(
-    selectedGroup &&
+    actions.setOutputBridge &&
+      selectedGroup &&
       selectedGroup.channelIndexes.length === 1 &&
       selectedGroup.leaderChannelIndex % 2 === 0 &&
       assignment.channels.some((c) => c.channelIndex === selectedGroup.leaderChannelIndex + 1),
@@ -2329,6 +2508,252 @@ function RoutingTab({
   );
 }
 
+/** True for a slot the device reports as unused. The FC=59 list parser
+ * returns every slot verbatim (empty/`"null"` filtering is explicitly a UI
+ * concern, see `parse_preset_list`), and the device spells "unused" two
+ * different ways depending on whether the slot was never written or was
+ * cleared, so both collapse to the same empty state here. */
+function isEmptySlot(name: string): boolean {
+  const trimmed = name.trim();
+  return trimmed.length === 0 || trimmed.toLowerCase() === "null";
+}
+
+/** Row-density sibling of `StatEditorTile` — same bordered value/label box,
+ * same corner-chevron affordance for "this opens something", same accent
+ * rules, just sized to sit in a list row rather than a channel strip. The
+ * preset tab briefly used bare `ActionIcon`s here, which de-cluttered the
+ * 40-slot list but stopped looking like the rest of the app; this keeps the
+ * strip's vocabulary at a size 40 rows can carry. */
+function PresetActionTile({
+  label,
+  icon,
+  accent,
+  opens,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  /** Set to tint the tile — used for the destructive Store action, matching
+   * the strips' rule that red means "this cuts or destroys something". */
+  accent?: string;
+  opens?: "popover";
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  const border = accent ?? "var(--mantine-color-default-border)";
+  return (
+    <UnstyledButton
+      onClick={onClick}
+      disabled={disabled}
+      className={`relative shrink-0 text-center transition-colors duration-150 ${STAT_TILE_FOCUS}`}
+      style={{
+        width: 58,
+        height: 38,
+        borderRadius: "var(--mantine-radius-sm)",
+        border: `1px solid ${border}`,
+        background: accent ? `color-mix(in srgb, ${accent} 10%, transparent)` : "transparent",
+        color: accent ?? "var(--mantine-color-text)",
+        cursor: "pointer",
+      }}
+    >
+      {opens === "popover" && (
+        <div className="pointer-events-none absolute right-[2px] top-[2px] opacity-40">
+          <ChevronRight size={9} style={{ transform: "rotate(90deg)" }} />
+        </div>
+      )}
+      <Stack gap={0} align="center" justify="center" h="100%">
+        {icon}
+        <Text fz={10} c="dimmed" lh={1.3}>
+          {label}
+        </Text>
+      </Stack>
+    </UnstyledButton>
+  );
+}
+
+/** One row of the preset list. Kept deliberately thin: with 40 slots, a
+ * card per preset put ~80 labelled buttons on screen at once, which read as
+ * a wall rather than a list you scan. Actions are icon-only with tooltips,
+ * and an empty slot renders no Recall control at all rather than a greyed
+ * one — on a mostly-empty device that alone removes most of the clutter.
+ *
+ * Store is the destructive half (it overwrites the slot with the amp's
+ * current DSP state, and the wire protocol offers no undo), so it never
+ * fires straight from the row — it opens a popover that names the slot,
+ * warns when it is about to overwrite, and requires a second click. */
+function PresetSlotRow({
+  slot,
+  isActive,
+  storeOpened,
+  onStoreOpenChange,
+  onRecall,
+  onStore,
+}: {
+  slot: PresetSlot;
+  isActive: boolean;
+  storeOpened: boolean;
+  onStoreOpenChange: (opened: boolean) => void;
+  onRecall: () => void;
+  onStore: (name: string) => Promise<void>;
+}) {
+  const empty = isEmptySlot(slot.name);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function commitStore() {
+    const trimmed = draft.trim();
+    if (trimmed.length === 0) return;
+    setSaving(true);
+    await onStore(trimmed);
+    setSaving(false);
+    onStoreOpenChange(false);
+  }
+
+  return (
+    <Group
+      gap="sm"
+      wrap="nowrap"
+      px="xs"
+      py={5}
+      // Empty slots recede and lift on hover — the same treatment bypassed
+      // columns get in the EQ strip, so "present but not doing anything"
+      // looks the same everywhere in the app.
+      className={`min-w-0 transition-opacity duration-150 ${empty ? "opacity-[0.55] hover:opacity-100" : ""}`}
+      style={{
+        borderTop: "1px solid var(--mantine-color-default-border)",
+        // A left accent bar rather than a full border/fill — at row density a
+        // boxed highlight fights the divider lines, a bar just marks the row.
+        borderLeft: `2px solid ${isActive ? "var(--mantine-color-green-6)" : "transparent"}`,
+        background: isActive ? "color-mix(in srgb, var(--mantine-color-green-light) 25%, transparent)" : undefined,
+      }}
+    >
+      {/* Monospace and zero-padded so the numbers form a straight column
+       * down the list instead of drifting between 1 and 40. */}
+      <Text size="xs" fw={700} ff="monospace" c="dimmed" className="shrink-0">
+        {String(slot.index + 1).padStart(2, "0")}
+      </Text>
+      <Text
+        size="sm"
+        truncate
+        c={empty ? "dimmed" : undefined}
+        fs={empty ? "italic" : undefined}
+        fw={isActive ? 600 : 400}
+        className="min-w-0 flex-1"
+        title={empty ? undefined : slot.name}
+      >
+        {empty ? "Empty" : slot.name}
+      </Text>
+      {isActive && (
+        <Badge size="xs" color="green" variant="light" className="shrink-0">
+          Active
+        </Badge>
+      )}
+      <Group gap={6} wrap="nowrap" className="shrink-0">
+        {/* Nothing to recall from an empty slot. The tile is omitted rather
+         * than disabled, so 29 empty rows do not each carry a dead control —
+         * the spacer keeps Store in one straight column regardless. */}
+        {empty ? (
+          <div style={{ width: 58 }} className="shrink-0" />
+        ) : (
+          <Tooltip label={`Recall "${slot.name}"`} openDelay={400} withArrow>
+            <div>
+              <PresetActionTile label="Recall" icon={<ArrowDownToLine size={14} />} onClick={onRecall} />
+            </div>
+          </Tooltip>
+        )}
+        <Popover
+          opened={storeOpened}
+          onChange={onStoreOpenChange}
+          position="bottom-end"
+          withArrow
+          shadow="md"
+          width={240}
+          trapFocus
+        >
+          <Popover.Target>
+            <div>
+              <PresetActionTile
+                label="Store"
+                icon={<ArrowUpFromLine size={14} />}
+                opens="popover"
+                // Occupied slots tint red: storing overwrites them, and red
+                // carries the same "this destroys something" meaning it does
+                // on the channel strips.
+                accent={empty ? undefined : "var(--mantine-color-red-6)"}
+                onClick={() => {
+                  setDraft(empty ? "" : slot.name);
+                  onStoreOpenChange(!storeOpened);
+                }}
+              />
+            </div>
+          </Popover.Target>
+          <Popover.Dropdown>
+            <Stack gap="sm">
+              <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
+                Store to slot {slot.index + 1}
+              </Text>
+              <Text size="xs" c="dimmed">
+                {empty ? (
+                  "Saves the amp's current settings into this slot."
+                ) : (
+                  <>
+                    Overwrites <b>{slot.name}</b> with the amp&apos;s current settings. This cannot be undone.
+                  </>
+                )}
+              </Text>
+              <TextInput
+                size="sm"
+                data-autofocus
+                placeholder="Preset name"
+                value={draft}
+                maxLength={PRESET_NAME_MAX_LEN}
+                onChange={(e) => setDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitStore();
+                }}
+              />
+              <Text size="xs" c="dimmed" ta="right">
+                {draft.length}/{PRESET_NAME_MAX_LEN}
+              </Text>
+              <Button
+                size="xs"
+                color={empty ? undefined : "red"}
+                loading={saving}
+                disabled={draft.trim().length === 0}
+                onClick={commitStore}
+              >
+                {empty ? "Save preset" : "Overwrite"}
+              </Button>
+            </Stack>
+          </Popover.Dropdown>
+        </Popover>
+      </Group>
+    </Group>
+  );
+}
+
+/** Mirrors the device's own 32-byte ASCII name field, which
+ * `live_control_store_preset` rejects anything longer than. Capping the
+ * input means the user never types a name the command will refuse. */
+const PRESET_NAME_MAX_LEN = 32;
+
+/** Slot-state filter options. Defaults to "used" only: a device exposes 40
+ * slots but typically has a handful written, so an unfiltered list is mostly
+ * empty rows. Clearing the filter entirely shows everything, following the
+ * usual convention that no selection means no filter — otherwise clearing it
+ * would leave a blank list that reads as broken. */
+const PRESET_FILTER_OPTIONS = [
+  { value: "used", label: "Used" },
+  { value: "empty", label: "Empty" },
+];
+const PRESET_FILTER_DEFAULT = ["used"];
+
+/** Wide enough for a full 32-character preset name plus its two action
+ * tiles, and no wider. The header shares the cap so the Refresh button sits
+ * over the list rather than a screen away from it on a wide window. */
+const PRESET_LIST_MAX_WIDTH = 620;
+
 /** FC=59 preset browser — fetch-on-demand (mount + manual Refresh) rather
  * than the continuous-poll pattern other tabs use, since preset names
  * change rarely (see `useLivePresets`). Deliberately not a
@@ -2337,7 +2762,9 @@ function RoutingTab({
  * dependency, so it only needs `deviceId`/`firmwareFamily` (see the
  * special-cased branch in `AmpConfigureView`'s render loop below). */
 function PresetConfigurationTab({ deviceId, firmwareFamily }: { deviceId?: string; firmwareFamily?: string | null }) {
-  const { presets, loading, refresh, recall } = useLivePresets(deviceId);
+  const { presets, loading, refresh, recall, store } = useLivePresets(deviceId);
+  const [storeOpenFor, setStoreOpenFor] = useState<number | null>(null);
+  const [slotFilter, setSlotFilter] = useState<string[]>(PRESET_FILTER_DEFAULT);
 
   if (!deviceId) {
     return (
@@ -2359,48 +2786,80 @@ function PresetConfigurationTab({ deviceId, firmwareFamily }: { deviceId?: strin
     );
   }
 
+  const slots = presets?.slots ?? [];
+  const usedCount = slots.filter((slot) => !isEmptySlot(slot.name)).length;
+  const visibleSlots =
+    slotFilter.length === 0
+      ? slots
+      : slots.filter((slot) => slotFilter.includes(isEmptySlot(slot.name) ? "empty" : "used"));
+  const hiddenCount = slots.length - visibleSlots.length;
+
   return (
-    <Stack p="md" gap="md" h="100%" className="min-w-0">
+    <Stack p="md" gap="md" h="100%" w="100%" maw={PRESET_LIST_MAX_WIDTH} mx="auto" className="min-w-0">
       <Group justify="space-between" wrap="wrap" gap="xs">
-        <Text fw={600}>Preset Configuration</Text>
-        <Button size="xs" leftSection={<RefreshCw size={14} />} loading={loading} onClick={refresh}>
-          Refresh
-        </Button>
+        <div className="min-w-0">
+          <Text fw={600}>Preset Configuration</Text>
+          <Text size="xs" c="dimmed">
+            {slots.length === 0
+              ? "No preset data yet"
+              : `${usedCount} of ${slots.length} slots used${
+                  presets?.activePresetName && !isEmptySlot(presets.activePresetName)
+                    ? ` — "${presets.activePresetName}" active`
+                    : ""
+                }${hiddenCount > 0 ? ` — ${hiddenCount} hidden` : ""}`}
+          </Text>
+        </div>
+        <Group gap="xs" wrap="nowrap">
+          <MultiSelect
+            size="xs"
+            w={168}
+            data={PRESET_FILTER_OPTIONS}
+            value={slotFilter}
+            onChange={setSlotFilter}
+            placeholder={slotFilter.length === 0 ? "All slots" : undefined}
+            aria-label="Filter slots by state"
+            clearable
+            hidePickedOptions={false}
+            comboboxProps={{ withinPortal: true }}
+          />
+          <Button size="xs" variant="default" leftSection={<RefreshCw size={14} />} loading={loading} onClick={refresh}>
+            Refresh
+          </Button>
+        </Group>
       </Group>
+      {slots.length === 0 && !loading && (
+        <Text c="dimmed" size="sm">
+          No preset data yet — click Refresh.
+        </Text>
+      )}
+      {slots.length > 0 && visibleSlots.length === 0 && (
+        <Text c="dimmed" size="sm">
+          No slots match the current filter.
+        </Text>
+      )}
+      {/* A single column capped in width: preset names are short, so letting
+       * rows run the full width of a maximised window would strand the
+       * actions a screen away from the name they belong to. Rows are divided
+       * by hairlines rather than each being boxed. */}
       <ScrollArea className="flex-1">
-        <Stack gap="xs">
-          {!presets && !loading && (
-            <Text c="dimmed" size="sm">
-              No preset data yet — click Refresh.
-            </Text>
-          )}
-          {(presets?.slots ?? []).map((slot) => {
-            const isEmpty = !slot.name || slot.name.toLowerCase() === "null";
-            const isActive = !isEmpty && presets?.activePresetName === slot.name;
-            return (
-              <Group
-                key={slot.index}
-                justify="space-between"
-                wrap="wrap"
-                gap="xs"
-                p="xs"
-                style={{ border: "1px solid var(--mantine-color-default-border)", borderRadius: 4 }}
-              >
-                <Text c={isEmpty ? "dimmed" : undefined}>{isEmpty ? "(empty)" : slot.name}</Text>
-                <Group gap="xs">
-                  {isActive && (
-                    <Badge color="green" variant="light">
-                      Active
-                    </Badge>
-                  )}
-                  <Button size="xs" variant="light" disabled={isEmpty} onClick={() => recall(slot.index)}>
-                    Recall
-                  </Button>
-                </Group>
-              </Group>
-            );
-          })}
-        </Stack>
+        <div
+          className="min-w-0"
+          style={{ borderBottom: visibleSlots.length > 0 ? "1px solid var(--mantine-color-default-border)" : undefined }}
+        >
+          {visibleSlots.map((slot) => (
+            <PresetSlotRow
+              key={slot.index}
+              slot={slot}
+              isActive={!isEmptySlot(slot.name) && presets?.activePresetName === slot.name}
+              storeOpened={storeOpenFor === slot.index}
+              onStoreOpenChange={(opened) => setStoreOpenFor(opened ? slot.index : null)}
+              onRecall={() => recall(slot.index)}
+              onStore={async (name) => {
+                await store(slot.index, name);
+              }}
+            />
+          ))}
+        </div>
       </ScrollArea>
     </Stack>
   );
@@ -2418,13 +2877,16 @@ const TAB_COMPONENTS: Record<
 
 export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const ampModel = source?.ampModel;
+  // Bridge state rides its own FC=50 poll rather than the FC=27 snapshot the
+  // rest of the live view model comes from — see `live/cvr/bridge.rs`.
+  const liveBridge = useLiveBridge(source?.kind === "live" ? source.device.id : undefined);
   const liveChannelCount =
     source?.kind === "live" ? source.device.outputChannels || DEFAULT_CHANNEL_COUNT : DEFAULT_CHANNEL_COUNT;
   const assignment: AmpAssignment | undefined =
     source?.kind === "project"
       ? source.assignment
       : source?.kind === "live"
-        ? buildLiveAssignmentViewModel(source.device, source.channelConfig, liveChannelCount)
+        ? buildLiveAssignmentViewModel(source.device, source.channelConfig, liveChannelCount, liveBridge)
         : undefined;
   const firmwareVersion =
     source?.kind === "project" ? (source.assignment.firmwareVersion ?? null) : source?.kind === "live" ? source.device.firmwareVersion : null;

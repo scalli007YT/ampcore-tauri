@@ -155,6 +155,95 @@ pub fn build_set_eq_q(
     }
 }
 
+pub fn build_set_matrix_crosspoint(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    source_index: u8,
+    gain_db: f32,
+    active: bool,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active)),
+        Some("1.1.9") => Some(super::write_v119::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active)),
+        _ => None,
+    }
+}
+
+/// `threshold_dbu` is ignored on 1.1.8, whose wire body carries only the
+/// enable flag — see `write_v118::build_set_noise_gate`.
+pub fn build_set_noise_gate(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    enabled: bool,
+    threshold_dbu: i8,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_noise_gate(channel_index, enabled)),
+        Some("1.1.9") => Some(super::write_v119::build_set_noise_gate(channel_index, enabled, threshold_dbu)),
+        _ => None,
+    }
+}
+
+pub fn build_set_rms_limiter(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    enabled: bool,
+    threshold_vrms: f32,
+    attack_ms: u16,
+    release_multiplier: u8,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_rms_limiter(channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)),
+        Some("1.1.9") => Some(super::write_v119::build_set_rms_limiter(channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)),
+        _ => None,
+    }
+}
+
+pub fn build_set_peak_limiter(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    enabled: bool,
+    threshold_vp: f32,
+    hold_ms: u16,
+    release_ms: u16,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_peak_limiter(channel_index, enabled, threshold_vp, hold_ms, release_ms)),
+        Some("1.1.9") => Some(super::write_v119::build_set_peak_limiter(channel_index, enabled, threshold_vp, hold_ms, release_ms)),
+        _ => None,
+    }
+}
+
+pub fn build_set_channel_name(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    in_out_flag: u8,
+    name: &str,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_channel_name(channel_index, in_out_flag, name)),
+        Some("1.1.9") => Some(super::write_v119::build_set_channel_name(channel_index, in_out_flag, name)),
+        _ => None,
+    }
+}
+
+pub fn build_set_source_select(firmware_family: Option<&str>, channel_index: u8, source_code: u8) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_source_select(channel_index, source_code)),
+        Some("1.1.9") => Some(super::write_v119::build_set_source_select(channel_index, source_code)),
+        _ => None,
+    }
+}
+
+/// `pair_index`, not a channel index — see `write_v118::build_set_output_bridge`.
+pub fn build_set_output_bridge(firmware_family: Option<&str>, pair_index: u8, bridged: bool) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_output_bridge(pair_index, bridged)),
+        Some("1.1.9") => Some(super::write_v119::build_set_output_bridge(pair_index, bridged)),
+        _ => None,
+    }
+}
+
 /// Fixed 10-byte follow-up packet the device expects after any crossover
 /// (HP/LP) FILTER_TYPE/FILTER_FREQ write before the change takes effect —
 /// reverse-engineered by the reference implementation (`amp-device.ts`'s

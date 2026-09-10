@@ -204,6 +204,83 @@ export const commands = {
 	 */
 	liveControlRecallPreset: (deviceId: string, slotIndex: number) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_recall_preset", { deviceId, slotIndex })),
 	/**
+	 *  FC=59 mode=1 store — writes the device's *current* DSP state into
+	 *  `slot_index` under `name`. Note the asymmetry with recall: the wire
+	 *  protocol carries only the name, never parameter data (see `preset.rs`),
+	 *  so this saves whatever the amp is doing right now rather than pushing
+	 *  anything from the app.
+	 * 
+	 *  Rejects a name the device cannot round-trip: `decode_name_field` reads
+	 *  slot names back as a null-terminated ASCII field, so an embedded NUL
+	 *  would silently truncate the stored name and non-ASCII bytes would come
+	 *  back mangled. Empty names are rejected too — the list parser has no way
+	 *  to distinguish one from an unused slot.
+	 */
+	liveControlStorePreset: (deviceId: string, slotIndex: number, name: string) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_store_preset", { deviceId, slotIndex, name })),
+	/**
+	 *  Snapshot getter for FC=50 bridge state — no wire I/O, just whatever the
+	 *  driver's bridge poll tick last stored. Mirrors
+	 *  `live_control_get_presets`; the continuous push side is the
+	 *  `live_bridge:updated` event.
+	 */
+	liveControlGetBridge: () => typedError<DeviceBridge[], AppError>(__TAURI_INVOKE("live_control_get_bridge")),
+	/**
+	 *  FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
+	 *  is filled from the crosspoint's current state, since the wire packet has
+	 *  no partial form (see `current_channel`).
+	 */
+	liveControlSetMatrixCrosspoint: (deviceId: string, channelIndex: number, sourceIndex: number, gainDb: number | null, active: boolean | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_matrix_crosspoint", { deviceId, channelIndex, sourceIndex, gainDb, active })),
+	/**
+	 *  FC=69 NOISE_GATE. `threshold_dbu` is only carried on 1.1.9+ — on 1.1.8 the
+	 *  wire body is the enable flag alone, matching
+	 *  `CvrFirmwareCapability.noise_gate_threshold`.
+	 */
+	liveControlSetChannelNoiseGate: (deviceId: string, channelIndex: number, enabled: boolean, thresholdDbu: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_noise_gate", { deviceId, channelIndex, enabled, thresholdDbu })),
+	/**
+	 *  FC=55 RMS_LIMITER / FC=54 PEAK_LIMITER. Takes the same `LimiterPatch` the
+	 *  project-mode command does, and sends one packet per stage the patch
+	 *  actually touches — a patch that only changes an RMS field leaves the peak
+	 *  stage alone rather than rewriting it.
+	 * 
+	 *  Each stage is a whole-record write, so the fields the patch omits come
+	 *  from the current snapshot (see `current_channel`).
+	 */
+	liveControlSetChannelLimiter: (deviceId: string, channelIndex: number, patch: LimiterPatch) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_limiter", { deviceId, channelIndex, patch })),
+	/**
+	 *  FC=77 SPEAKER_NAME. `direction` picks which side of the channel is
+	 *  renamed — the only wire difference is `in_out_flag`.
+	 * 
+	 *  Clearing a name (`None`) writes an all-zero field, which is how the read
+	 *  side already decodes "unnamed" (`decode_name_field` stops at the first
+	 *  NUL). Same ASCII/length rules as the preset store, against the channel
+	 *  field's narrower 16-byte width.
+	 */
+	liveControlSetChannelName: (deviceId: string, channelIndex: number, direction: EqDirection, name: string | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_name", { deviceId, channelIndex, direction, name })),
+	/**
+	 *  FC=11 SOURCE_SELECT. Only the source *kind* is on the wire; the positional
+	 *  `index` the app tracks alongside it has no FC=11 equivalent, so it is not
+	 *  accepted here rather than silently ignored.
+	 * 
+	 *  `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
+	 *  see `channel_config_v118::source`), not something FC=11 selects — the
+	 *  reference's own comment notes backup is driven by the priority/auto-source
+	 *  controls (FC=80), which is Tier B.
+	 */
+	liveControlSetChannelSource: (deviceId: string, channelIndex: number, kind: SourceKind) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_source", { deviceId, channelIndex, kind })),
+	/**
+	 *  FC=50 BRIDGE. `channel_index` is the bridged pair's **leader channel**,
+	 *  keeping this command's signature identical to the project-mode
+	 *  `projects_set_output_bridge` so `ConfigureActions` needs no per-source
+	 *  branching.
+	 * 
+	 *  The wire, however, addresses **pairs** (0 = A/B, 1 = C/D), so the
+	 *  conversion happens right here at the boundary. Passing the leader channel
+	 *  through unconverted is what made bridging work for A/B and silently do
+	 *  nothing for C/D — channel 2 became `chx=2`, which the device does not
+	 *  recognise as a pair.
+	 */
+	liveControlSetOutputBridge: (deviceId: string, channelIndex: number, bridged: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_output_bridge", { deviceId, channelIndex, bridged })),
+	/**
 	 *  Returns once the device has ACKed the write at the transport level (see
 	 *  `write.rs`'s `send_control`), or errors if it never does — delivery is
 	 *  confirmed, but not that the device applied the value. The next FC=27 poll
@@ -749,6 +826,30 @@ export type CvrFirmwareCapability = {
 };
 
 /**
+ *  Event/command payload pairing a device id with its latest FC=59 preset
+ *  snapshot — the shape `live_presets:updated` emits and
+ *  `live_control_get_presets` returns a snapshot `Vec` of.
+ *  Event/command payload pairing a device id with its latest FC=50 bridge
+ *  snapshot — the shape `live_bridge:updated` emits and
+ *  `live_control_get_bridge` returns a `Vec` of.
+ */
+export type DeviceBridge = {
+	deviceId: string,
+	bridge: DeviceBridgeSnapshot,
+};
+
+export type DeviceBridgeSnapshot = {
+	/**
+	 *  Indexed by pair — `bridged[0]` is outputs A/B, `bridged[1]` is C/D.
+	 *  A pair the device has not answered for yet is `None` rather than
+	 *  `false`, so "not reported" never renders as a confident "not
+	 *  bridged".
+	 */
+	bridged: (boolean | null)[],
+	receivedAt: number | null,
+};
+
+/**
  *  Event/command payload pairing a device id with its latest channel-config
  *  snapshot — the shape `live_channel_config:updated` emits and
  *  `live_control_get_channel_config` returns a snapshot `Vec` of.
@@ -780,11 +881,6 @@ export type DeviceModelLink = {
 	updatedAt: number | null,
 };
 
-/**
- *  Event/command payload pairing a device id with its latest FC=59 preset
- *  snapshot — the shape `live_presets:updated` emits and
- *  `live_control_get_presets` returns a snapshot `Vec` of.
- */
 export type DevicePresets = {
 	deviceId: string,
 	presets: DevicePresetsSnapshot,

@@ -88,6 +88,35 @@ export function useLivePresets(deviceId: string | undefined) {
     [deviceId],
   );
 
+  /** Saves the device's *current* DSP state into `slotIndex` under `name`.
+   * Unlike `recall`, this refreshes afterwards: storing renames the slot, so
+   * the list the user is looking at is stale the moment the write lands and
+   * there is no background poll for FC=59 to correct it. */
+  const store = useCallback(
+    async (slotIndex: number, name: string) => {
+      if (!deviceId) return false;
+      const result = await commands.liveControlStorePreset(deviceId, slotIndex, name);
+      if (result.status === "error") {
+        notifications.show({
+          color: "red",
+          title: "Preset store failed",
+          message: result.error.message,
+          autoClose: false,
+        });
+        return false;
+      }
+      showRollingNotification("preset-store", {
+        color: "green",
+        title: "Preset stored",
+        message: `"${name}" saved to slot ${slotIndex + 1}`,
+        autoClose: 1500,
+      });
+      await refresh();
+      return true;
+    },
+    [deviceId, refresh],
+  );
+
   useEffect(() => {
     refresh();
   }, [deviceId]);
@@ -97,5 +126,6 @@ export function useLivePresets(deviceId: string | undefined) {
     loading,
     refresh,
     recall,
+    store,
   };
 }
