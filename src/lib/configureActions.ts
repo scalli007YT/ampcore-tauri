@@ -17,11 +17,10 @@ import {
  * `liveConfigureAdapter.ts`). Optional members mean "not available for this
  * source", signalled by plain `undefined` — call sites early-return on it.
  *
- * As of the 1.1.8 Tier-A pass the only members Direct Edit mode still leaves
- * undefined are the three genuinely Project-only planning concepts
- * (`setChannelSpeaker`, `setOutputJoin`, `setChannelOhms` — gated as a group
- * by `ConfigureCapabilities` so they explain themselves rather than sitting
- * inert). Every other member now has a live wire command; FIR is the one
+ * As of the 1.1.8 Tier-A pass the only member Direct Edit mode still leaves
+ * undefined is `setChannelOhms` — a Project-only concept, gated by
+ * `ConfigureCapabilities.ohmsEditable` so it explains itself rather than
+ * sitting inert. Every other member has a live wire command; FIR is the one
  * remaining device feature with no action here at all, and its tab says so
  * explicitly instead of offering dead controls.
  *
@@ -60,24 +59,17 @@ export interface ConfigureActions {
   setEqBand?(channelIndex: number, direction: EqDirection, bandIndex: number, patch: EqBandPatch): Promise<void>;
   setChannelLimiter?(channelIndex: number, patch: LimiterPatch): Promise<void>;
   setChannelNoiseGate?(channelIndex: number, enabled: boolean, thresholdDbu: number): Promise<void>;
-  setChannelSpeaker?(channelIndex: number, speakerLibraryId: string | null, wayIndex: number | null): Promise<void>;
-  setOutputJoin?(channelIndexes: number[], joined: boolean): Promise<void>;
   setChannelOhms?(channelIndex: number, ohms: number): Promise<void>;
 }
 
 /** Affordances that are conceptually Project-only (no live-device
- * equivalent exists at all, not just "not implemented yet") — gates whole
- * panels (Speaker Configuration, Join, the Limiter tab's Ohms field) with an
- * explanatory note rather than a silently-inert control. */
+ * equivalent exists at all, not just "not implemented yet") — today just the
+ * Limiter tab's Ohms field, rendered disabled rather than silently inert. */
 export interface ConfigureCapabilities {
-  speakerPlanning: boolean;
-  outputJoin: boolean;
   ohmsEditable: boolean;
 }
 
 export const PROJECT_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
-  speakerPlanning: true,
-  outputJoin: true,
   ohmsEditable: true,
 };
 
@@ -180,20 +172,6 @@ export function createProjectConfigureActions(
         enabled,
         thresholdDbu,
       );
-      if (result.status === "ok") onProjectUpdate(result.data);
-    },
-    async setChannelSpeaker(channelIndex, speakerLibraryId, wayIndex) {
-      const result = await commands.projectsSetChannelSpeaker(
-        projectId,
-        assignmentId,
-        channelIndex,
-        speakerLibraryId,
-        wayIndex,
-      );
-      if (result.status === "ok") onProjectUpdate(result.data);
-    },
-    async setOutputJoin(channelIndexes, joined) {
-      const result = await commands.projectsSetOutputJoin(projectId, assignmentId, channelIndexes, joined);
       if (result.status === "ok") onProjectUpdate(result.data);
     },
     async setChannelOhms(channelIndex, ohms) {

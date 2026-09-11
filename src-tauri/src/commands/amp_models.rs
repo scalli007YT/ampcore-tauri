@@ -55,7 +55,7 @@ pub fn amp_models_update(
     Ok(entry)
 }
 
-/// Soft-delete — see SpeakerLibraryEntry.archived for rationale.
+/// Soft-delete — see `AmpModelCatalogEntry.archived` for rationale.
 #[tauri::command]
 #[specta::specta]
 pub fn amp_models_archive(app: AppHandle, state: State<ProjectDataState>, id: String) -> Result<(), AppError> {

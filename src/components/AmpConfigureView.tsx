@@ -1,6 +1,5 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import {
-  ActionIcon,
   Badge,
   Button,
   Center,
@@ -16,7 +15,6 @@ import {
   Skeleton,
   Stack,
   Switch,
-  Table,
   Tabs,
   Text,
   TextInput,
@@ -29,26 +27,20 @@ import {
   ArrowUpFromLine,
   ChevronRight,
   FlipVertical2,
-  Link2,
   RefreshCw,
   Route,
-  Speaker,
   ShieldAlert,
   SlidersHorizontal,
   Volume2,
   VolumeX,
   Waves,
-  X,
 } from "lucide-react";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { EqEditor } from "./EqEditor";
 import { LimiterEditor } from "./LimiterEditor";
-import { LoadSpeakerConfigDialog } from "./LoadSpeakerConfigDialog";
-import { SpeakerFormModal } from "./SpeakerFormModal";
 import { DEFAULT_LEVEL_GRADIENT, VuMeter, type VuMeterMark } from "./VuMeter";
 import { useLiveBridge } from "../hooks/useLiveBridge";
 import { useLivePresets } from "../hooks/useLivePresets";
-import { useIsCompact } from "../lib/breakpoints";
 import {
   commands,
   type AmpAssignment,
@@ -63,7 +55,6 @@ import {
   type Project,
   type SourceChannelCount,
   type SourceKind,
-  type SpeakerLibraryEntry_Serialize as SpeakerLibraryEntry,
   type Telemetry,
 } from "../lib/bindings";
 import { channelTelemetry, type ChannelTelemetry } from "../lib/channelTelemetry";
@@ -118,12 +109,6 @@ const TABS = [
   { value: "output", label: "Output", icon: ArrowUpFromLine, skeleton: "list" },
   { value: "routing", label: "Routing", icon: Route, skeleton: "grid" },
   {
-    value: "speakerConfiguration",
-    label: "Speaker Configuration",
-    icon: Speaker,
-    skeleton: "list",
-  },
-  {
     value: "presetConfiguration",
     label: "Preset Configuration",
     icon: SlidersHorizontal,
@@ -142,7 +127,7 @@ const TABS = [
  * at all (FC=59 is a live wire-protocol feature, not model-catalog-driven),
  * so it's special-cased in the render loop below instead of going through
  * the capability-gated dispatch every other tab here shares. */
-const CONFIGURABLE_TABS = new Set(["input", "output", "routing", "speakerConfiguration"]);
+const CONFIGURABLE_TABS = new Set(["input", "output", "routing"]);
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
   analog: "Analog",
@@ -303,16 +288,6 @@ interface ConfigurableTabProps {
    * array (a firmware whose packet carries fewer channels than the model's
    * topology) degrades to `null`/unlit instead of `0`. */
   telemetry?: Telemetry;
-  /** Every Speaker Library entry (including archived ones — see
-   * `formatSpeakerAssignment`), fetched once by `AmpConfigureView` and
-   * shared across every tab rather than each tab re-fetching its own copy
-   * (mirrors how `capability` is fetched once and shared). */
-  speakers: SpeakerLibraryEntry[];
-  /** Refreshes the shared `speakers` list — used by the Speaker
-   * Configuration tab's Library panel (Add/Edit/Archive/Refresh), which
-   * absorbs full Speaker Library CRUD now that the standalone top-level
-   * Speaker Library tab is gone. */
-  onSpeakersUpdate: (speakers: SpeakerLibraryEntry[]) => void;
   /** Every mutation a tab can make, targeting either a Project or a live
    * device — see `configureActions.ts`. Fields with no write support for
    * the current source (Project-only concepts, or live writes not built
@@ -320,91 +295,6 @@ interface ConfigurableTabProps {
    * return;` rather than assuming every field is always writable. */
   actions: ConfigureActions;
   capabilities: ConfigureCapabilities;
-  /** Only defined for a `"project"` source. The Speaker Configuration tab
-   * (Project-only — not rendered for a `"live"` source, see the tab-list
-   * filter in `AmpConfigureView`) uses these directly rather than through
-   * `actions`, since its Join/Bridge/cascade-refresh logic doesn't map onto
-   * the generic per-field action shape. */
-  project?: Project;
-  onProjectUpdate?: (project: Project) => void;
-}
-
-/** "Brand Model — WayLabel" for a channel's speaker assignment — shared by
- * the Speaker Configuration tab's own tile and the Output tab so the
- * resolution logic (including the single-way-speaker
- * suffix-omission rule) isn't duplicated. Resolves against the *full*
- * speaker list (archived included) so an assignment made before a speaker
- * was archived still displays correctly instead of going blank. */
-export function formatSpeakerAssignment(
-  speakers: SpeakerLibraryEntry[],
-  speakerLibraryId: string | null | undefined,
-  wayIndex: number | null | undefined,
-): string {
-  if (!speakerLibraryId) return "No speaker";
-  const speaker = speakers.find((s) => s.id === speakerLibraryId);
-  if (!speaker) return "No speaker";
-  const name = `${speaker.brand} ${speaker.model}`;
-  if (speaker.ways.length <= 1) return name;
-  const way = speaker.ways[wayIndex ?? 0];
-  return way ? `${name} — ${way.label}` : name;
-}
-
-/** One row of the Speaker Configuration tab's Physical Outputs panel — a
- * single channel, or an explicitly-Joined multi-channel group (see
- * `AmpChannel.joinGroupId`). */
-interface SpeakerOutputGroup {
-  leaderChannelIndex: number;
-  channelIndexes: number[];
-  /** Resolved only when every member channel shares the same non-null
-   * `speakerLibraryId` with sequential `wayIndex`es (0, 1, 2…) — the common
-   * case (a drag-drop, or a fully-uniform Load). `null` for an unassigned
-   * channel/group. */
-  speaker: SpeakerLibraryEntry | null;
-  /** True when the group has >1 channel but its members do NOT share one
-   * uniform sequential assignment (e.g. an explicit Join whose channels
-   * hold different or partial speaker data) — rendered per-channel via
-   * `formatSpeakerAssignment` on every row instead of one group-wide
-   * label/way-list. */
-  mixed: boolean;
-}
-
-/** Derives `SpeakerOutputGroup`s from `assignment.channels` — grouping
- * itself is purely `joinGroupId`-adjacency (an explicit, persisted concept
- * set via `projectsSetOutputJoin`, independent of what's assigned to member
- * channels); whether a group happens to hold one uniform, sequential
- * speaker assignment (vs. a "mixed" one) is a separate, render-only
- * resolution layered on top. */
-function computeSpeakerGroups(
-  channels: AmpAssignment["channels"],
-  speakers: SpeakerLibraryEntry[],
-): SpeakerOutputGroup[] {
-  const raw: { leaderChannelIndex: number; channelIndexes: number[] }[] = [];
-  for (const channel of channels) {
-    const previous = raw[raw.length - 1];
-    const previousTailIndex = previous?.channelIndexes[previous.channelIndexes.length - 1];
-    const previousTail = channels.find((c) => c.channelIndex === previousTailIndex);
-    const continuesPrevious =
-      previous !== undefined && previousTail?.joinGroupId != null && channel.joinGroupId === previousTail.joinGroupId;
-    if (continuesPrevious) {
-      previous.channelIndexes.push(channel.channelIndex);
-    } else {
-      raw.push({ leaderChannelIndex: channel.channelIndex, channelIndexes: [channel.channelIndex] });
-    }
-  }
-  return raw.map((group) => resolveGroupSpeaker(group, channels, speakers));
-}
-
-function resolveGroupSpeaker(
-  group: { leaderChannelIndex: number; channelIndexes: number[] },
-  channels: AmpAssignment["channels"],
-  speakers: SpeakerLibraryEntry[],
-): SpeakerOutputGroup {
-  const members = group.channelIndexes.map((idx) => channels.find((c) => c.channelIndex === idx)!);
-  const first = members[0];
-  const speaker = speakers.find((s) => s.id === first.speakerLibraryId) ?? null;
-  const uniform =
-    speaker !== null && members.every((c, i) => c.speakerLibraryId === speaker.id && (c.wayIndex ?? 0) === i);
-  return { ...group, speaker: uniform ? speaker : null, mixed: group.channelIndexes.length > 1 && !uniform };
 }
 
 const METER_FLOOR_DB = -60;
@@ -1234,50 +1124,6 @@ function OutputChannelRow({
   );
 }
 
-/** Per-pair bridge toggle, shown between an output channel pair's leader and
- * follower rows. Same halved-green-tint active-state convention as
- * `ActiveStateButton` (EqEditor.tsx) / `OnOffButton` (LimiterEditor.tsx),
- * rather than inventing a third "on" visual language. */
-function BridgeToggle({
-  label,
-  bridged,
-  disabled,
-  onClick,
-}: {
-  label: string;
-  bridged: boolean;
-  /** No `setOutputBridge` for this source. Rendered visibly dead with a
-   * reason rather than accepting the click and dropping it — see
-   * `BRIDGE_UNAVAILABLE_REASON`. */
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  const button = (
-    <UnstyledButton
-      onClick={disabled ? undefined : onClick}
-      w="100%"
-      py={6}
-      bdrs="sm"
-      bd={`1px solid ${bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : "var(--mantine-color-default-border)"}`}
-      className={disabled ? "cursor-not-allowed opacity-[0.45]" : undefined}
-      style={{
-        backgroundColor: bridged ? "color-mix(in srgb, var(--mantine-color-green-light) 50%, transparent)" : undefined,
-      }}
-    >
-      <Text size="xs" fw={700} ta="center" c={bridged ? "green" : "dimmed"}>
-        {label} — {bridged ? "Bridged" : "Bridge"}
-      </Text>
-    </UnstyledButton>
-  );
-  return disabled ? (
-    <Tooltip label={BRIDGE_UNAVAILABLE_REASON} multiline w={240} withArrow>
-      <div>{button}</div>
-    </Tooltip>
-  ) : (
-    button
-  );
-}
-
 /** Shown on the bridge controls when the active source has no
  * `setOutputBridge`. Direct Edit mode is the case that matters: the write
  * command exists, but nothing reads bridge state back off the device (it is
@@ -1303,7 +1149,9 @@ function BridgePairSidebar({
   leaderLetter: string;
   followerLetter: string;
   bridged: boolean;
-  /** See `BridgeToggle` — same reason, same treatment. */
+  /** No `setOutputBridge` for this source. Rendered visibly dead with a
+   * reason rather than accepting the click and dropping it — see
+   * `BRIDGE_UNAVAILABLE_REASON`. */
   disabled?: boolean;
   onClick: () => void;
 }) {
@@ -1527,690 +1375,6 @@ function OutputTab({ assignment, capability, actions, capabilities, telemetry }:
           )}
         </div>
       </Stack>
-    </div>
-  );
-}
-
-export const SPEAKER_OUTPUT_LETTER = (channelIndex: number) => String.fromCharCode(65 + channelIndex);
-
-/** One channel's row in the Physical Outputs panel. Every channel gets its
- * own row (not one collapsed row per group) — a group's resolved speaker
- * name renders only on its leader row (blank on continuation rows, a
- * visual rowspan), while each row still shows its own way label. A thin
- * connector renders between two rows belonging to the same joined group
- * (see the caller). Click-to-select (for Split/Reset and Bridge, which act
- * on "the selected row"); a Library row can also be dragged directly onto
- * this row to assign it (native HTML5 drag-and-drop, matching the old
- * software), highlighted via the same amber-accent convention `ChannelRail`
- * uses for its active entry — drag-over uses the same highlight so the
- * drop target is unambiguous. */
-function PhysicalOutputChannelRow({
-  channel,
-  group,
-  speakers,
-  selected,
-  dragOver,
-  onSelect,
-  onEject,
-  onDragOver,
-  onDragLeave,
-  onDrop,
-}: {
-  channel: AmpAssignment["channels"][number];
-  group: SpeakerOutputGroup;
-  speakers: SpeakerLibraryEntry[];
-  selected: boolean;
-  dragOver: boolean;
-  onSelect: (e: React.MouseEvent) => void;
-  onEject: () => void;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: () => void;
-  onDrop: (e: React.DragEvent) => void;
-}) {
-  const isLeader = group.leaderChannelIndex === channel.channelIndex;
-  const positionInGroup = group.channelIndexes.indexOf(channel.channelIndex);
-  const wayLabel = group.speaker?.ways[positionInGroup]?.label ?? group.speaker?.ways[0]?.label ?? null;
-  const speakerLabel = isLeader && group.speaker ? `${group.speaker.brand} ${group.speaker.model}` : null;
-  // In a "mixed" group (an explicit Join whose members don't share one
-  // uniform sequential speaker), every row resolves and shows its own
-  // assignment instead of relying on a single group-wide label.
-  const ownLabel = group.mixed ? formatSpeakerAssignment(speakers, channel.speakerLibraryId, channel.wayIndex) : null;
-  const highlighted = selected || dragOver;
-  const canEject = group.speaker !== null || group.mixed || group.channelIndexes.length > 1;
-
-  return (
-    <UnstyledButton
-      onClick={onSelect}
-      onDragOver={(e) => {
-        e.preventDefault();
-        onDragOver(e);
-      }}
-      onDragLeave={onDragLeave}
-      onDrop={(e) => {
-        e.preventDefault();
-        onDrop(e);
-      }}
-      w="100%"
-      p={8}
-      bdrs="sm"
-      bd={`1px solid ${highlighted ? "var(--mantine-color-amber-filled)" : "var(--mantine-color-default-border)"}`}
-      style={{ backgroundColor: highlighted ? "var(--mantine-color-amber-light)" : undefined }}
-    >
-      <Group justify="space-between" wrap="nowrap" gap="xs">
-        <Text size="sm" c={speakerLabel || ownLabel ? undefined : "dimmed"} lineClamp={1} className="flex-1">
-          {speakerLabel ?? ownLabel ?? (isLeader ? "Speaker Model" : "")}
-        </Text>
-        <Text size="xs" c="dimmed" lineClamp={1} className="flex-1" ta="center">
-          {group.mixed ? "-" : (wayLabel ?? "-")}
-        </Text>
-        <Center w={22} h={22} bdrs="xl" bd="1px solid var(--mantine-color-default-border)" className="shrink-0">
-          <Text fz={10} fw={700}>
-            {SPEAKER_OUTPUT_LETTER(channel.channelIndex)}
-          </Text>
-        </Center>
-        {isLeader && canEject ? (
-          <ActionIcon
-            size="sm"
-            variant="subtle"
-            color="red"
-            onClick={(e) => {
-              e.stopPropagation();
-              onEject();
-            }}
-            aria-label={`Clear Out${SPEAKER_OUTPUT_LETTER(channel.channelIndex)}`}
-          >
-            <X size={12} />
-          </ActionIcon>
-        ) : (
-          <div style={{ width: 28 }} />
-        )}
-      </Group>
-    </UnstyledButton>
-  );
-}
-
-/** Drag payload MIME type used to drag a Library row onto a Physical
- * Outputs row — plain text carrying the speaker's id. */
-const SPEAKER_DRAG_MIME = "application/x-ampcore-speaker-id";
-
-/** Project-only — never rendered for a live-device source (see the tab-list
- * filter in `AmpConfigureView`), so `project`/`onProjectUpdate` are always
- * defined in practice despite being typed optional on `ConfigurableTabProps`
- * for the benefit of the other (dual-mode) tabs. */
-/** Grow-to-fill, but never below a readable width — `Group grow` alone
- * divides the row evenly no matter how narrow it gets, which turned the
- * four Library filters into unusable slivers on a small window. */
-const FILTER_FIELD_FLEX = { flex: "1 1 120px" } as const;
-
-function SpeakerConfigurationTab({
-  assignment,
-  actions,
-  project: projectProp,
-  speakers,
-  onSpeakersUpdate,
-  onProjectUpdate: onProjectUpdateProp,
-}: ConfigurableTabProps) {
-  const compact = useIsCompact();
-  const [selectedChannelIndexes, setSelectedChannelIndexes] = useState<number[]>([]);
-  const lastClickedChannelRef = useRef<number | null>(null);
-  const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
-  const [dragOverLeaderIndex, setDragOverLeaderIndex] = useState<number | null>(null);
-  const [brandFilter, setBrandFilter] = useState("");
-  const [familyFilter, setFamilyFilter] = useState("");
-  const [modelFilter, setModelFilter] = useState("");
-  const [waysFilter, setWaysFilter] = useState<string | null>("any");
-  const [formEntry, setFormEntry] = useState<SpeakerLibraryEntry | "new" | null>(null);
-  const [loadDialogOpen, setLoadDialogOpen] = useState(false);
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<"assign" | "split" | "join" | "bridge" | "archive" | "delete" | null>(
-    null,
-  );
-  const [actionError, setActionError] = useState<string | null>(null);
-
-  const groups = computeSpeakerGroups(assignment.channels, speakers);
-  const selectedGroups = groups.filter((g) => g.channelIndexes.some((idx) => selectedChannelIndexes.includes(idx)));
-  const selectedGroup = selectedGroups.length === 1 ? selectedGroups[0] : null;
-  const selectedLibraryEntry = speakers.find((s) => s.id === selectedLibraryId) ?? null;
-  const sortedSelection = [...selectedChannelIndexes].sort((a, b) => a - b);
-  const canJoin = sortedSelection.length >= 2 && sortedSelection.every((v, i) => i === 0 || v === sortedSelection[i - 1] + 1);
-
-  useEffect(() => {
-    setConfirmingDeleteId(null);
-  }, [selectedLibraryId]);
-
-  if (!projectProp || !onProjectUpdateProp) return null;
-  const project = projectProp;
-  const onProjectUpdate = onProjectUpdateProp;
-
-  async function refreshLibrary() {
-    const result = await commands.speakerLibraryList();
-    if (result.status === "ok") {
-      onSpeakersUpdate(result.data);
-    }
-  }
-
-  /** Expands a click on `channelIndex` to its whole current group — a plain
-   * click always selects the entire row it lands on. */
-  function expandToGroup(channelIndex: number): number[] {
-    return groups.find((g) => g.channelIndexes.includes(channelIndex))?.channelIndexes ?? [channelIndex];
-  }
-
-  /** Plain click selects the clicked row's whole group; ctrl/cmd-click
-   * toggles a group in/out of the selection; shift-click range-selects
-   * from the last-clicked channel. Feeds the Join/Split/Bridge actions and
-   * the Load dialog's implicit target set. */
-  function handleChannelClick(channelIndex: number, e: React.MouseEvent) {
-    const grouped = expandToGroup(channelIndex);
-    if (e.shiftKey) {
-      const anchor =
-        lastClickedChannelRef.current ?? selectedChannelIndexes[selectedChannelIndexes.length - 1] ?? channelIndex;
-      const lo = Math.min(anchor, channelIndex);
-      const hi = Math.max(anchor, channelIndex);
-      setSelectedChannelIndexes(Array.from({ length: hi - lo + 1 }, (_, i) => lo + i));
-      lastClickedChannelRef.current = channelIndex;
-      return;
-    }
-    if (e.ctrlKey || e.metaKey) {
-      const already = grouped.every((idx) => selectedChannelIndexes.includes(idx));
-      setSelectedChannelIndexes(
-        already
-          ? selectedChannelIndexes.filter((idx) => !grouped.includes(idx))
-          : [...new Set([...selectedChannelIndexes, ...grouped])].sort((a, b) => a - b),
-      );
-      lastClickedChannelRef.current = channelIndex;
-      return;
-    }
-    setSelectedChannelIndexes(grouped);
-    lastClickedChannelRef.current = channelIndex;
-  }
-
-  /** Runs channel patches one at a time (awaited, not concurrent) — a
-   * flood of concurrent per-channel calls was the root cause of a real
-   * race-condition bug in the Limiter panel's sliders earlier this session
-   * (Peak's floor getting stomped by a stale intermediate value). Only the
-   * final successful result is applied to `onProjectUpdate`, so Apply/Split
-   * don't flicker through intermediate partially-applied states. Surfaces
-   * the first failure instead of silently breaking out of the loop. */
-  async function applyChannelPatches(
-    patches: { channelIndex: number; speakerLibraryId: string | null; wayIndex: number | null }[],
-  ): Promise<{ ok: boolean; error: string | null }> {
-    let latest: Project | null = null;
-    for (const patch of patches) {
-      const result = await commands.projectsSetChannelSpeaker(
-        project.id,
-        assignment.id,
-        patch.channelIndex,
-        patch.speakerLibraryId,
-        patch.wayIndex,
-      );
-      if (result.status !== "ok") {
-        if (latest) onProjectUpdate(latest);
-        return { ok: false, error: result.error.message };
-      }
-      latest = result.data;
-    }
-    if (latest) {
-      onProjectUpdate(latest);
-    }
-    return { ok: true, error: null };
-  }
-
-  /** Writes `speaker` across as many consecutive channels as it has ways,
-   * starting at `group`'s leader — dropped directly onto a Physical
-   * Outputs row (native HTML5 drag-and-drop from the Library table,
-   * matching the old software), no separate Load/Apply step. Also clears
-   * any leftover channels from the group being dropped onto that fall
-   * outside the new speaker's span, so replacing e.g. a 3-way with a 1-way
-   * doesn't leave orphaned way indices behind. A multi-way drop additionally
-   * auto-Joins its span (`projectsSetOutputJoin`) so the quick-drop path
-   * keeps looking grouped, exactly as it did before Join grouping became
-   * explicit. */
-  async function handleDropOnGroup(group: SpeakerOutputGroup, speaker: SpeakerLibraryEntry) {
-    const wayCount = Math.max(1, speaker.ways.length);
-    const leader = group.leaderChannelIndex;
-    if (leader + wayCount > assignment.channels.length) return;
-    const newIndexes = Array.from({ length: wayCount }, (_, i) => leader + i);
-    const patches = newIndexes.map((channelIndex, i) => ({
-      channelIndex,
-      speakerLibraryId: speaker.id,
-      wayIndex: wayCount > 1 ? i : null,
-    }));
-    const leftover = group.channelIndexes.filter((idx) => !newIndexes.includes(idx));
-    const clearPatches = leftover.map((channelIndex) => ({ channelIndex, speakerLibraryId: null, wayIndex: null }));
-
-    setBusyAction("assign");
-    setActionError(null);
-    const result = await applyChannelPatches([...patches, ...clearPatches]);
-    if (!result.ok) {
-      setActionError(result.error);
-      setBusyAction(null);
-      return;
-    }
-    if (newIndexes.length > 1) {
-      const joinResult = await commands.projectsSetOutputJoin(project.id, assignment.id, newIndexes, true);
-      if (joinResult.status === "ok") onProjectUpdate(joinResult.data);
-      else setActionError(joinResult.error.message);
-    }
-    setBusyAction(null);
-  }
-
-  function handleDropEvent(group: SpeakerOutputGroup, e: React.DragEvent) {
-    setDragOverLeaderIndex(null);
-    const speakerId = e.dataTransfer.getData(SPEAKER_DRAG_MIME);
-    const speaker = speakers.find((s) => s.id === speakerId);
-    if (speaker) handleDropOnGroup(group, speaker);
-  }
-
-  function handleSplit() {
-    if (!selectedGroup) return;
-    ejectGroup(selectedGroup);
-  }
-
-  /** Clears assignments for `group`'s channels, and (for a >1-channel
-   * group) also clears the explicit Join grouping via
-   * `projectsSetOutputJoin`, so Split fully un-groups rather than leaving a
-   * now-empty joined row behind. */
-  async function ejectGroup(group: SpeakerOutputGroup) {
-    setBusyAction("split");
-    setActionError(null);
-    const patches = group.channelIndexes.map((channelIndex) => ({
-      channelIndex,
-      speakerLibraryId: null,
-      wayIndex: null,
-    }));
-    const result = await applyChannelPatches(patches);
-    if (!result.ok) {
-      setActionError(result.error);
-      setBusyAction(null);
-      return;
-    }
-    if (group.channelIndexes.length > 1) {
-      const joinResult = await commands.projectsSetOutputJoin(project.id, assignment.id, group.channelIndexes, false);
-      if (joinResult.status === "ok") onProjectUpdate(joinResult.data);
-      else setActionError(joinResult.error.message);
-    }
-    setBusyAction(null);
-    setSelectedChannelIndexes([]);
-  }
-
-  /** Joins the current (contiguous) selection into one explicit group.
-   * Wipes any existing per-channel assignments on the span first — a fresh
-   * Join shouldn't silently inherit stale data, matching the old app's
-   * `joinSelected`. */
-  async function handleJoin() {
-    if (!canJoin) return;
-    setBusyAction("join");
-    setActionError(null);
-    const wipeResult = await applyChannelPatches(
-      sortedSelection.map((channelIndex) => ({ channelIndex, speakerLibraryId: null, wayIndex: null })),
-    );
-    if (!wipeResult.ok) {
-      setActionError(wipeResult.error);
-      setBusyAction(null);
-      return;
-    }
-    const joinResult = await commands.projectsSetOutputJoin(project.id, assignment.id, sortedSelection, true);
-    if (joinResult.status === "ok") {
-      onProjectUpdate(joinResult.data);
-      setSelectedChannelIndexes(sortedSelection);
-    } else {
-      setActionError(joinResult.error.message);
-    }
-    setBusyAction(null);
-  }
-
-  async function handleBridgeToggle() {
-    if (!selectedGroup) return;
-    const leaderChannel = assignment.channels.find((c) => c.channelIndex === selectedGroup.leaderChannelIndex);
-    setBusyAction("bridge");
-    setActionError(null);
-    const result = await commands.projectsSetOutputBridge(
-      project.id,
-      assignment.id,
-      selectedGroup.leaderChannelIndex,
-      !(leaderChannel?.outputBridged ?? false),
-    );
-    if (result.status === "ok") {
-      onProjectUpdate(result.data);
-    } else {
-      setActionError(result.error.message);
-    }
-    setBusyAction(null);
-  }
-
-  async function handleArchive(id: string) {
-    setBusyAction("archive");
-    setActionError(null);
-    const result = await commands.speakerLibraryArchive(id);
-    if (result.status === "ok") {
-      if (selectedLibraryId === id) setSelectedLibraryId(null);
-      onSpeakersUpdate(speakers.map((s) => (s.id === id ? { ...s, archived: true } : s)));
-    } else {
-      setActionError(result.error.message);
-    }
-    setBusyAction(null);
-  }
-
-  /** Two-click confirm (matches `ProjectEditModal`'s delete idiom) —
-   * permanently removes the entry. The backend cascades: any channel across
-   * any project referencing this speaker gets cleared server-side, so this
-   * assignment's own display is refreshed via `projectsGet` afterward
-   * rather than relying on a stale local `onProjectUpdate`. */
-  async function handleDelete(id: string) {
-    if (confirmingDeleteId !== id) {
-      setConfirmingDeleteId(id);
-      return;
-    }
-    setBusyAction("delete");
-    setActionError(null);
-    const result = await commands.speakerLibraryDelete(id);
-    if (result.status === "ok") {
-      if (selectedLibraryId === id) setSelectedLibraryId(null);
-      setConfirmingDeleteId(null);
-      onSpeakersUpdate(speakers.filter((s) => s.id !== id));
-      const projectResult = await commands.projectsGet(project.id);
-      if (projectResult.status === "ok" && projectResult.data) onProjectUpdate(projectResult.data);
-    } else {
-      setActionError(result.error.message);
-    }
-    setBusyAction(null);
-  }
-
-  function handleFormSaved(entry: SpeakerLibraryEntry) {
-    onSpeakersUpdate(
-      speakers.some((s) => s.id === entry.id)
-        ? speakers.map((s) => (s.id === entry.id ? entry : s))
-        : [...speakers, entry],
-    );
-  }
-
-  // `actions.setOutputBridge` is part of the condition, not just the pair
-  // geometry: without it the toggle would accept clicks and drop them. In
-  // Direct Edit mode it is deliberately undefined — see
-  // `BRIDGE_UNAVAILABLE_REASON`.
-  const canBridge = Boolean(
-    actions.setOutputBridge &&
-      selectedGroup &&
-      selectedGroup.channelIndexes.length === 1 &&
-      selectedGroup.leaderChannelIndex % 2 === 0 &&
-      assignment.channels.some((c) => c.channelIndex === selectedGroup.leaderChannelIndex + 1),
-  );
-  const isBridged = selectedGroup
-    ? (assignment.channels.find((c) => c.channelIndex === selectedGroup.leaderChannelIndex)?.outputBridged ?? false)
-    : false;
-  const assignedGroups = groups.filter(
-    (g) => g.speaker !== null || g.channelIndexes.some((idx) => assignment.channels.find((c) => c.channelIndex === idx)?.speakerLibraryId),
-  );
-
-  const waysFilterOptions = [
-    { value: "any", label: "Any" },
-    { value: "1", label: "1" },
-    { value: "2", label: "2" },
-    { value: "3", label: "3" },
-    { value: "4", label: "4+" },
-  ];
-  const filteredSpeakers = speakers.filter((s) => {
-    if (s.archived) return false;
-    if (brandFilter && !s.brand.toLowerCase().includes(brandFilter.toLowerCase())) return false;
-    if (familyFilter && !(s.family ?? "").toLowerCase().includes(familyFilter.toLowerCase())) return false;
-    if (modelFilter && !s.model.toLowerCase().includes(modelFilter.toLowerCase())) return false;
-    if (waysFilter && waysFilter !== "any") {
-      const n = Number(waysFilter);
-      if (n === 4 ? s.ways.length < 4 : s.ways.length !== n) return false;
-    }
-    return true;
-  });
-
-  const canSplit = Boolean(
-    selectedGroup && (selectedGroup.speaker !== null || selectedGroup.mixed || selectedGroup.channelIndexes.length > 1),
-  );
-
-  return (
-    <div
-      className={`flex min-h-0 gap-4 p-3 md:p-6 ${
-        // Three side-by-side panes only work while there's width for all
-        // three; below `useIsCompact` they become one scrolling column in
-        // the same order (outputs → controls → library) instead of three
-        // unusably narrow ones.
-        compact ? "h-full flex-col overflow-y-auto" : "h-full"
-      }`}
-    >
-      <Stack
-        gap="sm"
-        h={compact ? undefined : "100%"}
-        justify={compact ? undefined : "center"}
-        className="min-w-0 flex-1"
-        style={{ flexGrow: 2 }}
-      >
-        <Text size="sm" fw={600}>
-          Physical Outputs
-        </Text>
-        <Stack gap={4} className="overflow-y-auto">
-          {assignment.channels.map((channel, i) => {
-            const group = groups.find((g) => g.channelIndexes.includes(channel.channelIndex))!;
-            const nextChannel = assignment.channels[i + 1];
-            const connectsToNext = Boolean(nextChannel && group.channelIndexes.includes(nextChannel.channelIndex));
-            return (
-              <Fragment key={channel.channelIndex}>
-                <PhysicalOutputChannelRow
-                  channel={channel}
-                  group={group}
-                  speakers={speakers}
-                  selected={selectedChannelIndexes.includes(channel.channelIndex)}
-                  dragOver={dragOverLeaderIndex === group.leaderChannelIndex}
-                  onSelect={(e) => handleChannelClick(channel.channelIndex, e)}
-                  onEject={() => ejectGroup(group)}
-                  onDragOver={() => setDragOverLeaderIndex(group.leaderChannelIndex)}
-                  onDragLeave={() => setDragOverLeaderIndex((current) => (current === group.leaderChannelIndex ? null : current))}
-                  onDrop={(e) => handleDropEvent(group, e)}
-                />
-                {connectsToNext && (
-                  <Center h={10}>
-                    <Link2 size={10} color="var(--mantine-color-dimmed)" />
-                  </Center>
-                )}
-              </Fragment>
-            );
-          })}
-        </Stack>
-      </Stack>
-
-      <Stack
-        gap="lg"
-        w={compact ? "100%" : 150}
-        h={compact ? undefined : "100%"}
-        justify={compact ? undefined : "center"}
-        className="shrink-0"
-      >
-        <Stack gap="xs">
-          <Text size="sm" fw={600}>
-            Controls
-          </Text>
-          <Text size="xs" c="dimmed">
-            Drag a Library entry onto a Physical Outputs row, or select multiple outputs (ctrl/shift-click) and Join
-            them, then use Load... for per-channel control.
-          </Text>
-          <Button size="sm" variant="default" loading={busyAction === "split"} disabled={!canSplit} onClick={handleSplit}>
-            Split/Reset
-          </Button>
-          <Button size="sm" variant="default" loading={busyAction === "join"} disabled={!canJoin} onClick={handleJoin}>
-            Join
-          </Button>
-          <div style={{ opacity: canBridge ? 1 : 0.45, pointerEvents: canBridge ? "auto" : "none" }}>
-            <BridgeToggle label="Bridge" bridged={isBridged} onClick={handleBridgeToggle} />
-          </div>
-          {actionError && (
-            <Text size="xs" c="red">
-              {actionError}
-            </Text>
-          )}
-        </Stack>
-
-        <Stack gap={2}>
-          <Text size="xs" fw={700} c="dimmed" tt="uppercase">
-            Status
-          </Text>
-          {assignedGroups.length === 0 ? (
-            <Text size="xs" c="dimmed">
-              No outputs assigned
-            </Text>
-          ) : (
-            assignedGroups.map((g) => (
-              <Group key={g.leaderChannelIndex} gap={6} justify="space-between">
-                <Text size="xs" fw={600}>
-                  Out{SPEAKER_OUTPUT_LETTER(g.leaderChannelIndex)}
-                </Text>
-                <Text size="xs" c="dimmed">
-                  NO CHECKSUM
-                </Text>
-              </Group>
-            ))
-          )}
-        </Stack>
-
-        <Stack gap="xs">
-          <Text size="xs" fw={700} c="dimmed" tt="uppercase">
-            Library Actions
-          </Text>
-          <Button size="xs" variant="default" onClick={() => setFormEntry("new")}>
-            Add
-          </Button>
-          <Button
-            size="xs"
-            variant="default"
-            disabled={!selectedLibraryEntry}
-            onClick={() => selectedLibraryEntry && setFormEntry(selectedLibraryEntry)}
-          >
-            Save
-          </Button>
-          <Button
-            size="xs"
-            variant="default"
-            disabled={!selectedLibraryEntry}
-            onClick={() => selectedLibraryEntry && setLoadDialogOpen(true)}
-          >
-            Load...
-          </Button>
-          <Button
-            size="xs"
-            variant="default"
-            color="red"
-            loading={busyAction === "archive"}
-            disabled={!selectedLibraryEntry}
-            onClick={() => selectedLibraryEntry && handleArchive(selectedLibraryEntry.id)}
-          >
-            Archive
-          </Button>
-          <Button
-            size="xs"
-            variant={confirmingDeleteId === selectedLibraryEntry?.id ? "filled" : "default"}
-            color="red"
-            loading={busyAction === "delete"}
-            disabled={!selectedLibraryEntry}
-            onClick={() => selectedLibraryEntry && handleDelete(selectedLibraryEntry.id)}
-          >
-            {confirmingDeleteId === selectedLibraryEntry?.id ? "Confirm Delete" : "Delete Permanently"}
-          </Button>
-          <Button size="xs" variant="default" onClick={refreshLibrary}>
-            Refresh
-          </Button>
-        </Stack>
-      </Stack>
-
-      <Stack gap="sm" className="min-w-0 flex-1" style={{ flexGrow: 3 }} mih={compact ? 260 : undefined}>
-        <Text size="sm" fw={600}>
-          Library
-        </Text>
-        {/* Four filter fields side by side need ~400px to stay legible;
-         * below that they wrap into rows rather than shrinking. */}
-        <Group gap="xs" wrap="wrap" align="flex-end">
-          <TextInput
-            size="xs"
-            placeholder="Filter brand"
-            value={brandFilter}
-            onChange={(e) => setBrandFilter(e.currentTarget.value)}
-            style={FILTER_FIELD_FLEX}
-          />
-          <TextInput
-            size="xs"
-            placeholder="Filter family"
-            value={familyFilter}
-            onChange={(e) => setFamilyFilter(e.currentTarget.value)}
-            style={FILTER_FIELD_FLEX}
-          />
-          <TextInput
-            size="xs"
-            placeholder="Filter model"
-            value={modelFilter}
-            onChange={(e) => setModelFilter(e.currentTarget.value)}
-            style={FILTER_FIELD_FLEX}
-          />
-          <Select
-            size="xs"
-            label="Ways°"
-            data={waysFilterOptions}
-            value={waysFilter}
-            onChange={setWaysFilter}
-            allowDeselect={false}
-            style={FILTER_FIELD_FLEX}
-          />
-        </Group>
-        <Table.ScrollContainer minWidth={420} className="flex-1 overflow-y-auto">
-          <Table highlightOnHover verticalSpacing="xs" stickyHeader>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Brand</Table.Th>
-                <Table.Th>Family</Table.Th>
-                <Table.Th>Model</Table.Th>
-                <Table.Th>Application</Table.Th>
-                <Table.Th>Ways</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {filteredSpeakers.map((speaker) => (
-                <Table.Tr
-                  key={speaker.id}
-                  draggable
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData(SPEAKER_DRAG_MIME, speaker.id);
-                    e.dataTransfer.effectAllowed = "copy";
-                  }}
-                  onClick={() => setSelectedLibraryId(speaker.id)}
-                  className="cursor-pointer"
-                  style={{
-                    backgroundColor: selectedLibraryId === speaker.id ? "var(--mantine-color-amber-light)" : undefined,
-                    cursor: "grab",
-                  }}
-                >
-                  <Table.Td>{speaker.brand}</Table.Td>
-                  <Table.Td>{speaker.family ?? <Text component="span" c="dimmed">—</Text>}</Table.Td>
-                  <Table.Td>{speaker.model}</Table.Td>
-                  <Table.Td>{speaker.application ?? <Text component="span" c="dimmed">—</Text>}</Table.Td>
-                  <Table.Td>{speaker.ways.map((w) => w.label).join(", ") || <Text component="span" c="dimmed">—</Text>}</Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        </Table.ScrollContainer>
-      </Stack>
-
-      <SpeakerFormModal
-        opened={formEntry !== null}
-        onClose={() => setFormEntry(null)}
-        editEntry={formEntry === "new" ? null : formEntry}
-        onSaved={handleFormSaved}
-      />
-
-      {selectedLibraryEntry && (
-        <LoadSpeakerConfigDialog
-          opened={loadDialogOpen}
-          onClose={() => setLoadDialogOpen(false)}
-          assignment={assignment}
-          speakers={speakers}
-          profile={selectedLibraryEntry}
-          onApply={applyChannelPatches}
-        />
-      )}
     </div>
   );
 }
@@ -2887,7 +2051,6 @@ const TAB_COMPONENTS: Record<
   routing: RoutingTab,
   input: InputTab,
   output: OutputTab,
-  speakerConfiguration: SpeakerConfigurationTab,
 };
 
 export function AmpConfigureView({ source }: AmpConfigureViewProps) {
@@ -2908,7 +2071,6 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
 
   const [capability, setCapability] = useState<AmpCapability | null>(null);
   const [capabilityLoading, setCapabilityLoading] = useState(false);
-  const [speakers, setSpeakers] = useState<SpeakerLibraryEntry[]>([]);
 
   useEffect(() => {
     if (!ampModel) {
@@ -2929,14 +2091,6 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
     };
   }, [ampModel, firmwareVersion]);
 
-  useEffect(() => {
-    commands.speakerLibraryList().then((result) => {
-      if (result.status === "ok") {
-        setSpeakers(result.data);
-      }
-    });
-  }, []);
-
   const actions: ConfigureActions | undefined =
     source?.kind === "project"
       ? createProjectConfigureActions(source.project.id, source.assignment.id, source.onProjectUpdate)
@@ -2944,17 +2098,12 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         ? createLiveConfigureActions(source.device.id)
         : undefined;
   const capabilities: ConfigureCapabilities = source?.kind === "live" ? LIVE_CONFIGURE_CAPABILITIES : PROJECT_CONFIGURE_CAPABILITIES;
-  const project = source?.kind === "project" ? source.project : undefined;
-  const onProjectUpdate = source?.kind === "project" ? source.onProjectUpdate : undefined;
 
-  // Speaker Configuration is a Project-only planning concept (physical
-  // output assignment, Join grouping) with no live-device equivalent.
-  // Preset Configuration is the mirror image — a live-device-only concept
-  // (FC=59 presets live on the physical amp; a Project with no live device
-  // has nothing to fetch) — hidden for a Project source and when no source
-  // is selected at all, not rendered disabled.
+  // Preset Configuration is a live-device-only concept (FC=59 presets live on
+  // the physical amp; a Project with no live device has nothing to fetch) —
+  // hidden for a Project source and when no source is selected at all, not
+  // rendered disabled.
   const visibleTabs = TABS.filter((t) => {
-    if (t.value === "speakerConfiguration" && source?.kind === "live") return false;
     if (t.value === "presetConfiguration" && source?.kind !== "live") return false;
     return true;
   });
@@ -3018,12 +2167,8 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
               assignment={assignment}
               capability={capability}
               telemetry={telemetry}
-              speakers={speakers}
-              onSpeakersUpdate={setSpeakers}
               actions={actions}
               capabilities={capabilities}
-              project={project}
-              onProjectUpdate={onProjectUpdate}
             />
           );
         }

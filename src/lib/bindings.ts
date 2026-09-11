@@ -36,7 +36,6 @@ export const commands = {
 	 *  per-channel config where indices still exist. Never a destructive wipe.
 	 */
 	projectsSetAmpModel: (projectId: string, assignmentId: string, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_model", { projectId, assignmentId, ampModelId })),
-	projectsSetChannelSpeaker: (projectId: string, assignmentId: string, channelIndex: number, speakerLibraryId: string | null, wayIndex: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_speaker", { projectId, assignmentId, channelIndex, speakerLibraryId, wayIndex })),
 	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
 	/**
 	 *  Sets (or clears) which physical source feeds a channel's input — Routing
@@ -46,7 +45,7 @@ export const commands = {
 	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, kind: "analog" | "dante" | "aes3" | "backup" | null, index: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, kind, index })),
 	/**
 	 *  Partial update of one Matrix-tab crosspoint — only touches the fields the
-	 *  caller passes (`Some`), matching `projects_set_channel_speaker`'s
+	 *  caller passes (`Some`), matching the other partial-update commands'
 	 *  per-field-optional convention. Fails if the crosspoint doesn't exist yet
 	 *  (it should always exist by the time the UI can edit it, since
 	 *  `reconcile_matrix_size` pre-populates every crosspoint for the model's
@@ -109,20 +108,6 @@ export const commands = {
 	 *  `AmpChannel.output_bridged`'s doc comment).
 	 */
 	projectsSetOutputBridge: (projectId: string, assignmentId: string, pairLeaderChannelIndex: number, bridged: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_bridge", { projectId, assignmentId, pairLeaderChannelIndex, bridged })),
-	/**
-	 *  Sets (or clears) explicit visual grouping for a run of output channels —
-	 *  Speaker Configuration tab's Join/Split. Purely a grouping toggle; does
-	 *  not touch `speaker_library_id`/`way_index` (see `AmpChannel.join_group_id`'s
-	 *  doc comment) — callers that also want to wipe assignments do so via the
-	 *  existing `projects_set_channel_speaker` path first. When `joined` is
-	 *  true, `channel_indexes` must be at least 2, distinct, and contiguous
-	 *  (sorted, each exactly one more than the last); all listed channels get a
-	 *  freshly generated shared `join_group_id`. When `joined` is false,
-	 *  `join_group_id` is simply cleared on each listed channel — no
-	 *  contiguity requirement, so Split can pass a group's existing
-	 *  `channelIndexes` as-is.
-	 */
-	projectsSetOutputJoin: (projectId: string, assignmentId: string, channelIndexes: number[], joined: boolean) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_output_join", { projectId, assignmentId, channelIndexes, joined })),
 	/**  Sets a channel's output power/impedance mode — Output tab. */
 	projectsSetChannelPowerMode: (projectId: string, assignmentId: string, channelIndex: number, powerMode: PowerMode) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_power_mode", { projectId, assignmentId, channelIndex, powerMode })),
 	/**
@@ -132,27 +117,6 @@ export const commands = {
 	 *  catalog entry's topology and the (free-text) firmware version string.
 	 */
 	ampCapabilityResolve: (ampModelId: string, firmwareVersion: string | null) => typedError<AmpCapability_Serialize, AppError>(__TAURI_INVOKE("amp_capability_resolve", { ampModelId, firmwareVersion })),
-	speakerLibraryList: () => typedError<SpeakerLibraryEntry_Serialize[], AppError>(__TAURI_INVOKE("speaker_library_list")),
-	speakerLibraryCreate: (brand: string, model: string, family: string | null, application: string | null, ways: SpeakerWay[]) => typedError<SpeakerLibraryEntry_Serialize, AppError>(__TAURI_INVOKE("speaker_library_create", { brand, model, family, application, ways })),
-	/**  Full-entry replace, mirroring `projects_update`'s pattern. */
-	speakerLibraryUpdate: (entry: SpeakerLibraryEntry_Deserialize) => typedError<SpeakerLibraryEntry_Serialize, AppError>(__TAURI_INVOKE("speaker_library_update", { entry })),
-	/**
-	 *  Soft-delete — archived entries stay resolvable for existing Project
-	 *  references but are hidden from pickers for new assignments.
-	 */
-	speakerLibraryArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_archive", { id })),
-	/**
-	 *  Hard-delete — unlike `speaker_library_archive` (soft-delete, kept for
-	 *  its existing "hide from picker, stay resolvable for old references"
-	 *  use case), this permanently removes the entry and cascades: clears
-	 *  `speaker_library_id`/`way_index` on every channel, in every project,
-	 *  that references it. `join_group_id` is deliberately left untouched —
-	 *  Join grouping is independent of what's assigned, so a group a deleted
-	 *  speaker belonged to stays joined (now showing "No speaker" on those
-	 *  rows) rather than being silently un-joined. Saves only the projects
-	 *  actually touched, matching `reconcile_project_matrix_sizes`'s pattern.
-	 */
-	speakerLibraryDelete: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("speaker_library_delete", { id })),
 	ampModelsList: () => typedError<AmpModelCatalogEntry_Serialize[], AppError>(__TAURI_INVOKE("amp_models_list")),
 	ampModelsCreate: (brand: string, model: string, channelCount: number, isDante: boolean, protocol: AmpProtocol) => typedError<AmpModelCatalogEntry_Serialize, AppError>(__TAURI_INVOKE("amp_models_create", { brand, model, channelCount, isDante, protocol })),
 	/**
@@ -162,7 +126,7 @@ export const commands = {
 	 *  `projects_set_amp_model`.
 	 */
 	ampModelsUpdate: (entry: AmpModelCatalogEntry_Deserialize) => typedError<AmpModelCatalogEntry_Serialize, AppError>(__TAURI_INVOKE("amp_models_update", { entry })),
-	/**  Soft-delete — see SpeakerLibraryEntry.archived for rationale. */
+	/**  Soft-delete — see `AmpModelCatalogEntry.archived` for rationale. */
 	ampModelsArchive: (id: string) => typedError<null, AppError>(__TAURI_INVOKE("amp_models_archive", { id })),
 	liveControlStart: () => typedError<null, AppError>(__TAURI_INVOKE("live_control_start")),
 	/**
@@ -366,7 +330,10 @@ export const commands = {
 	topology: AmpDspTopology_Serialize,
 	notes: string | null,
 	origin: EntryOrigin,
-	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
+	/**
+	 *  Soft-delete flag — archived entries stay resolvable for existing
+	 *  Project references but are hidden from pickers for new assignments.
+	 */
 	archived: boolean,
 	createdAt: number | null,
 	updatedAt: number | null,
@@ -457,35 +424,12 @@ export type AmpCapability_Serialize = {
 };
 
 /**
- *  Per-channel config on an amp assignment. `ohms` is independently authored
- *  (never derived from the assigned speaker's nominal spec — real wiring can
- *  legitimately diverge) and `speaker_library_id` is a reference, never an
- *  embedded copy of the speaker's data.
+ *  Per-channel config on an amp assignment. `ohms` is the channel's
+ *  independently authored load impedance, used by the Limiter.
  */
 export type AmpChannel = {
 	channelIndex: number,
 	ohms: number | null,
-	speakerLibraryId: string | null,
-	/**
-	 *  Which way (driver/frequency band) of the assigned speaker this
-	 *  channel drives — e.g. a 2-way cab's "HF" way. Only meaningful when
-	 *  `speaker_library_id` is set; `None`/`0` for a single-way speaker.
-	 */
-	wayIndex: number | null,
-	/**
-	 *  Explicit visual/logical grouping of contiguous channels into one row
-	 *  in the Speaker Configuration tab's Physical Outputs panel — a
-	 *  planning-UI-only concept, unrelated to `output_bridged`'s real
-	 *  hardware relay (CVR amps have no "join" hardware concept). Channels
-	 *  sharing the same non-`None` id, in a contiguous run, render as one
-	 *  joined row; a channel with `None` is its own row. Independent of
-	 *  what's assigned to member channels — two joined channels may hold
-	 *  different (or no) `speaker_library_id`s; the frontend renders that
-	 *  "mixed" case per-channel rather than assuming one profile (see
-	 *  `computeSpeakerGroups` in AmpConfigureView.tsx). Set only via
-	 *  `projects_set_output_join`.
-	 */
-	joinGroupId?: string | null,
 	/**
 	 *  Which physical source feeds this channel's input — Routing tab.
 	 *  `None` until the user picks one.
@@ -619,15 +563,13 @@ export type AmpDspTopology_Serialize = {
 };
 
 /**
- *  A reusable, project-independent amp hardware model — mirrors the Speaker
- *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+ *  A reusable, project-independent amp hardware model. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
  */
 export type AmpModelCatalogEntry = AmpModelCatalogEntry_Serialize | AmpModelCatalogEntry_Deserialize;
 
 /**
- *  A reusable, project-independent amp hardware model — mirrors the Speaker
- *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+ *  A reusable, project-independent amp hardware model. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
  */
 export type AmpModelCatalogEntry_Deserialize = {
@@ -644,15 +586,17 @@ export type AmpModelCatalogEntry_Deserialize = {
 	topology?: AmpDspTopology_Deserialize,
 	notes: string | null,
 	origin: EntryOrigin,
-	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
+	/**
+	 *  Soft-delete flag — archived entries stay resolvable for existing
+	 *  Project references but are hidden from pickers for new assignments.
+	 */
 	archived: boolean,
 	createdAt: number | null,
 	updatedAt: number | null,
 };
 
 /**
- *  A reusable, project-independent amp hardware model — mirrors the Speaker
- *  Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+ *  A reusable, project-independent amp hardware model. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
  */
 export type AmpModelCatalogEntry_Serialize = {
@@ -669,7 +613,10 @@ export type AmpModelCatalogEntry_Serialize = {
 	topology: AmpDspTopology_Serialize,
 	notes: string | null,
 	origin: EntryOrigin,
-	/**  Soft-delete flag — see SpeakerLibraryEntry.archived for rationale. */
+	/**
+	 *  Soft-delete flag — archived entries stay resolvable for existing
+	 *  Project references but are hidden from pickers for new assignments.
+	 */
 	archived: boolean,
 	createdAt: number | null,
 	updatedAt: number | null,
@@ -947,7 +894,7 @@ export type DiscoveredDevice = {
 };
 
 /**
- *  Marks whether a catalog entry (Speaker Library / Amp Model Catalog) was
+ *  Marks whether a catalog entry (Amp Model Catalog) was
  *  authored by the user or shipped built-in with the app.
  */
 export type EntryOrigin = "userDefined" | "builtIn";
@@ -1137,91 +1084,6 @@ export type SourceChannelCount = {
  *  not this enum itself.
  */
 export type SourceKind = "analog" | "dante" | "aes3" | "backup";
-
-/**
- *  A reusable, project-independent speaker profile. Projects reference
- *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
- */
-export type SpeakerLibraryEntry = SpeakerLibraryEntry_Serialize | SpeakerLibraryEntry_Deserialize;
-
-/**
- *  A reusable, project-independent speaker profile. Projects reference
- *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
- */
-export type SpeakerLibraryEntry_Deserialize = {
-	id: string,
-	brand: string,
-	/**  Product family/series (e.g. "LX Series") — distinct from `model`. */
-	family: string | null,
-	model: string,
-	/**
-	 *  Use-case category (e.g. "Full-range", "Subwoofer") — matches the old
-	 *  app's "Speaker Application" field.
-	 */
-	application: string | null,
-	/**
-	 *  A speaker may have multiple ways (e.g. a 2-way cab has LF + HF); a
-	 *  channel assignment references one specific way, not the whole entry.
-	 *  Custom deserializer: older persisted entries have this field as an
-	 *  explicit `null` (from a prior schema where it was `Option<u32>`) —
-	 *  `#[serde(default)]` alone only covers a *missing* key, not `null`.
-	 */
-	ways?: SpeakerWay[],
-	notes: string | null,
-	origin: EntryOrigin,
-	/**
-	 *  Soft-delete flag — archived entries stay resolvable for existing
-	 *  Project references but are hidden from pickers for new assignments.
-	 */
-	archived: boolean,
-	createdAt: number | null,
-	updatedAt: number | null,
-};
-
-/**
- *  A reusable, project-independent speaker profile. Projects reference
- *  entries by `id` from `Channel.speaker_library_id` — never an embedded copy.
- */
-export type SpeakerLibraryEntry_Serialize = {
-	id: string,
-	brand: string,
-	/**  Product family/series (e.g. "LX Series") — distinct from `model`. */
-	family: string | null,
-	model: string,
-	/**
-	 *  Use-case category (e.g. "Full-range", "Subwoofer") — matches the old
-	 *  app's "Speaker Application" field.
-	 */
-	application: string | null,
-	/**
-	 *  A speaker may have multiple ways (e.g. a 2-way cab has LF + HF); a
-	 *  channel assignment references one specific way, not the whole entry.
-	 *  Custom deserializer: older persisted entries have this field as an
-	 *  explicit `null` (from a prior schema where it was `Option<u32>`) —
-	 *  `#[serde(default)]` alone only covers a *missing* key, not `null`.
-	 */
-	ways: SpeakerWay[],
-	notes: string | null,
-	origin: EntryOrigin,
-	/**
-	 *  Soft-delete flag — archived entries stay resolvable for existing
-	 *  Project references but are hidden from pickers for new assignments.
-	 */
-	archived: boolean,
-	createdAt: number | null,
-	updatedAt: number | null,
-};
-
-/**
- *  One named way (driver/frequency band) of a speaker, e.g. "LF", "HF Horn",
- *  "S218" — matches the old app's simple way-label concept. Deliberately
- *  does not carry `processing`/`deviceData` (DSP/tuning snapshots) — that's
- *  live-device territory, deferred like every other device-I/O concern.
- */
-export type SpeakerWay = {
-	id: string,
-	label: string,
-};
 
 export type Telemetry = {
 	/**  5 readings: [0-3] = per-channel, [4] = PSU. */

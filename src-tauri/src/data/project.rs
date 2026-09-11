@@ -154,33 +154,13 @@ pub struct LimiterPatch {
     pub peak_release_ms: Option<f64>,
 }
 
-/// Per-channel config on an amp assignment. `ohms` is independently authored
-/// (never derived from the assigned speaker's nominal spec — real wiring can
-/// legitimately diverge) and `speaker_library_id` is a reference, never an
-/// embedded copy of the speaker's data.
+/// Per-channel config on an amp assignment. `ohms` is the channel's
+/// independently authored load impedance, used by the Limiter.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AmpChannel {
     pub channel_index: u32,
     pub ohms: f64,
-    pub speaker_library_id: Option<String>,
-    /// Which way (driver/frequency band) of the assigned speaker this
-    /// channel drives — e.g. a 2-way cab's "HF" way. Only meaningful when
-    /// `speaker_library_id` is set; `None`/`0` for a single-way speaker.
-    pub way_index: Option<u32>,
-    /// Explicit visual/logical grouping of contiguous channels into one row
-    /// in the Speaker Configuration tab's Physical Outputs panel — a
-    /// planning-UI-only concept, unrelated to `output_bridged`'s real
-    /// hardware relay (CVR amps have no "join" hardware concept). Channels
-    /// sharing the same non-`None` id, in a contiguous run, render as one
-    /// joined row; a channel with `None` is its own row. Independent of
-    /// what's assigned to member channels — two joined channels may hold
-    /// different (or no) `speaker_library_id`s; the frontend renders that
-    /// "mixed" case per-channel rather than assuming one profile (see
-    /// `computeSpeakerGroups` in AmpConfigureView.tsx). Set only via
-    /// `projects_set_output_join`.
-    #[serde(default)]
-    pub join_group_id: Option<String>,
     /// Which physical source feeds this channel's input — Routing tab.
     /// `None` until the user picks one.
     #[serde(default)]
@@ -294,14 +274,12 @@ pub struct Project {
     pub amp_assignments: Vec<AmpAssignment>,
 }
 
-/// Bumped to 10 when `AmpChannel.join_group_id` (`#[serde(default)]`,
-/// defaults to `None`) was added for the explicit Join/Split grouping
-/// feature in the Speaker Configuration tab. Older project files load
-/// unchanged (every channel starts ungrouped) and get one-time-backfilled
-/// by `migrate_inferred_speaker_groups_to_join_ids` in `data/store.rs`,
-/// gated on this version, so pre-existing sequential drag-drop speaker
-/// assignments don't visually "un-group" the first time this loads.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 10;
+/// Bumped to 11 when speaker planning was removed: `AmpChannel`'s
+/// `speaker_library_id`, `way_index` and `join_group_id` are gone, along with
+/// the Speaker Library itself. Older files still load — serde ignores the
+/// leftover fields — and `ProjectDataState::load` rewrites any file below this
+/// version once, which strips them from disk.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 11;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -394,9 +372,6 @@ fn new_channel(channel_index: u32) -> AmpChannel {
     AmpChannel {
         channel_index,
         ohms: 8.0,
-        speaker_library_id: None,
-        way_index: None,
-        join_group_id: None,
         source: None,
         matrix_crosspoints: Vec::new(),
         delay_in_ms: 0.0,

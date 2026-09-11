@@ -6,13 +6,11 @@ use tauri::{AppHandle, Manager};
 
 use super::amp_model::{AmpModelCatalogEntry, AmpProtocol};
 use super::capability::cvr::builtin_topology;
-use super::common::{new_id, EntryOrigin};
+use super::common::EntryOrigin;
 use super::device_link::DeviceModelLink;
 use super::project::{Project, CURRENT_PROJECT_SCHEMA_VERSION};
-use super::speaker_library::SpeakerLibraryEntry;
 
-/// Rust-owned canonical store for Projects + Speaker Library + Amp Model
-/// Catalog — the "Project Data" domain from the architecture plan. Writes
+/// Rust-owned canonical store for Projects + Amp Model Catalog — the "Project Data" domain from the architecture plan. Writes
 /// here are infrequent and user-paced (not a polling loop), so a single
 /// coarse lock is fine; this is deliberately kept independent from the
 /// (future, separate) live-device-state domain.
@@ -21,7 +19,6 @@ pub struct ProjectDataState(pub Mutex<ProjectDataInner>);
 pub struct ProjectDataInner {
     pub data_dir: PathBuf,
     pub projects: Vec<Project>,
-    pub speaker_library: Vec<SpeakerLibraryEntry>,
     pub amp_models: Vec<AmpModelCatalogEntry>,
     pub device_model_links: Vec<DeviceModelLink>,
 }
@@ -126,7 +123,17 @@ impl ProjectDataState {
             .join("project-data");
         fs::create_dir_all(data_dir.join("projects")).map_err(|e| e.to_string())?;
 
-        let speaker_library = load_json_or_default(&data_dir.join("speaker_library.json"))?;
+        // The Speaker Library was removed from the app together with speaker
+        // planning, and its saved data is deleted rather than left orphaned —
+        // nothing reads it any more. Idempotent: a no-op once the file is gone.
+        // A failed delete is logged, not fatal; it must never block loading
+        // the projects the user can still open.
+        let speaker_library_path = data_dir.join("speaker_library.json");
+        if speaker_library_path.exists() {
+            if let Err(e) = fs::remove_file(&speaker_library_path) {
+                eprintln!("[project data] could not delete obsolete {}: {e}", speaker_library_path.display());
+            }
+        }
         let device_model_links = load_json_or_default(&data_dir.join("device_model_links.json"))?;
         let mut amp_models = load_json_or_default(&data_dir.join("amp_models.json"))?;
         let migrated = migrate_dante_flag(&mut amp_models);
@@ -139,8 +146,12 @@ impl ProjectDataState {
         let mut projects = load_projects(&data_dir)?;
         for project in projects.iter_mut() {
             let mut changed = false;
+            // Files below schema 11 still carry the removed speaker/Join
+            // fields (`speakerLibraryId`, `wayIndex`, `joinGroupId`). serde
+            // ignores them on load, so rewriting the file here is what strips
+            // them from disk — see `CURRENT_PROJECT_SCHEMA_VERSION`.
             if project.schema_version < CURRENT_PROJECT_SCHEMA_VERSION {
-                changed |= migrate_inferred_speaker_groups_to_join_ids(project);
+                changed = true;
             }
             changed |= reconcile_project_matrix_sizes(project, &amp_models);
             changed |= reconcile_project_eq_band_sizes(project, &amp_models);
@@ -153,7 +164,6 @@ impl ProjectDataState {
         Ok(Self(Mutex::new(ProjectDataInner {
             data_dir,
             projects,
-            speaker_library,
             amp_models,
             device_model_links,
         })))
@@ -217,49 +227,6 @@ fn reconcile_project_eq_band_sizes(project: &mut Project, amp_models: &[AmpModel
     changed
 }
 
-/// One-time backfill for projects saved before explicit `join_group_id`
-/// existed: synthesizes a shared id for every run of >=2 channels the OLD
-/// purely-inferred grouping rule (same non-null `speaker_library_id` +
-/// sequential `way_index` starting at 0) would have grouped, so
-/// pre-existing sequential drag-drop assignments don't visually un-group
-/// the first time this ships. Gated by the caller on `schema_version <
-/// CURRENT_PROJECT_SCHEMA_VERSION` (not a bare "is join_group_id already
-/// set?" check) so it fires exactly once per project — a channel a user has
-/// since explicitly Split back apart (clearing both its assignment and its
-/// join_group_id) must never be silently re-grouped on a later load just
-/// because its data still happens to look sequential, and a fresh
-/// non-grouped sequential assignment made via the Load dialog must never be
-/// auto-grouped either.
-fn migrate_inferred_speaker_groups_to_join_ids(project: &mut Project) -> bool {
-    let mut changed = false;
-    for assignment in project.amp_assignments.iter_mut() {
-        let mut i = 0;
-        while i < assignment.channels.len() {
-            if assignment.channels[i].speaker_library_id.is_none() {
-                i += 1;
-                continue;
-            }
-            let speaker_id = assignment.channels[i].speaker_library_id.clone();
-            let mut j = i + 1;
-            while j < assignment.channels.len()
-                && assignment.channels[j].speaker_library_id == speaker_id
-                && assignment.channels[j].way_index == Some((j - i) as u32)
-            {
-                j += 1;
-            }
-            if j - i >= 2 {
-                let group_id = new_id();
-                for channel in &mut assignment.channels[i..j] {
-                    channel.join_group_id = Some(group_id.clone());
-                }
-                changed = true;
-            }
-            i = j.max(i + 1);
-        }
-    }
-    changed
-}
-
 fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {
     let projects_dir = data_dir.join("projects");
     let mut projects = Vec::new();
@@ -298,12 +265,6 @@ pub fn delete_project_file(data_dir: &Path, id: &str) -> Result<(), String> {
         fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-pub fn save_speaker_library(data_dir: &Path, entries: &[SpeakerLibraryEntry]) -> Result<(), String> {
-    let path = data_dir.join("speaker_library.json");
-    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
 }
 
 pub fn save_amp_models(data_dir: &Path, entries: &[AmpModelCatalogEntry]) -> Result<(), String> {

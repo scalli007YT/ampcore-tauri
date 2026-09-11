@@ -14,35 +14,65 @@ import {
 import type { ConfigureActions, ConfigureCapabilities } from "./configureActions";
 import { showRollingNotification } from "./rollingNotification";
 
-/** Direct Edit mode has no Project — Speaker/Join planning and manually
- * authored `ohms` are genuinely inapplicable to a live device, not just
- * "not implemented yet" (see `ConfigureActions`'s per-field split). */
+/** Direct Edit mode has no Project — manually authored `ohms` is genuinely
+ * inapplicable to a live device, not just "not implemented yet" (see
+ * `ConfigureActions`'s per-field split). */
 export const LIVE_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
-  speakerPlanning: false,
-  outputJoin: false,
   ohmsEditable: false,
 };
+
+/** The `AmpChannel` fields `mapLiveChannel` fills from what a device actually
+ * reported (FC=27, plus FC=50 for bridging). Every other field it sets is a
+ * placeholder, there only so the configure tabs have a complete channel to
+ * render.
+ *
+ * Anything that compares or copies live state against a Project (offline↔
+ * online amp matching) must restrict itself to these fields — otherwise the
+ * placeholders read as real mismatches, or get written into the project as if
+ * the amp had reported them.
+ *
+ * Two entries are only real per snapshot, which a static list can't express:
+ * `powerMode` when `ChannelConfig.powerMode` is non-null (otherwise it falls
+ * back to "lowOhm"), and `outputBridged` once the device has answered FC=50
+ * for that pair (otherwise `false`). A channel synthesized before the first
+ * FC=27 poll carries no real fields at all. */
+export const LIVE_READABLE_CHANNEL_FIELDS: readonly (keyof AmpChannel)[] = [
+  "source",
+  "matrixCrosspoints",
+  "delayInMs",
+  "inputMuted",
+  "outputTrimDb",
+  "outputVolumeDb",
+  "delayOutMs",
+  "inputEq",
+  "outputEq",
+  "limiter",
+  "noiseGateEnabled",
+  "outputPhaseInverted",
+  "inputName",
+  "outputName",
+  "outputMuted",
+  "outputBridged",
+  "powerMode",
+];
 
 /** Maps one polled `ChannelConfig` onto the shape `AmpConfigureView`'s tabs
  * already expect (`AmpAssignment["channels"][number]`) — most fields are a
  * direct passthrough since `ChannelEq`/`Limiter`/`MatrixCrosspoint`/
  * `ChannelSource` are literally the same Rust types on both sides (see
- * `channel_config.rs`). Fields with no live-wire equivalent (`ohms`,
- * `speakerLibraryId`, `wayIndex`, `joinGroupId`, `outputBridged`) or no
- * read-side parsing yet (`noiseGateThresholdDbu`) get an honest default —
- * never a value implied to be live-accurate. `channelIndex` with no config
- * yet (poll still pending) synthesizes an all-default channel rather than
- * leaving a hole for callers to crash on. */
+ * `channel_config.rs`). Fields with no live-wire equivalent (`ohms`) or no
+ * read-side parsing yet (`noiseGateThresholdDbu`) get placeholder defaults,
+ * never a value implied to be live-accurate — `LIVE_READABLE_CHANNEL_FIELDS`
+ * is the exact split.
+ * `channelIndex` with no config yet (poll still pending) synthesizes an
+ * all-default channel rather than leaving a hole for callers to crash on. */
 function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number, bridged: boolean): AmpChannel {
   if (!config) {
-    return { channelIndex, ohms: 8, speakerLibraryId: null, wayIndex: null };
+    return { channelIndex, ohms: 8 };
   }
   return {
     channelIndex: config.channelIndex,
     ohms: 8,
-    speakerLibraryId: null,
-    wayIndex: null,
-    joinGroupId: null,
     source: config.source,
     matrixCrosspoints: config.matrixCrosspoints,
     delayInMs: config.delayInMs ?? 0,
