@@ -11,6 +11,7 @@ import {
   type DiscoveredDevice,
   type LiveWriteAck,
 } from "./bindings";
+import { ACTION_OK, actionFailed, type ActionResult } from "./actionResult";
 import type { ConfigureActions, ConfigureCapabilities } from "./configureActions";
 import { showRollingNotification } from "./rollingNotification";
 
@@ -155,7 +156,7 @@ export function buildLiveAssignmentViewModel(
 async function reportWrite(
   label: string,
   call: Promise<{ status: "ok"; data: LiveWriteAck } | { status: "error"; error: AppError }>,
-): Promise<void> {
+): Promise<ActionResult> {
   const result = await call;
   if (result.status === "error") {
     console.error(`${label} failed`, result.error);
@@ -165,9 +166,12 @@ async function reportWrite(
       message: result.error.message,
       autoClose: false,
     });
-    return;
+    return actionFailed(result.error.message);
   }
   notifySuccess(label, result.data);
+  // The toast is only one consumer of the outcome — the control that fired
+  // the write can show it too (see `ConfigureActions`' `ActionResult`).
+  return ACTION_OK;
 }
 
 /** Green counterpart to the red failure toast: confirms the device actually
@@ -220,66 +224,68 @@ function notifySuccess(label: string, ack: LiveWriteAck): void {
 export function createLiveConfigureActions(deviceId: string): ConfigureActions {
   return {
     async setChannelDelayIn(channelIndex, delayInMs) {
-      await reportWrite("Set input delay", commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs));
+      return reportWrite("Set input delay", commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs));
     },
     async setChannelInputMute(channelIndex, muted) {
-      await reportWrite("Set input mute", commands.liveControlSetChannelInputMute(deviceId, channelIndex, muted));
+      return reportWrite("Set input mute", commands.liveControlSetChannelInputMute(deviceId, channelIndex, muted));
     },
     async setChannelOutput(channelIndex, trimDb, volumeDb, delayOutMs) {
-      await reportWrite("Set output trim/volume/delay", commands.liveControlSetChannelOutput(deviceId, channelIndex, trimDb, volumeDb, delayOutMs));
+      return reportWrite("Set output trim/volume/delay", commands.liveControlSetChannelOutput(deviceId, channelIndex, trimDb, volumeDb, delayOutMs));
     },
     async setChannelPhaseInvert(channelIndex, inverted) {
-      await reportWrite("Set phase invert", commands.liveControlSetChannelPhaseInvert(deviceId, channelIndex, inverted));
+      return reportWrite("Set phase invert", commands.liveControlSetChannelPhaseInvert(deviceId, channelIndex, inverted));
     },
     async setChannelOutputMute(channelIndex, muted) {
-      await reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
+      return reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
     },
     async setChannelPowerMode(channelIndex, mode) {
-      await reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
+      return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
     },
     async setEqBand(channelIndex, direction, bandIndex, patch) {
-      await reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));
+      return reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));
     },
     async setCrossoverSlot(channelIndex, direction, slot, patch) {
-      await reportWrite("Set crossover", commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch));
+      return reportWrite("Set crossover", commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch));
     },
     async setMatrixCrosspoint(channelIndex, sourceIndex, gainDb, active) {
-      await reportWrite(
+      return reportWrite(
         "Set matrix crosspoint",
         commands.liveControlSetMatrixCrosspoint(deviceId, channelIndex, sourceIndex, gainDb, active),
       );
     },
     async setChannelNoiseGate(channelIndex, enabled, thresholdDbu) {
-      await reportWrite("Set noise gate", commands.liveControlSetChannelNoiseGate(deviceId, channelIndex, enabled, thresholdDbu));
+      return reportWrite("Set noise gate", commands.liveControlSetChannelNoiseGate(deviceId, channelIndex, enabled, thresholdDbu));
     },
     async setChannelLimiter(channelIndex, patch) {
-      await reportWrite("Set limiter", commands.liveControlSetChannelLimiter(deviceId, channelIndex, patch));
+      return reportWrite("Set limiter", commands.liveControlSetChannelLimiter(deviceId, channelIndex, patch));
     },
     async setChannelName(channelIndex, side, name) {
-      await reportWrite("Set channel name", commands.liveControlSetChannelName(deviceId, channelIndex, side, name));
+      return reportWrite("Set channel name", commands.liveControlSetChannelName(deviceId, channelIndex, side, name));
     },
-    /** FC=11 carries only the source *kind*. The positional `index` this
-     * app tracks alongside it has no wire equivalent, and clearing a source
+    /** FC=11 carries only the source *kind*; for Analog, `index` goes out as
+     * a follow-up FC=79 write selecting the physical input (see
+     * `live_control_set_channel_source`). Clearing a source
      * (`kind === null`) is not something FC=11 can express — a live channel
-     * always has some source selected. Both are rejected up front rather
+     * always has some source selected — so it is rejected up front rather
      * than sent as a packet that would mean something else. */
     /** Re-enabled now that `bridgedPairs` gives the UI a real readback —
      * see the `outputBridged` note in `mapLiveChannel`. `channelIndex` is
      * the pair's leader; FC=50 addresses pairs by their leader channel. */
     async setOutputBridge(pairLeaderChannelIndex, bridged) {
-      await reportWrite("Set bridge", commands.liveControlSetOutputBridge(deviceId, pairLeaderChannelIndex, bridged));
+      return reportWrite("Set bridge", commands.liveControlSetOutputBridge(deviceId, pairLeaderChannelIndex, bridged));
     },
-    async setChannelSource(channelIndex, kind) {
+    async setChannelSource(channelIndex, kind, index) {
       if (kind === null) {
+        const message = "A live channel always has a source — pick Analog, Dante or AES3 instead of clearing it.";
         notifications.show({
           color: "red",
           title: "Set source failed",
-          message: "A live channel always has a source — pick Analog, Dante or AES3 instead of clearing it.",
+          message,
           autoClose: false,
         });
-        return;
+        return actionFailed(message);
       }
-      await reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind));
+      return reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind, index));
     },
   };
 }

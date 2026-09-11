@@ -28,6 +28,7 @@ pub const FC_PEAK_LIMITER: u8 = 54;
 pub const FC_RMS_LIMITER: u8 = 55;
 pub const FC_NOISE_GATE: u8 = 69;
 pub const FC_SPEAKER_NAME: u8 = 77;
+pub const FC_ANALOG_MATRIX_INPUT: u8 = 79;
 
 /// The device's per-channel name field is a fixed 16-byte null-padded ASCII
 /// buffer — half the width of the 32-byte *preset* name field, so the two
@@ -333,6 +334,22 @@ pub fn build_set_source_select(channel_index: u8, source_code: u8) -> Vec<u8> {
         0,
         IN_OUT_FLAG_INPUT,
         &[source_code],
+    )
+}
+
+/// FC=79 ANALOG_MATRIX_INPUT, `in_out_flag=0`. Wire body: one byte, the
+/// 0-based physical analog input that feeds `channel_index`. Matches the
+/// vendor's `AnalogType` send (`SendStruct(Analog_Matrix_input, ch, b)`, a
+/// header with no flag/segment/link) and the reference's `analogType` action.
+/// Read back from the FC=27 trailer's analog-matrix bytes (`trailer+136+ch`).
+pub fn build_set_analog_input(channel_index: u8, analog_input_index: u8) -> Vec<u8> {
+    build_control_packet(
+        FC_ANALOG_MATRIX_INPUT,
+        channel_index,
+        0,
+        0,
+        IN_OUT_FLAG_INPUT,
+        &[analog_input_index],
     )
 }
 

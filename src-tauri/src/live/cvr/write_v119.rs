@@ -108,6 +108,10 @@ pub fn build_set_source_select(channel_index: u8, source_code: u8) -> Vec<u8> {
     super::write_v118::build_set_source_select(channel_index, source_code)
 }
 
+pub fn build_set_analog_input(channel_index: u8, analog_input_index: u8) -> Vec<u8> {
+    super::write_v118::build_set_analog_input(channel_index, analog_input_index)
+}
+
 pub fn build_set_output_bridge(pair_index: u8, bridged: bool) -> Vec<u8> {
     super::write_v118::build_set_output_bridge(pair_index, bridged)
 }

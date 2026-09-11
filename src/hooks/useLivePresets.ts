@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { notifications } from "@mantine/notifications";
+import { ACTION_OK, ACTION_UNAVAILABLE, actionFailed } from "../lib/actionResult";
 import { commands, type DevicePresets, type DevicePresetsSnapshot } from "../lib/bindings";
 import { showRollingNotification } from "../lib/rollingNotification";
 
@@ -63,7 +64,7 @@ export function useLivePresets(deviceId: string | undefined) {
 
   const recall = useCallback(
     async (slotIndex: number) => {
-      if (!deviceId) return;
+      if (!deviceId) return ACTION_UNAVAILABLE;
       const result = await commands.liveControlRecallPreset(deviceId, slotIndex);
       if (result.status === "error") {
         notifications.show({
@@ -72,7 +73,7 @@ export function useLivePresets(deviceId: string | undefined) {
           message: result.error.message,
           autoClose: false,
         });
-        return;
+        return actionFailed(result.error.message);
       }
       const slotName = presetsRef.current[deviceId]?.slots.find((s) => s.index === slotIndex)?.name;
       // Success replaces rather than stacks, matching `notifySuccess`. Must go
@@ -84,6 +85,7 @@ export function useLivePresets(deviceId: string | undefined) {
         message: slotName ? `"${slotName}" applied` : `Slot ${slotIndex + 1} applied`,
         autoClose: 1500,
       });
+      return ACTION_OK;
     },
     [deviceId],
   );
@@ -94,7 +96,7 @@ export function useLivePresets(deviceId: string | undefined) {
    * there is no background poll for FC=59 to correct it. */
   const store = useCallback(
     async (slotIndex: number, name: string) => {
-      if (!deviceId) return false;
+      if (!deviceId) return ACTION_UNAVAILABLE;
       const result = await commands.liveControlStorePreset(deviceId, slotIndex, name);
       if (result.status === "error") {
         notifications.show({
@@ -103,7 +105,7 @@ export function useLivePresets(deviceId: string | undefined) {
           message: result.error.message,
           autoClose: false,
         });
-        return false;
+        return actionFailed(result.error.message);
       }
       showRollingNotification("preset-store", {
         color: "green",
@@ -112,7 +114,7 @@ export function useLivePresets(deviceId: string | undefined) {
         autoClose: 1500,
       });
       await refresh();
-      return true;
+      return ACTION_OK;
     },
     [deviceId, refresh],
   );

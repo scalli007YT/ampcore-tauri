@@ -240,16 +240,22 @@ export const commands = {
 	 */
 	liveControlSetChannelName: (deviceId: string, channelIndex: number, direction: EqDirection, name: string | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_name", { deviceId, channelIndex, direction, name })),
 	/**
-	 *  FC=11 SOURCE_SELECT. Only the source *kind* is on the wire; the positional
-	 *  `index` the app tracks alongside it has no FC=11 equivalent, so it is not
-	 *  accepted here rather than silently ignored.
+	 *  FC=11 SOURCE_SELECT, plus FC=79 ANALOG_MATRIX_INPUT for an Analog pick.
+	 * 
+	 *  FC=11 carries only the source *kind*. Which physical analog input feeds
+	 *  the channel is a separate write — the vendor's `AnalogType` property
+	 *  (`Channels.cs`) and the reference's `analogType` action both send FC=79
+	 *  with the 0-based input index. Sending FC=11 alone made "Analog 2" on a
+	 *  channel already on analog a no-op on the device, even though the packet
+	 *  was acknowledged. `index` is only meaningful for Analog; Dante/AES3 are
+	 *  hard-wired 1:1 to their channel, so it is ignored for those kinds.
 	 * 
 	 *  `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
 	 *  see `channel_config_v118::source`), not something FC=11 selects — the
 	 *  reference's own comment notes backup is driven by the priority/auto-source
 	 *  controls (FC=80), which is Tier B.
 	 */
-	liveControlSetChannelSource: (deviceId: string, channelIndex: number, kind: SourceKind) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_source", { deviceId, channelIndex, kind })),
+	liveControlSetChannelSource: (deviceId: string, channelIndex: number, kind: SourceKind, index: number | null) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_channel_source", { deviceId, channelIndex, kind, index })),
 	/**
 	 *  FC=50 BRIDGE. `channel_index` is the bridged pair's **leader channel**,
 	 *  keeping this command's signature identical to the project-mode
@@ -445,11 +451,7 @@ export type AmpChannel = {
 	delayInMs?: number | null,
 	/**  Whether this channel's input is muted — Input tab. */
 	inputMuted?: boolean,
-	/**
-	 *  Output trim, ranged by `AmpParamRanges.output_trim_db` — Output tab.
-	 *  Persisted even on firmware where `CvrFirmwareCapability.split_trim_volume`
-	 *  is `false`, though the UI hides the control in that case.
-	 */
+	/**  Output trim, ranged by `AmpParamRanges.output_trim_db` — Output tab. */
 	outputTrimDb?: number | null,
 	/**  Output volume, ranged by `AmpParamRanges.output_volume_db` — Output tab. */
 	outputVolumeDb?: number | null,
@@ -777,8 +779,13 @@ export type CrossoverSlotPatch = {
 
 /**
  *  Numeric firmware "generation" (vNum) and the feature deltas it gates —
- *  ported 1:1 from the old app's `lib/amp-version.ts`. Computed fresh from a
+ *  ported from the old app's `lib/amp-version.ts`. Computed fresh from a
  *  firmware version string every time; never persisted independently.
+ * 
+ *  Deliberately has no trim/volume split flag: that file's comment claims a
+ *  "split trim/volume" arrives at 119, but output Volume (FC=9 flag 0) and
+ *  Trim (FC=9 flag 1) are both real, separate controls on 1.1.8 and 1.1.9
+ *  alike — the old app's own dashboard always showed both.
  */
 export type CvrFirmwareCapability = {
 	vNum: number | null,
@@ -788,7 +795,6 @@ export type CvrFirmwareCapability = {
 	firFilters: boolean,
 	noiseGateThreshold: boolean,
 	extendedDelay: boolean,
-	splitTrimVolume: boolean,
 };
 
 /**

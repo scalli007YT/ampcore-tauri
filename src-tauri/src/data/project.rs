@@ -177,8 +177,6 @@ pub struct AmpChannel {
     #[serde(default)]
     pub input_muted: bool,
     /// Output trim, ranged by `AmpParamRanges.output_trim_db` — Output tab.
-    /// Persisted even on firmware where `CvrFirmwareCapability.split_trim_volume`
-    /// is `false`, though the UI hides the control in that case.
     #[serde(default)]
     pub output_trim_db: f64,
     /// Output volume, ranged by `AmpParamRanges.output_volume_db` — Output tab.

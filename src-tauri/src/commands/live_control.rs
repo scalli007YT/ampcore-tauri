@@ -603,9 +603,15 @@ pub async fn live_control_set_channel_name(
     Ok(tally.finish())
 }
 
-/// FC=11 SOURCE_SELECT. Only the source *kind* is on the wire; the positional
-/// `index` the app tracks alongside it has no FC=11 equivalent, so it is not
-/// accepted here rather than silently ignored.
+/// FC=11 SOURCE_SELECT, plus FC=79 ANALOG_MATRIX_INPUT for an Analog pick.
+///
+/// FC=11 carries only the source *kind*. Which physical analog input feeds
+/// the channel is a separate write — the vendor's `AnalogType` property
+/// (`Channels.cs`) and the reference's `analogType` action both send FC=79
+/// with the 0-based input index. Sending FC=11 alone made "Analog 2" on a
+/// channel already on analog a no-op on the device, even though the packet
+/// was acknowledged. `index` is only meaningful for Analog; Dante/AES3 are
+/// hard-wired 1:1 to their channel, so it is ignored for those kinds.
 ///
 /// `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
 /// see `channel_config_v118::source`), not something FC=11 selects — the
@@ -618,6 +624,7 @@ pub async fn live_control_set_channel_source(
     device_id: String,
     channel_index: u8,
     kind: SourceKind,
+    index: Option<u32>,
 ) -> Result<LiveWriteAck, AppError> {
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let source_code: u8 = match kind {
@@ -630,10 +637,23 @@ pub async fn live_control_set_channel_source(
             ))
         }
     };
+    let analog_input = match (kind, index) {
+        (SourceKind::Analog, Some(i)) => Some(
+            u8::try_from(i).map_err(|_| AppError::from(format!("analog input index {} is out of range", i)))?,
+        ),
+        _ => None,
+    };
+    let unknown_firmware =
+        || AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id));
     let packet = write::build_set_source_select(firmware_family.as_deref(), channel_index, source_code)
-        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+        .ok_or_else(unknown_firmware)?;
     let mut tally = WriteTally::default();
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    if let Some(analog_input) = analog_input {
+        let packet = write::build_set_analog_input(firmware_family.as_deref(), channel_index, analog_input)
+            .ok_or_else(unknown_firmware)?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    }
     Ok(tally.finish())
 }
 

@@ -235,6 +235,14 @@ pub fn build_set_source_select(firmware_family: Option<&str>, channel_index: u8,
     }
 }
 
+pub fn build_set_analog_input(firmware_family: Option<&str>, channel_index: u8, analog_input_index: u8) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_analog_input(channel_index, analog_input_index)),
+        Some("1.1.9") => Some(super::write_v119::build_set_analog_input(channel_index, analog_input_index)),
+        _ => None,
+    }
+}
+
 /// `pair_index`, not a channel index — see `write_v118::build_set_output_bridge`.
 pub fn build_set_output_bridge(firmware_family: Option<&str>, pair_index: u8, bridged: bool) -> Option<Vec<u8>> {
     match firmware_family {
