@@ -361,6 +361,24 @@ export const commands = {
 	updatedAt: number | null,
 } | null, AppError>(__TAURI_INVOKE("device_model_link_set", { mac, ampModelId })),
 	deviceModelLinkGetAll: () => typedError<DeviceModelLink[], AppError>(__TAURI_INVOKE("device_model_link_get_all")),
+	/**
+	 *  Read-only: builds the fingerprint of one planned amp from the stored
+	 *  project. No save, no event — see `data/fingerprint.rs` for what is hashed.
+	 */
+	fingerprintProjectAmp: (projectId: string, assignmentId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_project_amp", { projectId, assignmentId })),
+	/**  Every amp in a project, in assignment order. */
+	fingerprintProject: (projectId: string) => typedError<AmpFingerprint[], AppError>(__TAURI_INVOKE("fingerprint_project", { projectId })),
+	/**
+	 *  Read-only: fingerprint of a live device from its latest FC=27 snapshot
+	 *  (plus FC=50 bridge state). Fails when no snapshot has arrived yet — the
+	 *  device must be polled first.
+	 */
+	fingerprintLiveDevice: (deviceId: string) => typedError<AmpFingerprint, AppError>(__TAURI_INVOKE("fingerprint_live_device", { deviceId })),
+	/**
+	 *  Every discovered device that has an FC=27 snapshot, ordered by device id.
+	 *  Devices never polled are skipped rather than failing the whole call.
+	 */
+	fingerprintLiveDevices: () => typedError<AmpFingerprint[], AppError>(__TAURI_INVOKE("fingerprint_live_devices")),
 };
 
 /* Types */
@@ -564,6 +582,32 @@ export type AmpDspTopology_Serialize = {
 	ratedRmsVoltage: number | null,
 };
 
+export type AmpFingerprint = {
+	fingerprintVersion: number,
+	origin: FingerprintOrigin,
+	identity: AmpIdentity,
+	/**  `None` whenever `missing` is non-empty. */
+	ampHash: string | null,
+	channels: ChannelFingerprint[],
+	/**
+	 *  One entry per bridgeable pair (A/B, C/D, …); a trailing unpaired
+	 *  channel has none. `None` = not reported yet (also listed in `missing`).
+	 */
+	bridgedPairs: (boolean | null)[],
+	/**  Human-readable reasons a hash could not be computed. */
+	missing: string[],
+};
+
+export type AmpIdentity = {
+	/**  Catalog model name, e.g. "DSP-2004" — the hashed identity. */
+	model: string | null,
+	/**  Informational only; not hashed. */
+	ampModelId: string | null,
+	channelCount: number,
+	/**  Protocol firmware bucket, e.g. "1.1.8"/"1.1.9" for CVR. */
+	firmwareFamily: string | null,
+};
+
 /**
  *  A reusable, project-independent amp hardware model. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
@@ -663,6 +707,24 @@ export type AppError = {
 	message: string,
 };
 
+/**  The per-channel fields `ampHash` covers beyond the speaker hash. */
+export type ChannelAmpCanonical = {
+	inputEq: EqCanonical,
+	/**
+	 *  `None` = no source picked (a project channel). An unreadable live
+	 *  source is reported in `missing` instead.
+	 */
+	source: ChannelSource | null,
+	/**  Only the model's matrix inputs (`0..matrix_input_count`). */
+	matrixCrosspoints: CrosspointCanonical[],
+	delayInMs: number | null,
+	outputTrimDb: number | null,
+	outputVolumeDb: number | null,
+	noiseGateEnabled: boolean,
+	/**  Trimmed; empty when unnamed or still the default "In{n}" label. */
+	inputName: string,
+};
+
 export type ChannelConfig = {
 	channelIndex: number,
 	gainIn: number,
@@ -733,6 +795,20 @@ export type ChannelEq = {
 	lp: CrossoverSlot,
 };
 
+export type ChannelFingerprint = {
+	channelIndex: number,
+	/**  Output letter, "A", "B", … */
+	label: string,
+	speakerHash: string | null,
+	outputName: string | null,
+	/**  `XXXX` from an output name ending in `_XXXX`, if present. */
+	embeddedHash: string | null,
+	/**  Set only when both `embedded_hash` and `speaker_hash` exist. */
+	embeddedHashMatches: boolean | null,
+	speaker: SpeakerCanonical,
+	ampFields: ChannelAmpCanonical,
+};
+
 /**
  *  Which physical input feeds a channel — a `SourceKind` alone isn't enough
  *  to identify one, since a model typically exposes several physical inputs
@@ -742,6 +818,12 @@ export type ChannelEq = {
 export type ChannelSource = {
 	kind: SourceKind,
 	index: number,
+};
+
+export type CrossoverCanonical = {
+	filterType: CrossoverFilterType,
+	freqHz: number | null,
+	active: boolean,
 };
 
 /**
@@ -775,6 +857,12 @@ export type CrossoverSlotPatch = {
 	filterType: CrossoverFilterType | null,
 	freqHz: number | null,
 	active: boolean | null,
+};
+
+export type CrosspointCanonical = {
+	sourceIndex: number,
+	gainDb: number | null,
+	active: boolean,
 };
 
 /**
@@ -918,6 +1006,16 @@ export type EqBand = {
 	active: boolean,
 };
 
+export type EqBandCanonical = {
+	filterType: EqFilterType,
+	freqHz: number | null,
+	/**  `None` when the filter type has no gain. */
+	gainDb: number | null,
+	/**  `None` when the filter type has no Q. */
+	q: number | null,
+	active: boolean,
+};
+
 /**
  *  Partial update for one `EqBand` — bundled into a single struct param
  *  (rather than 5 separate `Option<T>` params) because `projects_set_eq_band`
@@ -931,6 +1029,12 @@ export type EqBandPatch = {
 	gainDb: number | null,
 	q: number | null,
 	active: boolean | null,
+};
+
+export type EqCanonical = {
+	hp: CrossoverCanonical,
+	bands: EqBandCanonical[],
+	lp: CrossoverCanonical,
 };
 
 /**  Which of a channel's two independent 10-band EQ chains a command targets. */
@@ -959,6 +1063,21 @@ export type EqFilterCapabilityEntry = {
  *  yet consumed by any UI or persisted field this phase.
  */
 export type EqFilterType = "peaking" | "lowShelf" | "highShelf" | "allPass1st" | "allPass2nd" | "generalLow" | "generalHigh" | "butterworthLow" | "butterworthHigh" | "besselLow" | "besselHigh";
+
+/**
+ *  Where a fingerprint came from. Flat rather than an internally tagged enum:
+ *  `kind` says which of the optional ids are set.
+ */
+export type FingerprintOrigin = {
+	kind: FingerprintSource,
+	projectId: string | null,
+	assignmentId: string | null,
+	deviceId: string | null,
+	mac: string | null,
+	label: string | null,
+};
+
+export type FingerprintSource = "offline" | "online";
 
 /**
  *  A channel's output protection: independent RMS and Peak limiter stages,
@@ -1036,6 +1155,13 @@ export type PeakLimiter = {
 	releaseMs: number | null,
 };
 
+export type PeakLimiterCanonical = {
+	enabled: boolean,
+	thresholdVp: number | null,
+	holdMs: number | null,
+	releaseMs: number | null,
+};
+
 /**  Output power/impedance mode — ported from the old app's `POWER_MODE_NAMES`. */
 export type PowerMode = "lowOhm" | "v70" | "v100";
 
@@ -1056,6 +1182,13 @@ export type Project = {
 
 /**  RMS-window limiter stage — ranged by `AmpParamRanges.rms_limiter_*`. */
 export type RmsLimiter = {
+	enabled: boolean,
+	thresholdVrms: number | null,
+	attackMs: number | null,
+	releaseMultiplier: number | null,
+};
+
+export type RmsLimiterCanonical = {
 	enabled: boolean,
 	thresholdVrms: number | null,
 	attackMs: number | null,
@@ -1090,6 +1223,17 @@ export type SourceChannelCount = {
  *  not this enum itself.
  */
 export type SourceKind = "analog" | "dante" | "aes3" | "backup";
+
+/**  The values `speakerHash` is computed from. */
+export type SpeakerCanonical = {
+	outputEq: EqCanonical,
+	rmsLimiter: RmsLimiterCanonical,
+	peakLimiter: PeakLimiterCanonical,
+	delayOutMs: number | null,
+	phaseInverted: boolean,
+	/**  `None` only for a live channel whose power-mode byte is unmapped. */
+	powerMode: PowerMode | null,
+};
 
 export type Telemetry = {
 	/**  5 readings: [0-3] = per-channel, [4] = PSU. */

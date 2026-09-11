@@ -9,6 +9,9 @@ use tauri_specta::{collect_commands, Builder};
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
 use commands::capability::amp_capability_resolve;
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
+use commands::fingerprint::{
+    fingerprint_live_device, fingerprint_live_devices, fingerprint_project, fingerprint_project_amp,
+};
 use commands::live_control::{
     live_control_fetch_presets, live_control_get_channel_config, live_control_get_presets,
     live_control_get_telemetry, live_control_list_devices, live_control_recall_preset, live_control_refresh_now,
@@ -100,6 +103,10 @@ pub fn run() {
             device_model_link_auto_match,
             device_model_link_set,
             device_model_link_get_all,
+            fingerprint_project_amp,
+            fingerprint_project,
+            fingerprint_live_device,
+            fingerprint_live_devices,
         ]);
 
     #[cfg(debug_assertions)]

@@ -37,6 +37,10 @@ import {
 } from "lucide-react";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { EqEditor } from "./EqEditor";
+import {
+  FingerprintInspector,
+  type FingerprintTarget,
+} from "./FingerprintInspector";
 import { LimiterEditor } from "./LimiterEditor";
 import {
   PresetActionTile,
@@ -2269,6 +2273,16 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const deviceId = source?.kind === "live" ? source.device.id : undefined;
   const firmwareFamily =
     source?.kind === "live" ? source.device.firmwareFamily : undefined;
+  const fingerprintTarget: FingerprintTarget | undefined =
+    source?.kind === "project"
+      ? {
+          kind: "project",
+          projectId: source.project.id,
+          assignmentId: source.assignment.id,
+        }
+      : source?.kind === "live"
+        ? { kind: "live", deviceId: source.device.id }
+        : undefined;
 
   return (
     <Tabs defaultValue="input" orientation="vertical" className="h-full">
@@ -2290,6 +2304,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
             </Tabs.Tab>
           </Tooltip>
         ))}
+        <FingerprintInspector target={fingerprintTarget} />
       </Tabs.List>
 
       {visibleTabs.map(({ value, label, skeleton }) => {

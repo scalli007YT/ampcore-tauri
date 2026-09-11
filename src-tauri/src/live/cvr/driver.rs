@@ -707,11 +707,7 @@ fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'
     match raw[11] {
         FC_BASIC_INFO => {
             if let Some(info) = parse_basic_info_reply(raw) {
-                let firmware_family = match detect_firmware_family(&info.firmware_version) {
-                    CvrFirmwareFamily::V118 => Some("1.1.8".to_string()),
-                    CvrFirmwareFamily::V119 => Some("1.1.9".to_string()),
-                    CvrFirmwareFamily::Unknown => None,
-                };
+                let firmware_family = detect_firmware_family(&info.firmware_version).label().map(String::from);
                 sink.upsert(DiscoveredDevice {
                     id: format!("{protocol_slug}:{}", info.mac),
                     driver_id: protocol_slug.to_string(),

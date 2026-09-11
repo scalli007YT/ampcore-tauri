@@ -76,6 +76,20 @@ pub enum CvrFirmwareFamily {
 /// precise raw string is untouched and still fully visible via
 /// `DiscoveredDevice.firmware_version` — this only changes which adapter
 /// file handles a device, not what's displayed.
+impl CvrFirmwareFamily {
+    /// The brand-agnostic `DiscoveredDevice.firmware_family` label for this
+    /// bucket. Shared by the driver and offline fingerprinting
+    /// (`data/fingerprint.rs`) so a planned "1.1.9" and a device string land
+    /// on the exact same label.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            CvrFirmwareFamily::V118 => Some("1.1.8"),
+            CvrFirmwareFamily::V119 => Some("1.1.9"),
+            CvrFirmwareFamily::Unknown => None,
+        }
+    }
+}
+
 pub fn detect_firmware_family(version_string: &str) -> CvrFirmwareFamily {
     use crate::data::capability::cvr::{extract_vnum, VNUM_119};
     match extract_vnum(version_string) {
