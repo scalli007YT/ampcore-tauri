@@ -1,0 +1,201 @@
+/* Request feedback for a control — see ActionFeedback.tsx.
+ *
+ * Two stacked layers (the control's own content, and the indicator) that
+ * cross-fade on `data-status`, plus one SVG holding the spinner, check and
+ * cross so the pending → result change is a morph in place.
+ *
+ * The check and cross rest fully drawn (`stroke-dashoffset: 0`) and only
+ * *play* the draw-in while their status matches. Leaving the status removes
+ * the animation, so they fade out whole instead of snapping to undrawn
+ * mid-fade.
+ *
+ * Every duration and delay below is a base value multiplied by
+ * `--action-feedback-duration-scale`, so the whole animation's pace is one
+ * number: 1 = the base timings, 0.5 = twice as fast. How long a result is
+ * *held* is not an animation and lives in `ACTION_FEEDBACK_TIMING` instead. */
+
+.action-feedback {
+  --action-feedback-duration-scale: 0.5;
+  --af-s: var(--action-feedback-duration-scale);
+
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.action-feedback__content,
+.action-feedback__indicator {
+  position: absolute;
+  inset: 0;
+  transition:
+    opacity calc(140ms * var(--af-s)) ease,
+    transform calc(220ms * var(--af-s)) cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.action-feedback__indicator {
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transform: scale(0.5);
+  pointer-events: none;
+  color: var(--mantine-color-dimmed);
+}
+
+.action-feedback:not([data-status="idle"]) > .action-feedback__content {
+  opacity: 0;
+  transform: scale(0.8);
+}
+
+.action-feedback:not([data-status="idle"]) > .action-feedback__indicator {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.action-feedback[data-status="success"] > .action-feedback__indicator {
+  color: var(--mantine-color-green-6);
+  animation: action-feedback-pop calc(300ms * var(--af-s)) cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+.action-feedback[data-status="error"] > .action-feedback__indicator {
+  color: var(--mantine-color-red-6);
+  animation: action-feedback-shake calc(320ms * var(--af-s)) ease-in-out calc(60ms * var(--af-s));
+}
+
+.action-feedback__glyph {
+  width: var(--action-feedback-size, 20px);
+  height: var(--action-feedback-size, 20px);
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.action-feedback__spinner,
+.action-feedback__check,
+.action-feedback__cross {
+  opacity: 0;
+  transition: opacity calc(120ms * var(--af-s)) ease;
+}
+
+/* Spinner: a ~28% arc of the ring, rotating. */
+.action-feedback__spinner {
+  stroke-dasharray: 0.28 1;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: action-feedback-spin calc(720ms * var(--af-s)) linear infinite;
+}
+
+.action-feedback[data-status="pending"] .action-feedback__spinner {
+  opacity: 1;
+}
+
+.action-feedback__check,
+.action-feedback__cross {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+.action-feedback[data-status="success"] .action-feedback__check {
+  opacity: 1;
+  animation: action-feedback-draw calc(240ms * var(--af-s)) cubic-bezier(0.65, 0, 0.35, 1) calc(20ms * var(--af-s))
+    both;
+}
+
+.action-feedback[data-status="error"] .action-feedback__cross {
+  opacity: 1;
+}
+
+.action-feedback[data-status="error"] .action-feedback__cross--a {
+  animation: action-feedback-draw calc(160ms * var(--af-s)) cubic-bezier(0.65, 0, 0.35, 1) calc(20ms * var(--af-s))
+    both;
+}
+
+.action-feedback[data-status="error"] .action-feedback__cross--b {
+  animation: action-feedback-draw calc(160ms * var(--af-s)) cubic-bezier(0.65, 0, 0.35, 1) calc(110ms * var(--af-s))
+    both;
+}
+
+/* Screen-reader-only status text. */
+.action-feedback__announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@keyframes action-feedback-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes action-feedback-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes action-feedback-pop {
+  0% {
+    transform: scale(0.85);
+  }
+  55% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes action-feedback-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-3px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-2px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+}
+
+/* Reduced motion: keep the states and the colour change, drop the movement.
+ * The spinner keeps turning (slower) — without motion a pending state no
+ * longer reads as pending. */
+@media (prefers-reduced-motion: reduce) {
+  .action-feedback__content,
+  .action-feedback__indicator {
+    transition: opacity calc(120ms * var(--af-s)) ease;
+  }
+
+  .action-feedback__indicator,
+  .action-feedback:not([data-status="idle"]) > .action-feedback__content,
+  .action-feedback:not([data-status="idle"]) > .action-feedback__indicator {
+    transform: none;
+  }
+
+  .action-feedback[data-status] > .action-feedback__indicator,
+  .action-feedback[data-status] .action-feedback__check,
+  .action-feedback[data-status] .action-feedback__cross {
+    animation: none;
+  }
+
+  .action-feedback__spinner {
+    animation-duration: calc(1600ms * var(--af-s));
+  }
+}

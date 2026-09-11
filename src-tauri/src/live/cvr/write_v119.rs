@@ -62,3 +62,56 @@ pub fn build_set_eq_gain(channel_index: u8, in_out_flag: u8, band_index: u8, gai
 pub fn build_set_eq_q(channel_index: u8, in_out_flag: u8, band_index: u8, q: f32) -> Vec<u8> {
     super::write_v118::build_set_eq_q(channel_index, in_out_flag, band_index, q)
 }
+
+pub fn build_set_matrix_crosspoint(channel_index: u8, source_index: u8, gain_db: f32, active: bool) -> Vec<u8> {
+    super::write_v118::build_set_matrix_crosspoint(channel_index, source_index, gain_db, active)
+}
+
+/// The one Tier-A action with a *confirmed* 1.1.9 divergence rather than the
+/// blanket "reuse 1.1.8" caveat above: the reference documents a 2-byte
+/// `[enable][threshold]` body for v119+, against v118's 1-byte enable-only
+/// form. `threshold_dbu` is carried as a signed byte.
+///
+/// This still matches `CvrFirmwareCapability.noise_gate_threshold`, which is
+/// what already decides whether the UI offers a threshold control at all.
+pub fn build_set_noise_gate(channel_index: u8, enabled: bool, threshold_dbu: i8) -> Vec<u8> {
+    use super::protocol::build_control_packet;
+    let body = [if enabled { 0x00 } else { 0x01 }, threshold_dbu as u8];
+    build_control_packet(super::write_v118::FC_NOISE_GATE, channel_index, 0, 0, 1, &body)
+}
+
+pub fn build_set_rms_limiter(
+    channel_index: u8,
+    enabled: bool,
+    threshold_vrms: f32,
+    attack_ms: u16,
+    release_multiplier: u8,
+) -> Vec<u8> {
+    super::write_v118::build_set_rms_limiter(channel_index, enabled, threshold_vrms, attack_ms, release_multiplier)
+}
+
+pub fn build_set_peak_limiter(
+    channel_index: u8,
+    enabled: bool,
+    threshold_vp: f32,
+    hold_ms: u16,
+    release_ms: u16,
+) -> Vec<u8> {
+    super::write_v118::build_set_peak_limiter(channel_index, enabled, threshold_vp, hold_ms, release_ms)
+}
+
+pub fn build_set_channel_name(channel_index: u8, in_out_flag: u8, name: &str) -> Vec<u8> {
+    super::write_v118::build_set_channel_name(channel_index, in_out_flag, name)
+}
+
+pub fn build_set_source_select(channel_index: u8, source_code: u8) -> Vec<u8> {
+    super::write_v118::build_set_source_select(channel_index, source_code)
+}
+
+pub fn build_set_analog_input(channel_index: u8, analog_input_index: u8) -> Vec<u8> {
+    super::write_v118::build_set_analog_input(channel_index, analog_input_index)
+}
+
+pub fn build_set_output_bridge(pair_index: u8, bridged: bool) -> Vec<u8> {
+    super::write_v118::build_set_output_bridge(pair_index, bridged)
+}

@@ -7,41 +7,73 @@ import {
   type AppError,
   type ChannelConfig,
   type ChannelConfigSnapshot,
+  type DeviceBridgeSnapshot,
   type DiscoveredDevice,
   type LiveWriteAck,
 } from "./bindings";
+import { ACTION_OK, actionFailed, type ActionResult } from "./actionResult";
 import type { ConfigureActions, ConfigureCapabilities } from "./configureActions";
 import { showRollingNotification } from "./rollingNotification";
 
-/** Direct Edit mode has no Project — Speaker/Join planning and manually
- * authored `ohms` are genuinely inapplicable to a live device, not just
- * "not implemented yet" (see `ConfigureActions`'s per-field split). */
+/** Direct Edit mode has no Project — manually authored `ohms` is genuinely
+ * inapplicable to a live device, not just "not implemented yet" (see
+ * `ConfigureActions`'s per-field split). */
 export const LIVE_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
-  speakerPlanning: false,
-  outputJoin: false,
   ohmsEditable: false,
 };
+
+/** The `AmpChannel` fields `mapLiveChannel` fills from what a device actually
+ * reported (FC=27, plus FC=50 for bridging). Every other field it sets is a
+ * placeholder, there only so the configure tabs have a complete channel to
+ * render.
+ *
+ * Anything that compares or copies live state against a Project (offline↔
+ * online amp matching) must restrict itself to these fields — otherwise the
+ * placeholders read as real mismatches, or get written into the project as if
+ * the amp had reported them.
+ *
+ * Two entries are only real per snapshot, which a static list can't express:
+ * `powerMode` when `ChannelConfig.powerMode` is non-null (otherwise it falls
+ * back to "lowOhm"), and `outputBridged` once the device has answered FC=50
+ * for that pair (otherwise `false`). A channel synthesized before the first
+ * FC=27 poll carries no real fields at all. */
+export const LIVE_READABLE_CHANNEL_FIELDS: readonly (keyof AmpChannel)[] = [
+  "source",
+  "matrixCrosspoints",
+  "delayInMs",
+  "inputMuted",
+  "outputTrimDb",
+  "outputVolumeDb",
+  "delayOutMs",
+  "inputEq",
+  "outputEq",
+  "limiter",
+  "noiseGateEnabled",
+  "outputPhaseInverted",
+  "inputName",
+  "outputName",
+  "outputMuted",
+  "outputBridged",
+  "powerMode",
+];
 
 /** Maps one polled `ChannelConfig` onto the shape `AmpConfigureView`'s tabs
  * already expect (`AmpAssignment["channels"][number]`) — most fields are a
  * direct passthrough since `ChannelEq`/`Limiter`/`MatrixCrosspoint`/
  * `ChannelSource` are literally the same Rust types on both sides (see
- * `channel_config.rs`). Fields with no live-wire equivalent (`ohms`,
- * `speakerLibraryId`, `wayIndex`, `joinGroupId`, `outputBridged`) or no
- * read-side parsing yet (`noiseGateThresholdDbu`) get an honest default —
- * never a value implied to be live-accurate. `channelIndex` with no config
- * yet (poll still pending) synthesizes an all-default channel rather than
- * leaving a hole for callers to crash on. */
-function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number): AmpChannel {
+ * `channel_config.rs`). Fields with no live-wire equivalent (`ohms`) or no
+ * read-side parsing yet (`noiseGateThresholdDbu`) get placeholder defaults,
+ * never a value implied to be live-accurate — `LIVE_READABLE_CHANNEL_FIELDS`
+ * is the exact split.
+ * `channelIndex` with no config yet (poll still pending) synthesizes an
+ * all-default channel rather than leaving a hole for callers to crash on. */
+function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number, bridged: boolean): AmpChannel {
   if (!config) {
-    return { channelIndex, ohms: 8, speakerLibraryId: null, wayIndex: null };
+    return { channelIndex, ohms: 8 };
   }
   return {
     channelIndex: config.channelIndex,
     ohms: 8,
-    speakerLibraryId: null,
-    wayIndex: null,
-    joinGroupId: null,
     source: config.source,
     matrixCrosspoints: config.matrixCrosspoints,
     delayInMs: config.delayInMs ?? 0,
@@ -58,7 +90,10 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number)
     inputName: config.inputName,
     outputName: config.outputName,
     outputMuted: config.outputMuted,
-    outputBridged: false,
+    // Real device state, from the FC=50 poll. Both channels of a pair report
+    // the pair's single flag — the wire has one byte per pair, not per
+    // channel.
+    outputBridged: bridged,
     powerMode: config.powerMode ?? "lowOhm",
   };
 }
@@ -70,9 +105,19 @@ export function buildLiveAssignmentViewModel(
   device: DiscoveredDevice,
   snapshot: ChannelConfigSnapshot | undefined,
   channelCount: number,
+  bridge?: DeviceBridgeSnapshot,
 ): AmpAssignment {
+  // Bridge state comes from the FC=50 poll, not the FC=27 snapshot — see
+  // `live/cvr/bridge.rs`. Indexed by pair, so channels 0/1 both read pair 0
+  // and channels 2/3 both read pair 1, matching the vendor's own mapping
+  // (`bridges[0]` = out 1, `bridges[1]` = out 3). A pair the device has not
+  // answered for yet is `null`, which reads as not bridged here.
   const channels: AmpChannel[] = Array.from({ length: channelCount }, (_, i) =>
-    mapLiveChannel(snapshot?.channels.find((c) => c.channelIndex === i), i),
+    mapLiveChannel(
+      snapshot?.channels.find((c) => c.channelIndex === i),
+      i,
+      bridge?.bridged?.[Math.floor(i / 2)] ?? false,
+    ),
   );
   return {
     id: device.id,
@@ -111,7 +156,7 @@ export function buildLiveAssignmentViewModel(
 async function reportWrite(
   label: string,
   call: Promise<{ status: "ok"; data: LiveWriteAck } | { status: "error"; error: AppError }>,
-): Promise<void> {
+): Promise<ActionResult> {
   const result = await call;
   if (result.status === "error") {
     console.error(`${label} failed`, result.error);
@@ -121,9 +166,12 @@ async function reportWrite(
       message: result.error.message,
       autoClose: false,
     });
-    return;
+    return actionFailed(result.error.message);
   }
   notifySuccess(label, result.data);
+  // The toast is only one consumer of the outcome — the control that fired
+  // the write can show it too (see `ConfigureActions`' `ActionResult`).
+  return ACTION_OK;
 }
 
 /** Green counterpart to the red failure toast: confirms the device actually
@@ -176,28 +224,68 @@ function notifySuccess(label: string, ack: LiveWriteAck): void {
 export function createLiveConfigureActions(deviceId: string): ConfigureActions {
   return {
     async setChannelDelayIn(channelIndex, delayInMs) {
-      await reportWrite("Set input delay", commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs));
+      return reportWrite("Set input delay", commands.liveControlSetChannelDelayIn(deviceId, channelIndex, delayInMs));
     },
     async setChannelInputMute(channelIndex, muted) {
-      await reportWrite("Set input mute", commands.liveControlSetChannelInputMute(deviceId, channelIndex, muted));
+      return reportWrite("Set input mute", commands.liveControlSetChannelInputMute(deviceId, channelIndex, muted));
     },
     async setChannelOutput(channelIndex, trimDb, volumeDb, delayOutMs) {
-      await reportWrite("Set output trim/volume/delay", commands.liveControlSetChannelOutput(deviceId, channelIndex, trimDb, volumeDb, delayOutMs));
+      return reportWrite("Set output trim/volume/delay", commands.liveControlSetChannelOutput(deviceId, channelIndex, trimDb, volumeDb, delayOutMs));
     },
     async setChannelPhaseInvert(channelIndex, inverted) {
-      await reportWrite("Set phase invert", commands.liveControlSetChannelPhaseInvert(deviceId, channelIndex, inverted));
+      return reportWrite("Set phase invert", commands.liveControlSetChannelPhaseInvert(deviceId, channelIndex, inverted));
     },
     async setChannelOutputMute(channelIndex, muted) {
-      await reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
+      return reportWrite("Set output mute", commands.liveControlSetOutputMute(deviceId, channelIndex, muted));
     },
     async setChannelPowerMode(channelIndex, mode) {
-      await reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
+      return reportWrite("Set power mode", commands.liveControlSetChannelPowerMode(deviceId, channelIndex, mode));
     },
     async setEqBand(channelIndex, direction, bandIndex, patch) {
-      await reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));
+      return reportWrite("Set EQ band", commands.liveControlSetEqBand(deviceId, channelIndex, direction, bandIndex, patch));
     },
     async setCrossoverSlot(channelIndex, direction, slot, patch) {
-      await reportWrite("Set crossover", commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch));
+      return reportWrite("Set crossover", commands.liveControlSetCrossoverSlot(deviceId, channelIndex, direction, slot, patch));
+    },
+    async setMatrixCrosspoint(channelIndex, sourceIndex, gainDb, active) {
+      return reportWrite(
+        "Set matrix crosspoint",
+        commands.liveControlSetMatrixCrosspoint(deviceId, channelIndex, sourceIndex, gainDb, active),
+      );
+    },
+    async setChannelNoiseGate(channelIndex, enabled, thresholdDbu) {
+      return reportWrite("Set noise gate", commands.liveControlSetChannelNoiseGate(deviceId, channelIndex, enabled, thresholdDbu));
+    },
+    async setChannelLimiter(channelIndex, patch) {
+      return reportWrite("Set limiter", commands.liveControlSetChannelLimiter(deviceId, channelIndex, patch));
+    },
+    async setChannelName(channelIndex, side, name) {
+      return reportWrite("Set channel name", commands.liveControlSetChannelName(deviceId, channelIndex, side, name));
+    },
+    /** FC=11 carries only the source *kind*; for Analog, `index` goes out as
+     * a follow-up FC=79 write selecting the physical input (see
+     * `live_control_set_channel_source`). Clearing a source
+     * (`kind === null`) is not something FC=11 can express — a live channel
+     * always has some source selected — so it is rejected up front rather
+     * than sent as a packet that would mean something else. */
+    /** Re-enabled now that `bridgedPairs` gives the UI a real readback —
+     * see the `outputBridged` note in `mapLiveChannel`. `channelIndex` is
+     * the pair's leader; FC=50 addresses pairs by their leader channel. */
+    async setOutputBridge(pairLeaderChannelIndex, bridged) {
+      return reportWrite("Set bridge", commands.liveControlSetOutputBridge(deviceId, pairLeaderChannelIndex, bridged));
+    },
+    async setChannelSource(channelIndex, kind, index) {
+      if (kind === null) {
+        const message = "A live channel always has a source — pick Analog, Dante or AES3 instead of clearing it.";
+        notifications.show({
+          color: "red",
+          title: "Set source failed",
+          message,
+          autoClose: false,
+        });
+        return actionFailed(message);
+      }
+      return reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind, index));
     },
   };
 }

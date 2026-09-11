@@ -343,5 +343,14 @@ pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
         _ => None,
     };
 
+    // `Bridge_data.Bridge` is wire-inverted like MUTE: 0 = bridged.
+    // Confirmed twice over — the reference's readback (`bridged: raw === 0`)
+    // and the vendor's own demo-data writer
+    // (`bridges[0].Bridge = (bridgeOut ? 0 : 1)`).
+    //
+    // One entry per *pair*, so a 4-channel amp reports 2 and the array is
+    // truncated to the pairs this payload's channel count actually has —
+    // never padded out to a fixed 2, which would invent a C/D pair on a
+    // 2-channel amp.
     Some(ChannelConfigSnapshot { channels, backup_priority, rotary_locked, received_at: now_millis() })
 }

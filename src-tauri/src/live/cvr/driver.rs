@@ -13,6 +13,7 @@ use crate::live::state::{DiscoveredDevice, LiveEventSink};
 
 use super::channel_config;
 use super::protocol::*;
+use super::bridge::{BRIDGE_PAIR_COUNT, FC_BRIDGE};
 use super::request::{
     Assembled, FragmentReassembler, RequestError, RequestRegistry, RequestSpec, ResultSink, WriteRegistry, WriteSpec,
 };
@@ -25,7 +26,11 @@ use super::telemetry;
 // has no event-loop/GC contention to worry about at this rate.
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(4000);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
-const OFFLINE_TIMEOUT_MS: f64 = 8_000.0;
+// Three discovery cycles. Only subscribed amps get heartbeats now, so every
+// other discovered amp stays "online" purely on its 4s discovery reply — at
+// two cycles (8s), two lost broadcast replies in a row would flicker it
+// offline in the device list.
+const OFFLINE_TIMEOUT_MS: f64 = 12_000.0;
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// FC=27 is far heavier than a 6-byte heartbeat (~2.4KB for a 4-channel amp,
 /// requiring fragmentation + reassembly + a full round trip), but the
@@ -45,6 +50,10 @@ const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// A periodic sync is this app's own choice, which is why the write interlock
 /// below (`WriteRegistry::has_pending`) is load-bearing here in a way it never
 /// needed to be there.
+/// Bridge state changes only when someone writes it, so this polls far
+/// slower than the config tick. Two pairs alternate across ticks, so a given
+/// pair refreshes at half this rate.
+const BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Drives the request registry's settle/hard-timeout checks — finer than
 /// `SETTLE_MS` (20ms) so a settled request resolves promptly.
@@ -153,6 +162,12 @@ async fn run(
     let mut heartbeat_tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
     let mut config_poll_tick = tokio::time::interval(CONFIG_POLL_INTERVAL);
+    let mut bridge_poll_tick = tokio::time::interval(BRIDGE_POLL_INTERVAL);
+    // FC=50 addresses one pair per request and the request registry keys by
+    // `(ip, function_code)`, so both pairs cannot be in flight at once. This
+    // alternates which pair each tick asks for, giving every pair a refresh
+    // every `2 * BRIDGE_POLL_INTERVAL`.
+    let mut bridge_poll_pair: u8 = 0;
     let mut deadline_tick = tokio::time::interval(DEADLINE_TICK_INTERVAL);
     let mut stats: HashMap<String, DeviceStats> = HashMap::new();
     let mut reassembler = FragmentReassembler::default();
@@ -301,7 +316,13 @@ async fn run(
                 if writes.has_pending() { continue; }
                 let targets: Vec<(String, String)> = {
                     let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
+                    // Only devices some live consumer has subscribed to (`is_polled`, see
+                    // `live_control_set_poll_subscription`), and only while online. Every
+                    // other discovered amp gets discovery alone. The online check still
+                    // matters for a subscribed amp: `mark_stale_offline` never removes
+                    // entries, so an unplugged amp would otherwise keep being polled.
+                    // Recovery goes through discovery either way.
+                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| (d.id.clone(), d.ip.clone())).collect()
                 };
                 for (_id, ip) in targets {
                     // Any pending request for this ip (not just FC=27) blocks a
@@ -313,7 +334,7 @@ async fn run(
                     if registry.has_pending_for_ip(&ip) {
                         continue;
                     }
-                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, body: Vec::new(), sink: ResultSink::Internal };
+                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), sink: ResultSink::Internal };
                     let (packet, superseded) = registry.register(spec, Instant::now());
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
@@ -322,12 +343,82 @@ async fn run(
                 }
             }
 
+            _ = bridge_poll_tick.tick() => {
+                // Same interlocks as the config poll: never race a pending
+                // write, and never race another request on the same IP.
+                //
+                // Routine poll chatter sits behind `wire_log_enabled()` now
+                // that bridge readback is confirmed working against real
+                // 1.1.8 hardware; only genuine failures still print
+                // unconditionally. Skips are normal and frequent — the
+                // 200ms config poll is often in flight — so they are the
+                // noisiest thing here and the first to go quiet.
+                if writes.has_pending() {
+                    if wire_log_enabled() {
+                        println!("[cvr driver] FC=50 poll skipped: a write is still pending");
+                    }
+                    continue;
+                }
+                // The pair only advances once a request actually goes out.
+                // Advancing unconditionally starved pair 0 completely: the
+                // 1500ms bridge tick and the 200ms config tick phase-locked
+                // such that pair 0's turn always landed while an FC=27 was
+                // in flight, so it was skipped every single time and only
+                // pair 1 was ever polled.
+                let pair = bridge_poll_pair;
+                let targets: Vec<String> = {
+                    let inner = sink.state.lock().unwrap();
+                    // Only devices some live consumer has subscribed to (`is_polled`, see
+                    // `live_control_set_poll_subscription`), and only while online. Every
+                    // other discovered amp gets discovery alone. The online check still
+                    // matters for a subscribed amp: `mark_stale_offline` never removes
+                    // entries, so an unplugged amp would otherwise keep being polled.
+                    // Recovery goes through discovery either way.
+                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| d.ip.clone()).collect()
+                };
+                if targets.is_empty() && wire_log_enabled() {
+                    println!("[cvr driver] FC=50 poll (pair {pair}): no devices discovered yet");
+                }
+                for ip in targets {
+                    if registry.has_pending_for_ip(&ip) {
+                        if wire_log_enabled() {
+                            println!("[cvr driver] FC=50 poll to {ip} (pair {pair}) skipped: another request is in flight");
+                        }
+                        continue;
+                    }
+                    let spec = RequestSpec {
+                        ip: ip.clone(),
+                        function_code: FC_BRIDGE,
+                        chx: pair,
+                        body: Vec::new(),
+                        sink: ResultSink::Internal,
+                    };
+                    let (packet, superseded) = registry.register(spec, Instant::now());
+                    if let Some(resolved) = superseded {
+                        deliver_resolved(resolved, &sink);
+                    }
+                    match socket.send_to(&packet, (ip.as_str(), AMP_PORT)).await {
+                        Ok(n) => {
+                            if wire_log_enabled() {
+                                println!("[cvr driver] FC=50 poll -> {ip} pair {pair} ({n} bytes sent)");
+                            }
+                            bridge_poll_pair = (bridge_poll_pair + 1) % BRIDGE_PAIR_COUNT;
+                        }
+                        // A send that fails outright is a real fault, not
+                        // routine — always surfaced.
+                        Err(e) => eprintln!("[cvr driver] FC=50 poll -> {ip} pair {pair} FAILED to send: {e}"),
+                    }
+                }
+            }
+
             _ = heartbeat_tick.tick() => {
                 // Vendor `isRefresh` interlock — see `WriteRegistry::has_pending`.
                 if writes.has_pending() { continue; }
                 let targets: Vec<(String, String)> = {
                     let inner = sink.state.lock().unwrap();
-                    inner.devices.values().map(|d| (d.id.clone(), d.ip.clone())).collect()
+                    // Subscribed + online only — see the config poll above. Matters most
+                    // here: at 50ms this is 20 packets/s per amp it reaches.
+                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| (d.id.clone(), d.ip.clone())).collect()
                 };
                 let query = build_heartbeat_query();
                 for (id, ip) in targets {
@@ -351,6 +442,17 @@ async fn run(
             }
 
             _ = stats_tick.tick() => {
+                // Per-device link quality, once a second. Gated behind
+                // `AMPCORE_WIRE_LOG` like the rest of the routine wire chatter —
+                // it printed unconditionally and drowned out real errors. The
+                // window is still reset when logging is off, so enabling the
+                // env var never reports an accumulated backlog.
+                if !wire_log_enabled() {
+                    for s in stats.values_mut() {
+                        s.reset_window();
+                    }
+                    continue;
+                }
                 for (id, s) in stats.iter_mut() {
                     if s.sent == 0 {
                         continue;
@@ -379,11 +481,90 @@ async fn run(
 /// `Internal` path here and `live_control_refresh_now`'s `External`
 /// on-demand path (see `commands/live_control.rs`), so both go through
 /// identical validation/parsing instead of two copies drifting apart.
+/// Diagnostic: prints which FC=27 body bytes changed since the previous
+/// poll for this device.
+///
+/// This is how the prior web port located `mute_in` ("empirically confirmed
+/// by diffing live snapshots with known mute states") and it is the only
+/// reliable way to locate a field whose offset is otherwise guesswork.
+/// Toggle one setting on the amp and whatever offsets print are that
+/// setting's bytes.
+///
+/// It already earned its keep: bridging pair 0 printed
+/// `34 (ch0+34): 0x01 -> 0x00`, i.e. absolute offset 34 — exactly
+/// `Machine_Dname[32] + Standby[1] + Rotary_lock[1]` from the vendor
+/// `Syncdata_44` struct. So that prefix block is real, and sits at the
+/// *start* of the body rather than after the channel blocks (where an
+/// earlier attempt wrongly placed it, via `trailer_base`). Bridge state is
+/// read from FC=50 rather than from here (see `bridge.rs`), but the finding
+/// means absolute offsets 32/33 are worth checking against this app's
+/// `rotary_locked`, which currently reads `trailer_base + 33`.
+///
+/// FC=27 carries configuration, not telemetry (levels/temps arrive on their
+/// own function code), so a quiescent amp should print nothing at all and a
+/// single toggle should print a handful of offsets. Offsets are reported
+/// both absolutely and relative to whichever region they fall in, since the
+/// per-channel stride and the trailer base are what the parser actually
+/// indexes against.
+fn log_sync_body_diff(ip: &str, body: &[u8]) {
+    if !wire_log_enabled() {
+        return;
+    }
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    let store = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut store = match store.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    let previous = match store.get(ip) {
+        Some(prev) if prev.len() == body.len() => prev.clone(),
+        // First sight of this device, or the payload changed shape — nothing
+        // meaningful to diff against, so just record and wait for the next.
+        _ => {
+            store.insert(ip.to_string(), body.to_vec());
+            println!("[cvr driver] FC=27 diff baseline for {ip}: {} body bytes", body.len());
+            return;
+        }
+    };
+
+    // Same geometry the v118 parser derives, so reported offsets line up
+    // with the constants in `channel_config_v118.rs`.
+    const BYTES_PER_CHANNEL: usize = 515;
+    const TRAILER: usize = 172;
+    let trailer_base = if body.len() > TRAILER && (body.len() - TRAILER) % BYTES_PER_CHANNEL == 0 {
+        Some(body.len() - TRAILER)
+    } else {
+        None
+    };
+
+    let mut changes: Vec<String> = Vec::new();
+    for (abs, (old, new)) in previous.iter().zip(body.iter()).enumerate() {
+        if old == new {
+            continue;
+        }
+        let where_ = match trailer_base {
+            Some(base) if abs >= base => format!("trailer+{}", abs - base),
+            Some(_) => format!("ch{}+{}", abs / BYTES_PER_CHANNEL, abs % BYTES_PER_CHANNEL),
+            None => "?".to_string(),
+        };
+        changes.push(format!("{abs} ({where_}): 0x{old:02x} -> 0x{new:02x}"));
+    }
+
+    if !changes.is_empty() {
+        println!("[cvr driver] FC=27 body changed for {ip}: {}", changes.join(", "));
+    }
+    store.insert(ip.to_string(), body.to_vec());
+}
+
 pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -> Result<channel_config::ChannelConfigSnapshot, String> {
     if frame.len() < STRUCT_HEADER_LEN + CHECKSUM_LEN {
         return Err(format!("FC=27 frame too short for {}: {} bytes", ip, frame.len()));
     }
     let body = &frame[STRUCT_HEADER_LEN..frame.len() - CHECKSUM_LEN];
+    log_sync_body_diff(ip, body);
     let device = {
         let inner = sink.state.lock().unwrap();
         inner.devices.values().find(|d| d.ip == ip).cloned()
@@ -415,6 +596,68 @@ pub fn parse_and_store_sync_data(ip: &str, frame: &[u8], sink: &LiveEventSink) -
 fn deliver_resolved(resolved: super::request::ResolvedRequest, sink: &LiveEventSink) {
     match resolved.sink {
         ResultSink::Internal => {
+            if resolved.function_code == FC_BRIDGE {
+                // Successful replies are wire-log only; the failure
+                // branches still print unconditionally, since "no reply" and
+                // "reply the parser rejected" are indistinguishable from the
+                // UI (an unanswered pair renders the same as an unbridged
+                // one) and are the two things worth knowing about.
+                match resolved.result {
+                    Ok(frame) => {
+                        if wire_log_enabled() {
+                            println!(
+                                "[cvr driver] FC=50 reply <- {} ({} bytes) [{}]",
+                                resolved.ip,
+                                frame.len(),
+                                frame.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                            );
+                        }
+                        match super::bridge::parse_bridge_reply(&frame) {
+                            Some((pair, bridged)) => {
+                                let device_id = {
+                                    let inner = sink.state.lock().unwrap();
+                                    inner.devices.values().find(|d| d.ip == resolved.ip).map(|d| d.id.clone())
+                                };
+                                match device_id {
+                                    Some(device_id) => {
+                                        if wire_log_enabled() {
+                                            println!(
+                                                "[cvr driver] FC=50 bridge for {}: pair {pair} = {bridged}",
+                                                resolved.ip
+                                            );
+                                        }
+                                        sink.set_bridge_pair(device_id, pair, bridged);
+                                    }
+                                    None => eprintln!(
+                                        "[cvr driver] FC=50 reply from {} dropped: no discovered device has that ip",
+                                        resolved.ip
+                                    ),
+                                }
+                            }
+                            None => eprintln!(
+                                "[cvr driver] FC=50 reply from {} rejected by parser (unexpected shape)",
+                                resolved.ip
+                            ),
+                        }
+                    }
+                    // Timeouts are wire-log only: a model without bridging
+                    // never answers, and that would otherwise print forever.
+                    Err(RequestError::Timeout) => {
+                        if wire_log_enabled() {
+                            println!("[cvr driver] FC=50 request to {} timed out — no bridge reply", resolved.ip);
+                        }
+                    }
+                    Err(RequestError::ShapeMismatch(len)) => {
+                        eprintln!("[cvr driver] FC=50 reply from {} had an implausible shape ({len} bytes)", resolved.ip)
+                    }
+                    Err(RequestError::Busy) => {
+                        if wire_log_enabled() {
+                            println!("[cvr driver] FC=50 request to {} was rejected as busy", resolved.ip);
+                        }
+                    }
+                }
+                return;
+            }
             if resolved.function_code != FC_SYNC_DATA {
                 return;
             }

@@ -15,7 +15,7 @@
 //!
 //! Request/response body is always 34 bytes: `mode(1) + ch_x(1) +
 //! buffers(32)`. Only the modes this app exposes a command for are covered —
-//! `mode=1` (store/save) and `mode=3` (clear-all) are out of scope.
+//! `mode=3` (clear-all) is out of scope.
 
 use super::protocol::{build_control_packet, CHECKSUM_LEN, STRUCT_HEADER_LEN};
 use serde::Serialize;
@@ -24,6 +24,7 @@ use specta::Type;
 pub const FC_SAVE_RECALL: u8 = 59;
 
 const PRESET_MODE_LIST: u8 = 0;
+const PRESET_MODE_STORE: u8 = 1;
 const PRESET_MODE_RECALL: u8 = 2;
 const PRESET_MODE_CURRENT: u8 = 4;
 const PRESET_NAME_LEN: usize = 32;
@@ -66,6 +67,30 @@ pub fn build_recall_packet(slot_index: u8) -> Vec<u8> {
     let mut body = vec![0u8; PRESET_BODY_LEN];
     body[0] = PRESET_MODE_RECALL;
     body[1] = slot_index;
+    build_control_packet(FC_SAVE_RECALL, 0, 0, 0, 0, &body)
+}
+
+/// Full control packet for `mode=1` (store the device's current DSP state
+/// into `slot_index`, 0-based, under `name`). Same device-wide framing as
+/// `build_recall_packet` — the slot index rides in the body's `ch_x` byte —
+/// but the 32-byte `buffers` field carries the new slot name rather than
+/// staying zeroed.
+///
+/// Ground-truthed against the prior web port's `AmpDevice.storePreset`,
+/// which cites the original vendor C# source:
+/// `Save_Recall_data { mode = 1, ch_x = slotIndex, buffers = name[32] }`.
+///
+/// `name` is truncated to 32 bytes and null-padded, matching how
+/// `decode_name_field` reads it back. Truncation is on a byte boundary, so
+/// non-ASCII input is rejected by the caller rather than risking a split
+/// UTF-8 sequence — the device's name fields are ASCII.
+pub fn build_store_packet(slot_index: u8, name: &str) -> Vec<u8> {
+    let mut body = vec![0u8; PRESET_BODY_LEN];
+    body[0] = PRESET_MODE_STORE;
+    body[1] = slot_index;
+    let bytes = name.as_bytes();
+    let len = bytes.len().min(PRESET_NAME_LEN);
+    body[2..2 + len].copy_from_slice(&bytes[..len]);
     build_control_packet(FC_SAVE_RECALL, 0, 0, 0, 0, &body)
 }
 

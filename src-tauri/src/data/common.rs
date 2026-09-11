@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// Marks whether a catalog entry (Speaker Library / Amp Model Catalog) was
+/// Marks whether a catalog entry (Amp Model Catalog) was
 /// authored by the user or shipped built-in with the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]

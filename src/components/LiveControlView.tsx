@@ -4,6 +4,8 @@ import { AmpConfigureView } from "./AmpConfigureView";
 import { DeviceTelemetryPanel } from "./DeviceTelemetryPanel";
 import { useLiveChannelConfig } from "../hooks/useLiveChannelConfig";
 import { useLiveDevices } from "../hooks/useLiveDevices";
+import { useLiveDriver } from "../hooks/useLiveDriver";
+import { useLivePolling } from "../hooks/useLivePolling";
 import { useLiveTelemetry } from "../hooks/useLiveTelemetry";
 import { commands, type AmpModelCatalogEntry, type DiscoveredDevice } from "../lib/bindings";
 import { useIsCompact } from "../lib/breakpoints";
@@ -66,6 +68,13 @@ export function LiveControlView() {
   const [view, setView] = useState("configure");
 
   const selectedDevice = devices.find((d) => d.id === selectedId) ?? null;
+
+  // Live Control is one consumer of the shared live connector, not its owner:
+  // it starts the driver like any other live-aware view would, and subscribes
+  // only the amp being looked at to the heavy polls. Unmounting drops its
+  // subscription, so leaving Live Control falls back to discovery-only.
+  useLiveDriver();
+  useLivePolling(selectedId ? [selectedId] : []);
   const { ampModels, ampModel, setManualModel } = useDeviceModelLink(selectedDevice);
 
   if (!ready) {

@@ -72,6 +72,15 @@ pub enum ResultSink {
 pub struct RequestSpec {
     pub ip: String,
     pub function_code: u8,
+    /// StructHeader `chx`. Zero for whole-device queries (FC=27, FC=59),
+    /// but FC=50 addresses one bridgeable *pair* per request, so the field
+    /// has to reach `build_protocol_packet` rather than being hardcoded.
+    ///
+    /// Note the registry still keys pending requests by `(ip,
+    /// function_code)` alone, so two requests differing only in `chx` cannot
+    /// be in flight at once — callers that need several (the driver's bridge
+    /// poll) issue them across successive ticks instead.
+    pub chx: u8,
     pub body: Vec<u8>,
     pub sink: ResultSink,
 }
@@ -127,7 +136,7 @@ impl RequestRegistry {
         let generation = self.generations.entry(key.clone()).and_modify(|g| *g += 1).or_insert(1);
         let generation = *generation;
 
-        let packet = super::protocol::build_protocol_packet(spec.function_code, 2, 0, &spec.body);
+        let packet = super::protocol::build_protocol_packet(spec.function_code, 2, spec.chx, &spec.body);
 
         let superseded = self.pending.remove(&key).map(|old| ResolvedRequest {
             ip: key.0.clone(),

@@ -15,12 +15,17 @@ pub const VNUM_EXTENDED_EQ: u32 = 116;
 pub const VNUM_PHONIC_VARIANT: u32 = 117;
 /// V_num threshold for speaker management + FIR filters (current baseline).
 pub const VNUM_118: u32 = 118;
-/// V_num threshold for noise gate thresholds, extended delay, split trim/volume.
+/// V_num threshold for noise gate thresholds and extended delay.
 pub const VNUM_119: u32 = 119;
 
 /// Numeric firmware "generation" (vNum) and the feature deltas it gates —
-/// ported 1:1 from the old app's `lib/amp-version.ts`. Computed fresh from a
+/// ported from the old app's `lib/amp-version.ts`. Computed fresh from a
 /// firmware version string every time; never persisted independently.
+///
+/// Deliberately has no trim/volume split flag: that file's comment claims a
+/// "split trim/volume" arrives at 119, but output Volume (FC=9 flag 0) and
+/// Trim (FC=9 flag 1) are both real, separate controls on 1.1.8 and 1.1.9
+/// alike — the old app's own dashboard always showed both.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CvrFirmwareCapability {
@@ -31,7 +36,6 @@ pub struct CvrFirmwareCapability {
     pub fir_filters: bool,
     pub noise_gate_threshold: bool,
     pub extended_delay: bool,
-    pub split_trim_volume: bool,
 }
 
 impl CvrFirmwareCapability {
@@ -46,7 +50,6 @@ impl CvrFirmwareCapability {
             fir_filters: at_least(VNUM_118),
             noise_gate_threshold: at_least(VNUM_119),
             extended_delay: at_least(VNUM_119),
-            split_trim_volume: at_least(VNUM_119),
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::data::common::now_millis;
 
+use super::cvr::bridge::DeviceBridgeSnapshot;
 use super::cvr::channel_config::ChannelConfigSnapshot;
 use super::cvr::preset::DevicePresetsSnapshot;
 use super::cvr::request::{RequestSpec, WriteSpec};
@@ -59,6 +60,17 @@ pub struct LiveDeviceInner {
     /// `live_control_fetch_presets`), but stored/emitted the same way as
     /// `telemetry`/`channel_config` so every mounted view stays in sync.
     pub presets: HashMap<String, DevicePresetsSnapshot>,
+    /// Latest FC=50 bridge state per device id. Polled by the driver on its
+    /// own tick (see `bridge.rs` for why this is not read out of FC=27).
+    pub bridge: HashMap<String, DeviceBridgeSnapshot>,
+    /// Which devices receive the heavy polls (heartbeat, FC=27, FC=50), keyed
+    /// by subscription token. Every discovered amp not in any set gets
+    /// discovery alone. One token per live consumer — Live Control's current
+    /// selection today, project mode once offline/online amp fusion exists —
+    /// so consumers add to each other instead of overwriting one shared slot.
+    /// Maintained by `live_control_set_poll_subscription`; read through
+    /// `is_polled`.
+    pub poll_subscriptions: HashMap<String, HashSet<String>>,
     /// Reaches into the running CVR driver's request engine from outside its
     /// task (e.g. a future Tauri command) — `None` whenever no driver is
     /// running. `Some` while `CvrDriver::start`'s spawned task is alive.
@@ -68,6 +80,15 @@ pub struct LiveDeviceInner {
     /// device's ACK echo comes back to a socket that still exists and can be
     /// correlated. `None` whenever no driver is running.
     pub write_tx: Option<mpsc::UnboundedSender<WriteSpec>>,
+}
+
+impl LiveDeviceInner {
+    /// Whether any live consumer currently wants the heavy polls for this
+    /// device — the union across every `poll_subscriptions` entry, so a device
+    /// two views both subscribe to is still polled exactly once.
+    pub fn is_polled(&self, device_id: &str) -> bool {
+        self.poll_subscriptions.values().any(|ids| ids.contains(device_id))
+    }
 }
 
 /// Arc-wrapped (unlike `ProjectDataState`'s bare `Mutex<T>`) because a clone
@@ -83,6 +104,8 @@ impl LiveDeviceState {
             telemetry: HashMap::new(),
             channel_config: HashMap::new(),
             presets: HashMap::new(),
+            bridge: HashMap::new(),
+            poll_subscriptions: HashMap::new(),
             request_tx: None,
             write_tx: None,
         })))
@@ -138,6 +161,16 @@ pub struct DeviceChannelConfig {
 /// Event/command payload pairing a device id with its latest FC=59 preset
 /// snapshot — the shape `live_presets:updated` emits and
 /// `live_control_get_presets` returns a snapshot `Vec` of.
+/// Event/command payload pairing a device id with its latest FC=50 bridge
+/// snapshot — the shape `live_bridge:updated` emits and
+/// `live_control_get_bridge` returns a `Vec` of.
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBridge {
+    pub device_id: String,
+    pub bridge: DeviceBridgeSnapshot,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DevicePresets {
@@ -183,6 +216,24 @@ impl LiveEventSink {
             inner.presets.insert(device_id.clone(), presets.clone());
         }
         self.app.emit("live_presets:updated", &DevicePresets { device_id, presets }).ok();
+    }
+
+    /// Merges one pair's FC=50 result into the device's snapshot, leaving
+    /// the other pair's last-known value untouched — the driver polls the
+    /// two pairs on separate ticks (the request registry keys by
+    /// `(ip, function_code)`, so they cannot be in flight together), so a
+    /// whole-snapshot replace would blank the pair that wasn't just asked.
+    pub fn set_bridge_pair(&self, device_id: String, pair: u8, bridged: bool) {
+        let snapshot = {
+            let mut inner = self.state.lock().unwrap();
+            let entry = inner.bridge.entry(device_id.clone()).or_insert_with(DeviceBridgeSnapshot::empty);
+            if let Some(slot) = entry.bridged.get_mut(pair as usize) {
+                *slot = Some(bridged);
+            }
+            entry.received_at = now_millis();
+            entry.clone()
+        };
+        self.app.emit("live_bridge:updated", &DeviceBridge { device_id, bridge: snapshot }).ok();
     }
 
     pub fn upsert(&self, mut device: DiscoveredDevice) {

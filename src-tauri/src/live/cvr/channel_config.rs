@@ -4,8 +4,7 @@
 //! its `firmware_family` (same pattern as `telemetry.rs`).
 //!
 //! Deliberately separate from `AmpChannel` (`data/project.rs`): that struct
-//! carries planning-only fields (`id`, `ohms`, `speaker_library_id`,
-//! `way_index`) with no live-wire equivalent — the same separation already
+//! carries planning-only fields (`id`, `ohms`) with no live-wire equivalent — the same separation already
 //! established between `Telemetry` and `AmpChannel`.
 
 use serde::Serialize;

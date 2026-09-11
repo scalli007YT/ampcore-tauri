@@ -89,8 +89,7 @@ fn default_protocol() -> AmpProtocol {
     AmpProtocol::CvrUdp
 }
 
-/// A reusable, project-independent amp hardware model — mirrors the Speaker
-/// Library pattern. Referenced by `AmpAssignment.amp_model_id` to pre-populate
+/// A reusable, project-independent amp hardware model. Referenced by `AmpAssignment.amp_model_id` to pre-populate
 /// an assignment's channel count during offline planning.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +108,8 @@ pub struct AmpModelCatalogEntry {
     pub topology: AmpDspTopology,
     pub notes: Option<String>,
     pub origin: EntryOrigin,
-    /// Soft-delete flag — see SpeakerLibraryEntry.archived for rationale.
+    /// Soft-delete flag — archived entries stay resolvable for existing
+    /// Project references but are hidden from pickers for new assignments.
     pub archived: bool,
     pub created_at: f64,
     pub updated_at: f64,

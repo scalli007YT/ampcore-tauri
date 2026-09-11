@@ -3,17 +3,19 @@ use std::net::Ipv4Addr;
 use tauri::{AppHandle, State};
 use tokio::sync::mpsc;
 
-use crate::data::capability::PowerMode;
+use crate::data::capability::{PowerMode, SourceKind};
 use crate::data::common::now_millis;
-use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection};
+use crate::data::project::{CrossoverSlot, CrossoverSlotKind, CrossoverSlotPatch, EqBand, EqBandPatch, EqDirection, LimiterPatch};
 use crate::error::AppError;
+use crate::live::cvr::channel_config::ChannelConfig;
 use crate::live::cvr::channel_config_v118::{crossover_filter_type_code, eq_filter_type_code};
+use crate::live::cvr::write_v118::CHANNEL_NAME_FIELD_LEN;
 use crate::live::cvr::preset;
 use crate::live::cvr::request::{WriteOutcome, WriteSpec};
 use crate::live::cvr::write;
 use crate::live::driver::all_drivers;
 use crate::live::state::{
-    DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink, LiveWriteAck,
+    DeviceBridge, DeviceChannelConfig, DevicePresets, DeviceTelemetry, DiscoveredDevice, LiveDeviceState, LiveEventSink, LiveWriteAck,
 };
 
 /// Shared lookup for every write command below: resolves `device_id` to its
@@ -157,7 +159,8 @@ pub fn live_control_start(app: AppHandle, state: State<LiveDeviceState>) -> Resu
     // locks this same `Arc<Mutex<LiveDeviceInner>>` itself (to store
     // `request_tx`), and `std::sync::Mutex` isn't reentrant: holding it
     // across the call deadlocks the very first `live_control_start`
-    // invocation, which fires automatically on app load.
+    // invocation, which fires when the first live-aware view mounts (see
+    // `useLiveDriver`).
     let sink = LiveEventSink {
         app,
         state: state.0.clone(),
@@ -179,6 +182,38 @@ pub fn live_control_stop(state: State<LiveDeviceState>) -> Result<(), AppError> 
     };
     for h in handles {
         h.request_stop();
+    }
+    Ok(())
+}
+
+/// Declares which devices one live consumer needs the heavy polls (heartbeat,
+/// FC=27, FC=50) for. Devices no consumer has asked for get discovery alone.
+///
+/// `token` identifies one subscription, and `device_ids` replaces that
+/// token's whole set; an empty list removes the token. The driver polls the
+/// union of every token's set, so any number of views can subscribe at once
+/// — Live Control today, project mode once offline/online amp fusion lands —
+/// without overwriting each other, and two views on the same amp never
+/// double-poll it. The frontend mints a fresh token per effect run (see
+/// `useLivePolling`), which keeps this correct even when a subscribe and a
+/// clear arrive out of order.
+///
+/// Pure state, no wire I/O: the ticks read it on their next pass, so a newly
+/// subscribed device gets its first heartbeat within ~50ms and its first
+/// FC=27 within ~200ms. On-demand commands (preset fetch, refresh, writes and
+/// the post-bridge-write refetch) do not depend on it.
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_set_poll_subscription(
+    state: State<LiveDeviceState>,
+    token: String,
+    device_ids: Vec<String>,
+) -> Result<(), AppError> {
+    let mut inner = state.0.lock().map_err(|e| e.to_string())?;
+    if device_ids.is_empty() {
+        inner.poll_subscriptions.remove(&token);
+    } else {
+        inner.poll_subscriptions.insert(token, device_ids.into_iter().collect());
     }
     Ok(())
 }
@@ -234,6 +269,7 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
     let spec = crate::live::cvr::request::RequestSpec {
         ip: ip.clone(),
         function_code: crate::live::cvr::protocol::FC_SYNC_DATA,
+        chx: 0,
         body: Vec::new(),
         sink: crate::live::cvr::request::ResultSink::External(tx),
     };
@@ -253,6 +289,10 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
 /// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
 /// comfortably outlasts one poll cycle without adding noticeable latency to
 /// the common case (which succeeds on the first attempt).
+/// The device's preset name field is a fixed 32-byte ASCII buffer (see
+/// `preset.rs`'s `PRESET_NAME_LEN`); anything longer is silently truncated
+/// on the wire, so reject it up front instead.
+const PRESET_NAME_MAX_LEN: usize = 32;
 const PRESET_REQUEST_MAX_RETRIES: u32 = 10;
 const PRESET_REQUEST_RETRY_DELAY_MS: u64 = 30;
 
@@ -284,6 +324,7 @@ async fn send_preset_request(
         let spec = crate::live::cvr::request::RequestSpec {
             ip: ip.to_string(),
             function_code: crate::live::cvr::preset::FC_SAVE_RECALL,
+            chx: 0,
             body: body.clone(),
             sink: crate::live::cvr::request::ResultSink::External(tx),
         };
@@ -334,6 +375,17 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
     Ok(DevicePresets { device_id, presets: snapshot })
 }
 
+/// Snapshot getter for FC=50 bridge state — no wire I/O, just whatever the
+/// driver's bridge poll tick last stored. Mirrors
+/// `live_control_get_presets`; the continuous push side is the
+/// `live_bridge:updated` event.
+#[tauri::command]
+#[specta::specta]
+pub fn live_control_get_bridge(state: State<LiveDeviceState>) -> Result<Vec<DeviceBridge>, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(inner.bridge.iter().map(|(device_id, bridge)| DeviceBridge { device_id: device_id.clone(), bridge: bridge.clone() }).collect())
+}
+
 /// Snapshot getter mirroring `live_control_get_channel_config` — returns
 /// whatever `live_control_fetch_presets` last stored, no wire I/O.
 #[tauri::command]
@@ -355,6 +407,389 @@ pub async fn live_control_recall_preset(state: State<'_, LiveDeviceState>, devic
     let mut tally = WriteTally::default();
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
     tally.record(write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_recall_packet(slot_index)).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// Reads one channel out of the last FC=27 snapshot.
+///
+/// Several Tier-A writes are whole-record packets — the matrix crosspoint
+/// carries gain *and* active, each limiter stage carries all four of its
+/// parameters — while this app's commands take partial patches. Merging the
+/// patch onto the device's last-known state is what keeps a partial update
+/// from zeroing the fields it doesn't mention. (The reference's `matrixActive`
+/// action does exactly that: it hardcodes 0 dB when toggling a crosspoint,
+/// silently discarding a configured gain.)
+///
+/// Erroring when no snapshot exists yet is deliberate: without it there is no
+/// honest value for the untouched fields, and inventing defaults would push
+/// silent wrong values to a live amp. The FC=27 poll runs continuously for
+/// every discovered device, so this is only reachable in the first moments
+/// after startup.
+fn current_channel(
+    state: &State<'_, LiveDeviceState>,
+    device_id: &str,
+    channel_index: u8,
+) -> Result<ChannelConfig, AppError> {
+    let inner = state.0.lock().map_err(|e| e.to_string())?;
+    let snapshot = inner
+        .channel_config
+        .get(device_id)
+        .ok_or_else(|| AppError::from(format!("device {} has no channel data yet — wait for the first poll", device_id)))?;
+    snapshot
+        .channels
+        .iter()
+        .find(|c| c.channel_index == u32::from(channel_index))
+        .cloned()
+        .ok_or_else(|| AppError::from(format!("device {} has no channel {}", device_id, channel_index)))
+}
+
+/// FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
+/// is filled from the crosspoint's current state, since the wire packet has
+/// no partial form (see `current_channel`).
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_matrix_crosspoint(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    source_index: u8,
+    gain_db: Option<f64>,
+    active: Option<bool>,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let channel = current_channel(&state, &device_id, channel_index)?;
+    let existing = channel
+        .matrix_crosspoints
+        .iter()
+        .find(|c| c.source_index == u32::from(source_index))
+        .ok_or_else(|| AppError::from(format!("channel {} has no matrix source {}", channel_index, source_index)))?;
+
+    let packet = write::build_set_matrix_crosspoint(
+        firmware_family.as_deref(),
+        channel_index,
+        source_index,
+        gain_db.unwrap_or(existing.gain_db) as f32,
+        active.unwrap_or(existing.active),
+    )
+    .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+
+    let mut tally = WriteTally::default();
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=69 NOISE_GATE. `threshold_dbu` is only carried on 1.1.9+ — on 1.1.8 the
+/// wire body is the enable flag alone, matching
+/// `CvrFirmwareCapability.noise_gate_threshold`.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_noise_gate(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    enabled: bool,
+    threshold_dbu: f64,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let packet = write::build_set_noise_gate(firmware_family.as_deref(), channel_index, enabled, threshold_dbu as i8)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    let mut tally = WriteTally::default();
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=55 RMS_LIMITER / FC=54 PEAK_LIMITER. Takes the same `LimiterPatch` the
+/// project-mode command does, and sends one packet per stage the patch
+/// actually touches — a patch that only changes an RMS field leaves the peak
+/// stage alone rather than rewriting it.
+///
+/// Each stage is a whole-record write, so the fields the patch omits come
+/// from the current snapshot (see `current_channel`).
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_limiter(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    patch: LimiterPatch,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let channel = current_channel(&state, &device_id, channel_index)?;
+
+    let touches_rms = patch.rms_enabled.is_some()
+        || patch.rms_threshold_vrms.is_some()
+        || patch.rms_attack_ms.is_some()
+        || patch.rms_release_multiplier.is_some();
+    let touches_peak = patch.peak_enabled.is_some()
+        || patch.peak_threshold_vp.is_some()
+        || patch.peak_hold_ms.is_some()
+        || patch.peak_release_ms.is_some();
+
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    if touches_rms {
+        let rms = &channel.limiter.rms;
+        packets.push(
+            write::build_set_rms_limiter(
+                firmware_family.as_deref(),
+                channel_index,
+                patch.rms_enabled.unwrap_or(rms.enabled),
+                patch.rms_threshold_vrms.unwrap_or(rms.threshold_vrms) as f32,
+                patch.rms_attack_ms.unwrap_or(rms.attack_ms) as u16,
+                patch.rms_release_multiplier.unwrap_or(rms.release_multiplier) as u8,
+            )
+            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?,
+        );
+    }
+    if touches_peak {
+        let peak = &channel.limiter.peak;
+        packets.push(
+            write::build_set_peak_limiter(
+                firmware_family.as_deref(),
+                channel_index,
+                patch.peak_enabled.unwrap_or(peak.enabled),
+                patch.peak_threshold_vp.unwrap_or(peak.threshold_vp) as f32,
+                patch.peak_hold_ms.unwrap_or(peak.hold_ms) as u16,
+                patch.peak_release_ms.unwrap_or(peak.release_ms) as u16,
+            )
+            .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?,
+        );
+    }
+
+    let mut tally = WriteTally::default();
+    for packet in &packets {
+        tally.record(write::send_control(&write_tx, ip, packet).await.map_err(|e| e.to_string())?);
+    }
+    Ok(tally.finish())
+}
+
+/// FC=77 SPEAKER_NAME. `direction` picks which side of the channel is
+/// renamed — the only wire difference is `in_out_flag`.
+///
+/// Clearing a name (`None`) writes an all-zero field, which is how the read
+/// side already decodes "unnamed" (`decode_name_field` stops at the first
+/// NUL). Same ASCII/length rules as the preset store, against the channel
+/// field's narrower 16-byte width.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_name(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    direction: EqDirection,
+    name: Option<String>,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+
+    let name = name.unwrap_or_default();
+    let trimmed = name.trim();
+    if !trimmed.is_ascii() {
+        return Err(AppError::from("channel name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
+    }
+    if trimmed.bytes().any(|b| b == 0) {
+        return Err(AppError::from("channel name cannot contain a null byte".to_string()));
+    }
+    if trimmed.len() > CHANNEL_NAME_FIELD_LEN {
+        return Err(AppError::from(format!("channel name is limited to {} characters", CHANNEL_NAME_FIELD_LEN)));
+    }
+
+    let in_out_flag = match direction {
+        EqDirection::Input => 0,
+        EqDirection::Output => 1,
+    };
+    let packet = write::build_set_channel_name(firmware_family.as_deref(), channel_index, in_out_flag, trimmed)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    let mut tally = WriteTally::default();
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=11 SOURCE_SELECT, plus FC=79 ANALOG_MATRIX_INPUT for an Analog pick.
+///
+/// FC=11 carries only the source *kind*. Which physical analog input feeds
+/// the channel is a separate write — the vendor's `AnalogType` property
+/// (`Channels.cs`) and the reference's `analogType` action both send FC=79
+/// with the 0-based input index. Sending FC=11 alone made "Analog 2" on a
+/// channel already on analog a no-op on the device, even though the packet
+/// was acknowledged. `index` is only meaningful for Analog; Dante/AES3 are
+/// hard-wired 1:1 to their channel, so it is ignored for those kinds.
+///
+/// `SourceKind::Backup` is rejected: it is a readback state (raw code >= 3,
+/// see `channel_config_v118::source`), not something FC=11 selects — the
+/// reference's own comment notes backup is driven by the priority/auto-source
+/// controls (FC=80), which is Tier B.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_channel_source(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    kind: SourceKind,
+    index: Option<u32>,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let source_code: u8 = match kind {
+        SourceKind::Analog => 0,
+        SourceKind::Dante => 1,
+        SourceKind::Aes3 => 2,
+        SourceKind::Backup => {
+            return Err(AppError::from(
+                "backup is a readback state, not an FC=11 selection — configure it via priority inputs".to_string(),
+            ))
+        }
+    };
+    let analog_input = match (kind, index) {
+        (SourceKind::Analog, Some(i)) => Some(
+            u8::try_from(i).map_err(|_| AppError::from(format!("analog input index {} is out of range", i)))?,
+        ),
+        _ => None,
+    };
+    let unknown_firmware =
+        || AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id));
+    let packet = write::build_set_source_select(firmware_family.as_deref(), channel_index, source_code)
+        .ok_or_else(unknown_firmware)?;
+    let mut tally = WriteTally::default();
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    if let Some(analog_input) = analog_input {
+        let packet = write::build_set_analog_input(firmware_family.as_deref(), channel_index, analog_input)
+            .ok_or_else(unknown_firmware)?;
+        tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    }
+    Ok(tally.finish())
+}
+
+/// FC=50 BRIDGE. `channel_index` is the bridged pair's **leader channel**,
+/// keeping this command's signature identical to the project-mode
+/// `projects_set_output_bridge` so `ConfigureActions` needs no per-source
+/// branching.
+///
+/// The wire, however, addresses **pairs** (0 = A/B, 1 = C/D), so the
+/// conversion happens right here at the boundary. Passing the leader channel
+/// through unconverted is what made bridging work for A/B and silently do
+/// nothing for C/D — channel 2 became `chx=2`, which the device does not
+/// recognise as a pair.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_output_bridge(
+    app: AppHandle,
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    channel_index: u8,
+    bridged: bool,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+
+    // A pair is always led by its even-numbered channel, so an odd index is
+    // a caller bug rather than something to round away silently.
+    if channel_index % 2 != 0 {
+        return Err(AppError::from(format!(
+            "channel {} is not a pair leader — bridging is addressed by the even channel of a pair",
+            channel_index
+        )));
+    }
+    let pair_index = channel_index / 2;
+    if pair_index >= crate::live::cvr::bridge::BRIDGE_PAIR_COUNT {
+        return Err(AppError::from(format!("channel {} is outside the bridgeable pairs", channel_index)));
+    }
+
+    let packet = write::build_set_output_bridge(firmware_family.as_deref(), pair_index, bridged)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    let mut tally = WriteTally::default();
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+
+    // Re-read this pair the moment the device ACKs, instead of waiting for
+    // the driver's own bridge tick — that tick alternates pairs and skips
+    // whenever another request is in flight, so a toggled pair could take
+    // seconds to come back, long enough that the control reads as broken.
+    //
+    // This deliberately does NOT use `ResultSink::Internal`. The driver's
+    // `request_rx` arm rejects any request while another is pending for the
+    // same IP, and that rejection is only reported back through an
+    // `External` sink — an `Internal` one is dropped in silence. With the
+    // 200ms FC=27 config poll almost always occupying that per-IP slot, a
+    // fire-and-forget refresh would be discarded roughly half the time and
+    // there would be no way to tell. So it goes out as `External` and
+    // retries on `Busy`, exactly like `send_preset_request`, then stores the
+    // result through the same `LiveEventSink` the driver would have used.
+    //
+    // Failure here is still non-fatal: the write itself is already
+    // confirmed, so the worst case falls back to the next scheduled poll.
+    let request_tx = { state.0.lock().map_err(|e| e.to_string())?.request_tx.clone() };
+    if let Some(request_tx) = request_tx {
+        for attempt in 0..=PRESET_REQUEST_MAX_RETRIES {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if request_tx
+                .send(crate::live::cvr::request::RequestSpec {
+                    ip: ip.to_string(),
+                    function_code: crate::live::cvr::bridge::FC_BRIDGE,
+                    chx: pair_index,
+                    body: Vec::new(),
+                    sink: crate::live::cvr::request::ResultSink::External(tx),
+                })
+                .is_err()
+            {
+                break;
+            }
+            match rx.await {
+                Ok(Ok(frame)) => {
+                    if let Some((pair, is_bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
+                        let sink = LiveEventSink { app, state: state.0.clone() };
+                        sink.set_bridge_pair(device_id, pair, is_bridged);
+                    }
+                    break;
+                }
+                Ok(Err(crate::live::cvr::request::RequestError::Busy)) if attempt < PRESET_REQUEST_MAX_RETRIES => {
+                    tokio::time::sleep(std::time::Duration::from_millis(PRESET_REQUEST_RETRY_DELAY_MS)).await;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    Ok(tally.finish())
+}
+
+/// FC=59 mode=1 store — writes the device's *current* DSP state into
+/// `slot_index` under `name`. Note the asymmetry with recall: the wire
+/// protocol carries only the name, never parameter data (see `preset.rs`),
+/// so this saves whatever the amp is doing right now rather than pushing
+/// anything from the app.
+///
+/// Rejects a name the device cannot round-trip: `decode_name_field` reads
+/// slot names back as a null-terminated ASCII field, so an embedded NUL
+/// would silently truncate the stored name and non-ASCII bytes would come
+/// back mangled. Empty names are rejected too — the list parser has no way
+/// to distinguish one from an unused slot.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_store_preset(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    slot_index: u8,
+    name: String,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    require_v118_firmware(&device_id, firmware_family.as_deref())?;
+
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::from("preset name cannot be empty".to_string()));
+    }
+    if !trimmed.is_ascii() {
+        return Err(AppError::from("preset name must be ASCII — the device stores names as fixed-width ASCII".to_string()));
+    }
+    if trimmed.bytes().any(|b| b == 0) {
+        return Err(AppError::from("preset name cannot contain a null byte".to_string()));
+    }
+    if trimmed.len() > PRESET_NAME_MAX_LEN {
+        return Err(AppError::from(format!("preset name is limited to {} characters", PRESET_NAME_MAX_LEN)));
+    }
+
+    let mut tally = WriteTally::default();
+    tally.record(
+        write::send_control(&write_tx, ip, &crate::live::cvr::preset::build_store_packet(slot_index, trimmed))
+            .await
+            .map_err(|e| e.to_string())?,
+    );
     Ok(tally.finish())
 }
 
