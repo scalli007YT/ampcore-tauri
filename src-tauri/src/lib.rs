@@ -6,7 +6,10 @@ mod live;
 use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
-use commands::amp_links::{projects_amp_edit_lock, projects_link_amp, projects_unlink_amp, projects_validate_amp_link};
+use commands::amp_links::{
+    projects_amp_edit_lock, projects_link_amp, projects_merge_amp_from_live, projects_unlink_amp,
+    projects_validate_amp_link,
+};
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
 use commands::capability::amp_capability_resolve;
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
@@ -14,7 +17,7 @@ use commands::fingerprint::{
     fingerprint_live_device, fingerprint_live_devices, fingerprint_project, fingerprint_project_amp,
 };
 use commands::live_control::{
-    live_control_fetch_presets, live_control_get_channel_config, live_control_get_presets,
+    live_control_fetch_bridge, live_control_fetch_presets, live_control_get_channel_config, live_control_get_presets,
     live_control_get_telemetry, live_control_list_devices, live_control_recall_preset, live_control_refresh_now,
     live_control_store_preset, live_control_get_bridge, live_control_set_matrix_crosspoint, live_control_set_channel_noise_gate,
     live_control_set_channel_limiter, live_control_set_channel_name, live_control_set_channel_source,
@@ -88,6 +91,7 @@ pub fn run() {
             live_control_recall_preset,
             live_control_store_preset,
             live_control_get_bridge,
+            live_control_fetch_bridge,
             live_control_set_matrix_crosspoint,
             live_control_set_channel_noise_gate,
             live_control_set_channel_limiter,
@@ -113,6 +117,7 @@ pub fn run() {
             projects_link_amp,
             projects_unlink_amp,
             projects_amp_edit_lock,
+            projects_merge_amp_from_live,
             live_control_set_rotary_lock,
         ]);
 

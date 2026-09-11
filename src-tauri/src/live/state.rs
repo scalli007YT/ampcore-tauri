@@ -15,7 +15,7 @@ use super::cvr::request::{RequestSpec, WriteSpec};
 use super::cvr::telemetry::Telemetry;
 use super::driver::DriverHandle;
 
-#[derive(Debug, Clone, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredDevice {
     /// "{driver_id}:{mac}", e.g. "cvr:AA:BB:CC:DD:EE:FF" — stable, brand-namespaced.
@@ -236,12 +236,30 @@ impl LiveEventSink {
         self.app.emit("live_bridge:updated", &DeviceBridge { device_id, bridge: snapshot }).ok();
     }
 
+    /// Records a discovery reply. Emits **only when something actually
+    /// changed**: every amp answers every discovery broadcast, so emitting
+    /// unconditionally re-broadcast the whole device list to the frontend
+    /// once per amp per cycle — and every consumer of `useLiveDevices`
+    /// re-rendered for it. That was tolerable at a 4s cadence and is not at
+    /// 1s (see `DISCOVERY_INTERVAL`); a steady amp's reply is identical each
+    /// time, so the common case now emits nothing at all.
     pub fn upsert(&self, mut device: DiscoveredDevice) {
         device.online = true;
         device.last_seen_at = now_millis();
         let snapshot = {
             let mut inner = self.state.lock().unwrap();
-            inner.devices.insert(device.id.clone(), device);
+            let previous = inner.devices.insert(device.id.clone(), device.clone());
+            let changed = match previous {
+                // `last_seen_at` ticks on every reply, so it is held equal for
+                // this comparison — otherwise nothing would ever be
+                // "unchanged". Liveness is carried by `online`, which is
+                // compared.
+                Some(previous) => DiscoveredDevice { last_seen_at: previous.last_seen_at, ..device } != previous,
+                None => true,
+            };
+            if !changed {
+                return;
+            }
             inner.devices.values().cloned().collect::<Vec<_>>()
         };
         self.app.emit("live_device:updated", &snapshot).ok();

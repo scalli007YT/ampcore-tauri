@@ -271,6 +271,8 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
         function_code: crate::live::cvr::protocol::FC_SYNC_DATA,
         chx: 0,
         body: Vec::new(),
+        // FC=27 is always fragmented.
+        expects_fragments: true,
         sink: crate::live::cvr::request::ResultSink::External(tx),
     };
     request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
@@ -284,48 +286,56 @@ pub async fn live_control_refresh_now(app: AppHandle, state: State<'_, LiveDevic
     Ok(DeviceChannelConfig { device_id, config })
 }
 
-/// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
-/// `CONFIG_POLL_INTERVAL` (200ms) and a single exchange typically resolves
-/// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
-/// comfortably outlasts one poll cycle without adding noticeable latency to
-/// the common case (which succeeds on the first attempt).
 /// The device's preset name field is a fixed 32-byte ASCII buffer (see
 /// `preset.rs`'s `PRESET_NAME_LEN`); anything longer is silently truncated
 /// on the wire, so reject it up front instead.
 const PRESET_NAME_MAX_LEN: usize = 32;
-const PRESET_REQUEST_MAX_RETRIES: u32 = 10;
-const PRESET_REQUEST_RETRY_DELAY_MS: u64 = 30;
+/// Retry budget for `RequestError::Busy` — the FC=27 poll tick fires every
+/// `CONFIG_POLL_INTERVAL` (200ms) and a single exchange typically resolves
+/// in well under that, so 10 retries at 30ms apart (up to ~300ms worst case)
+/// comfortably outlasts one poll cycle without adding noticeable latency to
+/// the common case (which succeeds on the first attempt). Shared by every
+/// `send_request_with_retry` caller, which is why it is no longer named
+/// after presets.
+const REQUEST_BUSY_MAX_RETRIES: u32 = 10;
+const REQUEST_BUSY_RETRY_DELAY_MS: u64 = 30;
 
-/// Sends one FC=59 request through the driver's request registry with an
-/// `External` sink and awaits its resolved frame — shared by both halves of
-/// `live_control_fetch_presets` below. Not reusable across an `.await` point
-/// with a second call in flight for the same device: `RequestRegistry` keys
-/// pending requests by `(ip, function_code)` only, so a second FC=59 request
-/// sent before the first resolves would supersede/fail it (see
+/// Sends one request through the driver's request registry with an
+/// `External` sink and awaits its resolved frame — the one place every
+/// on-demand read goes through (presets, bridge). Not reusable across an
+/// `.await` point with a second call in flight for the same device and
+/// function code: `RequestRegistry` keys pending requests by `(ip,
+/// function_code)` only, so a second request under the same code sent before
+/// the first resolves would supersede/fail it (see
 /// `live/cvr/request.rs`'s `RequestRegistry::register`) — callers must fully
 /// await one call before making the next.
 ///
 /// Transparently retries `RequestError::Busy` (the driver rejects a new
-/// request outright when another exchange — most commonly the background
-/// FC=27 poll — is already in flight for this ip, since the shared per-IP
-/// `FragmentReassembler` can't safely interleave two concurrent
-/// multi-fragment responses; see `RequestError::Busy`'s doc). Without this
-/// retry, a fetch racing the poll tick (most likely right after mount, when
-/// several things fire close together) would surface a raw "Busy" error
-/// instead of just quietly succeeding a moment later.
-async fn send_preset_request(
+/// request outright when it would clash with an exchange already in flight
+/// for this ip — see `RequestRegistry::conflicts_with`). Without this retry,
+/// a fetch racing the poll tick (most likely right after mount, when several
+/// things fire close together) would surface a raw "Busy" error instead of
+/// just quietly succeeding a moment later.
+///
+/// `expects_fragments` is passed straight through to the spec — see its doc
+/// for why a single-datagram read must declare itself as one.
+async fn send_request_with_retry(
     request_tx: &tokio::sync::mpsc::UnboundedSender<crate::live::cvr::request::RequestSpec>,
     ip: &str,
+    function_code: u8,
+    chx: u8,
     body: Vec<u8>,
+    expects_fragments: bool,
 ) -> Result<Vec<u8>, AppError> {
-    let mut last_err = AppError::from(format!("device {} preset request never attempted", ip));
-    for attempt in 0..=PRESET_REQUEST_MAX_RETRIES {
+    let mut last_err = AppError::from(format!("device {} request never attempted", ip));
+    for attempt in 0..=REQUEST_BUSY_MAX_RETRIES {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let spec = crate::live::cvr::request::RequestSpec {
             ip: ip.to_string(),
-            function_code: crate::live::cvr::preset::FC_SAVE_RECALL,
-            chx: 0,
+            function_code,
+            chx,
             body: body.clone(),
+            expects_fragments,
             sink: crate::live::cvr::request::ResultSink::External(tx),
         };
         request_tx.send(spec).map_err(|_| AppError::from("live control driver is not running"))?;
@@ -333,8 +343,8 @@ async fn send_preset_request(
             Ok(frame) => return Ok(frame),
             Err(crate::live::cvr::request::RequestError::Busy) => {
                 last_err = AppError::from(format!("device {} still busy after {} attempt(s)", ip, attempt + 1));
-                if attempt < PRESET_REQUEST_MAX_RETRIES {
-                    tokio::time::sleep(std::time::Duration::from_millis(PRESET_REQUEST_RETRY_DELAY_MS)).await;
+                if attempt < REQUEST_BUSY_MAX_RETRIES {
+                    tokio::time::sleep(std::time::Duration::from_millis(REQUEST_BUSY_RETRY_DELAY_MS)).await;
                 }
             }
             Err(e) => return Err(AppError::from(format!("{:?}", e))),
@@ -346,7 +356,7 @@ async fn send_preset_request(
 /// Fetches the full preset slot-name list (FC=59 mode=0) and the currently
 /// active preset's name (mode=4) as one command — deliberately not two
 /// independently-callable commands, since both share the same FC=59 request
-/// registry key and must not overlap (see `send_preset_request`'s doc). The
+/// registry key and must not overlap (see `send_request_with_retry`'s doc). The
 /// mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
 /// the result and emits `live_presets:updated`, same pattern as
 /// `live_control_refresh_now`/`parse_and_store_sync_data`.
@@ -361,11 +371,15 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
     };
     require_v118_firmware(&device_id, firmware_family.as_deref())?;
 
-    let list_frame = send_preset_request(&request_tx, &ip, preset::build_list_request_body()).await?;
+    let list_frame =
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_list_request_body(), true)
+            .await?;
     let slots = preset::parse_preset_list(&list_frame)
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=0 response had an unexpected shape", device_id)))?;
 
-    let current_frame = send_preset_request(&request_tx, &ip, preset::build_current_request_body()).await?;
+    let current_frame =
+        send_request_with_retry(&request_tx, &ip, preset::FC_SAVE_RECALL, 0, preset::build_current_request_body(), true)
+            .await?;
     let active_preset_name = preset::parse_preset_current(&current_frame)
         .ok_or_else(|| AppError::from(format!("device {} FC=59 mode=4 response had an unexpected shape", device_id)))?;
 
@@ -384,6 +398,65 @@ pub async fn live_control_fetch_presets(app: AppHandle, state: State<'_, LiveDev
 pub fn live_control_get_bridge(state: State<LiveDeviceState>) -> Result<Vec<DeviceBridge>, AppError> {
     let inner = state.0.lock().map_err(|e| e.to_string())?;
     Ok(inner.bridge.iter().map(|(device_id, bridge)| DeviceBridge { device_id: device_id.clone(), bridge: bridge.clone() }).collect())
+}
+
+/// Reads every bridge pair now and waits for the answers, instead of waiting
+/// for the driver's own bridge tick to come round to them — the FC=50
+/// counterpart to `live_control_fetch_presets`. Used when an amp's editor
+/// opens: a project amp's fingerprint cannot be completed until every pair
+/// has been reported (see `data/fingerprint.rs`), so the editor would
+/// otherwise sit locked until the tick catches up.
+///
+/// The pairs go out one after another — `RequestRegistry` keys pending
+/// requests by `(ip, function_code)`, so two FC=50 requests cannot be in
+/// flight at once. Each answer is stored through the same `LiveEventSink`
+/// the driver would have used, so `live_bridge:updated` fires exactly as it
+/// does for a polled reply.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_fetch_bridge(
+    app: AppHandle,
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+) -> Result<DeviceBridge, AppError> {
+    let (ip, request_tx) = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        let device = inner
+            .devices
+            .get(&device_id)
+            .cloned()
+            .ok_or_else(|| AppError::from(format!("device {} not found", device_id)))?;
+        let request_tx = inner.request_tx.clone().ok_or_else(|| AppError::from("live control is not running"))?;
+        (device.ip, request_tx)
+    };
+
+    let sink = LiveEventSink { app, state: state.0.clone() };
+    for pair_index in 0..crate::live::cvr::bridge::BRIDGE_PAIR_COUNT {
+        let frame = send_request_with_retry(
+            &request_tx,
+            &ip,
+            crate::live::cvr::bridge::FC_BRIDGE,
+            pair_index,
+            Vec::new(),
+            false,
+        )
+        .await?;
+        // The pair comes from the reply's own header, not from what was
+        // asked — see `parse_bridge_reply`.
+        if let Some((pair, bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
+            sink.set_bridge_pair(device_id.clone(), pair, bridged);
+        }
+    }
+
+    let bridge = {
+        let inner = state.0.lock().map_err(|e| e.to_string())?;
+        inner
+            .bridge
+            .get(&device_id)
+            .cloned()
+            .unwrap_or_else(crate::live::cvr::bridge::DeviceBridgeSnapshot::empty)
+    };
+    Ok(DeviceBridge { device_id, bridge })
 }
 
 /// Snapshot getter mirroring `live_control_get_channel_config` — returns
@@ -701,46 +774,30 @@ pub async fn live_control_set_output_bridge(
     // whenever another request is in flight, so a toggled pair could take
     // seconds to come back, long enough that the control reads as broken.
     //
-    // This deliberately does NOT use `ResultSink::Internal`. The driver's
-    // `request_rx` arm rejects any request while another is pending for the
+    // This deliberately does NOT use `ResultSink::Internal`. The driver
+    // rejects a request that would clash with one already in flight for the
     // same IP, and that rejection is only reported back through an
-    // `External` sink — an `Internal` one is dropped in silence. With the
-    // 200ms FC=27 config poll almost always occupying that per-IP slot, a
-    // fire-and-forget refresh would be discarded roughly half the time and
-    // there would be no way to tell. So it goes out as `External` and
-    // retries on `Busy`, exactly like `send_preset_request`, then stores the
-    // result through the same `LiveEventSink` the driver would have used.
+    // `External` sink — an `Internal` one is dropped in silence. So it goes
+    // out as `External` and retries on `Busy`, then stores the result
+    // through the same `LiveEventSink` the driver would have used.
     //
     // Failure here is still non-fatal: the write itself is already
     // confirmed, so the worst case falls back to the next scheduled poll.
     let request_tx = { state.0.lock().map_err(|e| e.to_string())?.request_tx.clone() };
     if let Some(request_tx) = request_tx {
-        for attempt in 0..=PRESET_REQUEST_MAX_RETRIES {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            if request_tx
-                .send(crate::live::cvr::request::RequestSpec {
-                    ip: ip.to_string(),
-                    function_code: crate::live::cvr::bridge::FC_BRIDGE,
-                    chx: pair_index,
-                    body: Vec::new(),
-                    sink: crate::live::cvr::request::ResultSink::External(tx),
-                })
-                .is_err()
-            {
-                break;
-            }
-            match rx.await {
-                Ok(Ok(frame)) => {
-                    if let Some((pair, is_bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
-                        let sink = LiveEventSink { app, state: state.0.clone() };
-                        sink.set_bridge_pair(device_id, pair, is_bridged);
-                    }
-                    break;
-                }
-                Ok(Err(crate::live::cvr::request::RequestError::Busy)) if attempt < PRESET_REQUEST_MAX_RETRIES => {
-                    tokio::time::sleep(std::time::Duration::from_millis(PRESET_REQUEST_RETRY_DELAY_MS)).await;
-                }
-                _ => break,
+        let frame = send_request_with_retry(
+            &request_tx,
+            &ip.to_string(),
+            crate::live::cvr::bridge::FC_BRIDGE,
+            pair_index,
+            Vec::new(),
+            false,
+        )
+        .await;
+        if let Ok(frame) = frame {
+            if let Some((pair, is_bridged)) = crate::live::cvr::bridge::parse_bridge_reply(&frame) {
+                let sink = LiveEventSink { app, state: state.0.clone() };
+                sink.set_bridge_pair(device_id, pair, is_bridged);
             }
         }
     }

@@ -33,9 +33,11 @@ import {
   ShieldAlert,
   ListPlus,
   Lock,
+  Radio,
   Volume2,
   VolumeX,
   Waves,
+  WifiOff,
 } from "lucide-react";
 import { CommitNumberInput } from "./CommitNumberInput";
 import { EqEditor } from "./EqEditor";
@@ -108,6 +110,14 @@ export type ConfigureSource =
       editLock?: AmpEditLock | null;
       /** The discovered network amp this project amp is linked to, if any. */
       linkedDevice?: DiscoveredDevice;
+      /** Set while this amp is matched with its linked amp and following it
+       * (`useLinkedSync`): the editor then reads and writes that amp
+       * directly, exactly like Direct Edit, and the project mirrors it. */
+      liveThrough?: {
+        device: DiscoveredDevice;
+        channelConfig?: ChannelConfigSnapshot;
+        telemetry?: Telemetry;
+      };
     }
   | {
       kind: "live";
@@ -566,16 +576,23 @@ function InputChannelRow({
           shadow="md"
           width={200}
         >
+          {/* `StatEditorTile` forwards its ref to the underlying button, so
+           * Popover.Target can take it directly — an intermediate `<div>`
+           * here used to be an extra flex item with its own auto block
+           * height, which rounded slightly differently than the button's own
+           * fixed height and nudged the tile off the row's shared baseline.
+           * (`display: contents` on that div was tried first, but it makes
+           * the div report an empty bounding rect, which floating-ui's
+           * `hideDetached` reads as "reference not visible" and never shows
+           * the popover at all — a real ref avoids that entirely.) */}
           <Popover.Target>
-            <div>
-              <StatEditorTile
-                value={delayInMs.toFixed(1)}
-                label="Delay ms"
-                modified={delayInMs !== 0}
-                visualValidation={delayFeedback}
-                onClick={() => setDelayOpened((o) => !o)}
-              />
-            </div>
+            <StatEditorTile
+              value={delayInMs.toFixed(1)}
+              label="Delay ms"
+              modified={delayInMs !== 0}
+              visualValidation={delayFeedback}
+              onClick={() => setDelayOpened((o) => !o)}
+            />
           </Popover.Target>
           <Popover.Dropdown>
             <Stack gap="sm">
@@ -905,18 +922,18 @@ function OutputChannelRow({
           shadow="md"
           width={200}
         >
+          {/* No wrapper div — see the note on the Delay tile in
+           * InputChannelRow. */}
           <Popover.Target>
-            <div>
-              <StatEditorTile
-                value={volumeDb.toFixed(1)}
-                label="Vol dB"
-                modified={volumeDb !== 0}
-                visualValidation={volumeFeedback}
-                onClick={() =>
-                  setOpenPopover((o) => (o === "volume" ? null : "volume"))
-                }
-              />
-            </div>
+            <StatEditorTile
+              value={volumeDb.toFixed(1)}
+              label="Vol dB"
+              modified={volumeDb !== 0}
+              visualValidation={volumeFeedback}
+              onClick={() =>
+                setOpenPopover((o) => (o === "volume" ? null : "volume"))
+              }
+            />
           </Popover.Target>
           <Popover.Dropdown>
             <Stack gap="sm">
@@ -944,18 +961,18 @@ function OutputChannelRow({
           shadow="md"
           width={200}
         >
+          {/* No wrapper div — see the note on the Delay tile in
+           * InputChannelRow. */}
           <Popover.Target>
-            <div>
-              <StatEditorTile
-                value={trimDb.toFixed(1)}
-                label="Trim dB"
-                modified={trimDb !== 0}
-                visualValidation={trimFeedback}
-                onClick={() =>
-                  setOpenPopover((o) => (o === "trim" ? null : "trim"))
-                }
-              />
-            </div>
+            <StatEditorTile
+              value={trimDb.toFixed(1)}
+              label="Trim dB"
+              modified={trimDb !== 0}
+              visualValidation={trimFeedback}
+              onClick={() =>
+                setOpenPopover((o) => (o === "trim" ? null : "trim"))
+              }
+            />
           </Popover.Target>
           <Popover.Dropdown>
             <Stack gap="sm">
@@ -996,18 +1013,18 @@ function OutputChannelRow({
           shadow="md"
           width={200}
         >
+          {/* No wrapper div — see the note on the Delay tile in
+           * InputChannelRow. */}
           <Popover.Target>
-            <div>
-              <StatEditorTile
-                value={delayMs.toFixed(1)}
-                label="Delay ms"
-                modified={delayMs !== 0}
-                visualValidation={delayFeedback}
-                onClick={() =>
-                  setOpenPopover((o) => (o === "delay" ? null : "delay"))
-                }
-              />
-            </div>
+            <StatEditorTile
+              value={delayMs.toFixed(1)}
+              label="Delay ms"
+              modified={delayMs !== 0}
+              visualValidation={delayFeedback}
+              onClick={() =>
+                setOpenPopover((o) => (o === "delay" ? null : "delay"))
+              }
+            />
           </Popover.Target>
           <Popover.Dropdown>
             <Stack gap="sm">
@@ -1068,22 +1085,21 @@ function OutputChannelRow({
             shadow="md"
             width={200}
           >
+            {/* No wrapper div — see the note on the Delay tile in
+             * InputChannelRow. A hybrid otherwise: it opens a popover, but
+             * its enabled/disabled state is what matters at a glance, so it
+             * wears the toggle styling. */}
             <Popover.Target>
-              <div>
-                {/* A hybrid — it opens a popover, but its enabled/disabled
-                 * state is what matters at a glance, so it wears the toggle
-                 * styling. */}
-                <StatToggle
-                  label="Gate"
-                  engaged={noiseGateEnabled}
-                  accent="var(--mantine-color-amber-6)"
-                  visualValidation={gateFeedback}
-                  onClick={() =>
-                    setOpenPopover((o) => (o === "gate" ? null : "gate"))
-                  }
-                  icon={<ShieldAlert size={16} />}
-                />
-              </div>
+              <StatToggle
+                label="Gate"
+                engaged={noiseGateEnabled}
+                accent="var(--mantine-color-amber-6)"
+                visualValidation={gateFeedback}
+                onClick={() =>
+                  setOpenPopover((o) => (o === "gate" ? null : "gate"))
+                }
+                icon={<ShieldAlert size={16} />}
+              />
             </Popover.Target>
             <Popover.Dropdown>
               <Stack gap="sm">
@@ -1144,17 +1160,17 @@ function OutputChannelRow({
           shadow="md"
           width={180}
         >
+          {/* No wrapper div — see the note on the Delay tile in
+           * InputChannelRow. */}
           <Popover.Target>
-            <div>
-              <StatEditorTile
-                value={POWER_MODE_LABELS[powerMode]}
-                label="Mode"
-                visualValidation={modeFeedback}
-                onClick={() =>
-                  setOpenPopover((o) => (o === "mode" ? null : "mode"))
-                }
-              />
-            </div>
+            <StatEditorTile
+              value={POWER_MODE_LABELS[powerMode]}
+              label="Mode"
+              visualValidation={modeFeedback}
+              onClick={() =>
+                setOpenPopover((o) => (o === "mode" ? null : "mode"))
+              }
+            />
           </Popover.Target>
           <Popover.Dropdown>
             <Stack gap="sm">
@@ -1964,23 +1980,23 @@ function PresetSlotRow({
           width={240}
           trapFocus
         >
+          {/* No wrapper div — see the note on the Delay tile in
+           * InputChannelRow. */}
           <Popover.Target>
-            <div>
-              <PresetActionTile
-                label="Store"
-                icon={<SquareArrowRightExit size={14} />}
-                opens="popover"
-                visualValidation={storeFeedback}
-                // Occupied slots tint red: storing overwrites them, and red
-                // carries the same "this destroys something" meaning it does
-                // on the channel strips.
-                accent={empty ? undefined : "var(--mantine-color-red-6)"}
-                onClick={() => {
-                  setDraft(empty ? "" : slot.name);
-                  onStoreOpenChange(!storeOpened);
-                }}
-              />
-            </div>
+            <PresetActionTile
+              label="Store"
+              icon={<SquareArrowRightExit size={14} />}
+              opens="popover"
+              visualValidation={storeFeedback}
+              // Occupied slots tint red: storing overwrites them, and red
+              // carries the same "this destroys something" meaning it does
+              // on the channel strips.
+              accent={empty ? undefined : "var(--mantine-color-red-6)"}
+              onClick={() => {
+                setDraft(empty ? "" : slot.name);
+                onStoreOpenChange(!storeOpened);
+              }}
+            />
           </Popover.Target>
           <Popover.Dropdown>
             <Stack gap="sm">
@@ -2203,32 +2219,37 @@ const TAB_COMPONENTS: Record<
 
 export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const ampModel = source?.ampModel;
+  // The live amp this view reads and writes: Direct Edit's own device, or the
+  // online amp a matched project amp is following (`useLinkedSync`). Both
+  // render from the amp's own readings and write straight to it; a project
+  // amp additionally keeps its catalog model and its fingerprint/merge UI.
+  const live =
+    source?.kind === "live"
+      ? source
+      : source?.kind === "project"
+        ? source.liveThrough
+        : undefined;
   // Bridge state rides its own FC=50 poll rather than the FC=27 snapshot the
   // rest of the live view model comes from — see `live/cvr/bridge.rs`.
-  const liveBridge = useLiveBridge(
-    source?.kind === "live" ? source.device.id : undefined,
-  );
-  const liveChannelCount =
-    source?.kind === "live"
-      ? source.device.outputChannels || DEFAULT_CHANNEL_COUNT
-      : DEFAULT_CHANNEL_COUNT;
-  const assignment: AmpAssignment | undefined =
-    source?.kind === "project"
+  const liveBridge = useLiveBridge(live?.device.id);
+  const liveChannelCount = live
+    ? live.device.outputChannels || DEFAULT_CHANNEL_COUNT
+    : DEFAULT_CHANNEL_COUNT;
+  const assignment: AmpAssignment | undefined = live
+    ? buildLiveAssignmentViewModel(
+        live.device,
+        live.channelConfig,
+        liveChannelCount,
+        liveBridge,
+      )
+    : source?.kind === "project"
       ? source.assignment
-      : source?.kind === "live"
-        ? buildLiveAssignmentViewModel(
-            source.device,
-            source.channelConfig,
-            liveChannelCount,
-            liveBridge,
-          )
-        : undefined;
-  const firmwareVersion =
-    source?.kind === "project"
+      : undefined;
+  const firmwareVersion = live
+    ? live.device.firmwareVersion
+    : source?.kind === "project"
       ? (source.assignment.firmwareVersion ?? null)
-      : source?.kind === "live"
-        ? source.device.firmwareVersion
-        : null;
+      : null;
 
   const [capability, setCapability] = useState<AmpCapability | null>(null);
   const [capabilityLoading, setCapabilityLoading] = useState(false);
@@ -2256,10 +2277,14 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
 
   const editLock =
     source?.kind === "project" ? (source.editLock ?? null) : null;
-  const locked = editLock?.locked ?? false;
+  // Following the amp means the amp *is* the plan, so there is nothing to
+  // lock: a difference while following is only the moment before the next
+  // pull (see `useLinkedSync`).
+  const locked = !live && (editLock?.locked ?? false);
 
-  const actions: ConfigureActions | undefined =
-    source?.kind === "project"
+  const actions: ConfigureActions | undefined = live
+    ? createLiveConfigureActions(live.device.id)
+    : source?.kind === "project"
       ? locked
         ? lockConfigureActions(LOCKED_MESSAGE)
         : createProjectConfigureActions(
@@ -2267,61 +2292,77 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
             source.assignment.id,
             source.onProjectUpdate,
           )
-      : source?.kind === "live"
-        ? createLiveConfigureActions(source.device.id)
-        : undefined;
-  const capabilities: ConfigureCapabilities =
-    source?.kind === "live"
-      ? LIVE_CONFIGURE_CAPABILITIES
-      : locked
-        ? LOCKED_CONFIGURE_CAPABILITIES
-        : PROJECT_CONFIGURE_CAPABILITIES;
+      : undefined;
+  const capabilities: ConfigureCapabilities = live
+    ? LIVE_CONFIGURE_CAPABILITIES
+    : locked
+      ? LOCKED_CONFIGURE_CAPABILITIES
+      : PROJECT_CONFIGURE_CAPABILITIES;
 
-  // The comparison opens by itself the first time an amp turns out locked
-  // with differences; afterwards only from the banner.
   const [mismatchOpen, setMismatchOpen] = useState(false);
-  const autoOpenedFor = useRef<string | null>(null);
+  // Opens the comparison straight onto the differing rows instead of its
+  // collapsed summary — see `FingerprintMismatchModal`'s `focusDifferences`.
+  const [focusDifferences, setFocusDifferences] = useState(false);
   const lockAssignmentId =
     source?.kind === "project" ? source.assignment.id : null;
   const showsDifferences =
-    editLock?.state === "mismatch" || editLock?.state === "unreadable";
+    !live &&
+    (editLock?.state === "mismatch" || editLock?.state === "unreadable");
+  // Auto-opens on a real difference only, never on `unreadable`: that one
+  // means "can't compare yet" (a reading still missing), so opening the
+  // comparison then would flash an empty modal on the way in.
+  const showsMismatch = !live && editLock?.state === "mismatch";
+
+  // Every *transition* into a mismatch opens the comparison, not just the
+  // first one per amp: an amp that drops out of sync while its editor is open
+  // — a follow that failed, a change that couldn't be pulled — needs it as
+  // much as one that was already mismatched when opened. Dismissing it keeps
+  // it closed until the lock clears and comes back.
+  const wasMismatched = useRef(false);
+  const lastLockAssignment = useRef(lockAssignmentId);
+  // Whether a conclusive lock verdict has already been seen for this amp
+  // (`checking` doesn't count — it is the state on the way in). This is what
+  // separates "opened an amp that was already mismatched", where the whole
+  // fingerprint is worth a look, from "this amp just fell out of sync", where
+  // only what changed matters.
+  const sawLockVerdict = useRef(false);
   useEffect(() => {
-    if (
-      !showsDifferences ||
-      !lockAssignmentId ||
-      autoOpenedFor.current === lockAssignmentId
-    )
-      return;
-    autoOpenedFor.current = lockAssignmentId;
-    setMismatchOpen(true);
-  }, [showsDifferences, lockAssignmentId]);
+    // A different amp starts over, so its own mismatch still counts as a
+    // transition even if the previous amp was already mismatched.
+    if (lastLockAssignment.current !== lockAssignmentId) {
+      lastLockAssignment.current = lockAssignmentId;
+      wasMismatched.current = false;
+      sawLockVerdict.current = false;
+    }
+    if (showsMismatch && !wasMismatched.current) {
+      setFocusDifferences(sawLockVerdict.current);
+      setMismatchOpen(true);
+    }
+    wasMismatched.current = showsMismatch;
+    if (editLock && editLock.state !== "checking") sawLockVerdict.current = true;
+  }, [showsMismatch, lockAssignmentId, editLock]);
 
   // Front-panel lock toggle target: the live device itself, or a project
   // amp's linked network amp while it is online.
   const rotaryDeviceId =
-    source?.kind === "live"
-      ? source.device.id
-      : source?.kind === "project" && source.linkedDevice?.online
-        ? source.linkedDevice.id
-        : undefined;
-  const rotaryLocked =
-    source?.kind === "live"
-      ? source.channelConfig?.rotaryLocked
-      : editLock?.rotaryLocked;
+    live?.device.id ??
+    (source?.kind === "project" && source.linkedDevice?.online
+      ? source.linkedDevice.id
+      : undefined);
+  const rotaryLocked = live
+    ? live.channelConfig?.rotaryLocked
+    : editLock?.rotaryLocked;
 
   // Preset Configuration is a live-device-only concept (FC=59 presets live on
-  // the physical amp; a Project with no live device has nothing to fetch) —
-  // hidden for a Project source and when no source is selected at all, not
-  // rendered disabled.
+  // the physical amp; a Project with no live amp behind it has nothing to
+  // fetch) — hidden unless this view is reading one, not rendered disabled.
   const visibleTabs = TABS.filter((t) => {
-    if (t.value === "presetConfiguration" && source?.kind !== "live")
-      return false;
+    if (t.value === "presetConfiguration" && !live) return false;
     return true;
   });
-  const telemetry = source?.kind === "live" ? source.telemetry : undefined;
-  const deviceId = source?.kind === "live" ? source.device.id : undefined;
-  const firmwareFamily =
-    source?.kind === "live" ? source.device.firmwareFamily : undefined;
+  const telemetry = live?.telemetry;
+  const deviceId = live?.device.id;
+  const firmwareFamily = live?.device.firmwareFamily;
   const fingerprintTarget: FingerprintTarget | undefined =
     source?.kind === "project"
       ? {
@@ -2335,7 +2376,39 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {editLock?.state === "checking" && (
+      {live && source?.kind === "project" && (
+        <Alert radius={0} py={6} color="green" variant="light" icon={<Radio size={16} />}>
+          <Group justify="space-between" wrap="wrap" gap="xs">
+            <Text size="sm">
+              Live — linked to {live.device.name || live.device.mac}. Edits go straight to the amp; this project
+              follows.
+            </Text>
+            {/* A matched amp has nothing to jump to, so this opens the
+                summary the way the modal normally starts. */}
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="green"
+              onClick={() => {
+                setFocusDifferences(false);
+                setMismatchOpen(true);
+              }}
+            >
+              Compare
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      {/* The counterpart to the Live banner: this amp is linked to hardware
+          that isn't reachable, so edits land in the plan alone. */}
+      {editLock?.state === "offline" && (
+        <Alert radius={0} py={6} color="gray" variant="light" icon={<WifiOff size={16} />}>
+          <Text size="sm">
+            Offline — the linked amp isn't reachable. Changes stay in this project until it's back.
+          </Text>
+        </Alert>
+      )}
+      {!live && editLock?.state === "checking" && (
         <Alert
           radius={0}
           py={6}
@@ -2354,7 +2427,16 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
                 ? "Locked — the online amp's settings can't be fully compared."
                 : "Locked — the offline amp differs from the online amp."}
             </Text>
-            <Button size="compact-xs" variant="light" color="red" onClick={() => setMismatchOpen(true)}>
+            {/* Its label is a promise: open on the differing rows. */}
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="red"
+              onClick={() => {
+                setFocusDifferences(true);
+                setMismatchOpen(true);
+              }}
+            >
               Show differences
             </Button>
           </Group>
@@ -2364,6 +2446,10 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         opened={mismatchOpen}
         onClose={() => setMismatchOpen(false)}
         lock={editLock}
+        focusDifferences={focusDifferences}
+        projectId={source?.kind === "project" ? source.project.id : undefined}
+        assignmentId={source?.kind === "project" ? source.assignment.id : undefined}
+        onProjectUpdate={source?.kind === "project" ? source.onProjectUpdate : undefined}
       />
     <Tabs defaultValue="input" orientation="vertical" className="min-h-0 flex-1">
       {/* `min-w-0` on the panel is what lets the tab body shrink below its
@@ -2385,8 +2471,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
           </Tooltip>
         ))}
         <FingerprintInspector target={fingerprintTarget} />
-        {(source?.kind === "live" ||
-          (source?.kind === "project" && source.linkedDevice)) && (
+        {(live || (source?.kind === "project" && source.linkedDevice)) && (
           <RotaryLockToggle deviceId={rotaryDeviceId} rotaryLocked={rotaryLocked} />
         )}
       </Tabs.List>

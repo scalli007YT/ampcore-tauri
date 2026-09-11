@@ -19,18 +19,26 @@ use super::request::{
 };
 use super::telemetry;
 
-// Matches the reference implementation's `TimerRefresh.Interval = 4000`
-// discovery cadence, with a two-cycle (~8s) grace before an amp is marked
-// offline. Heartbeat now carries parsed telemetry (see `telemetry.rs`), so
-// it's polled faster than the reference's 140ms cycle — an async Rust task
-// has no event-loop/GC contention to worry about at this rate.
-const DISCOVERY_INTERVAL: Duration = Duration::from_millis(4000);
+// Faster than the reference implementation's `TimerRefresh.Interval = 4000`,
+// deliberately: discovery is the *only* evidence that an amp has come back
+// (heartbeats go to online, subscribed amps alone), so its cadence is the
+// floor on how quickly a returning amp is noticed — 4s there, ~1s here. The
+// cost is a broadcast query and one tiny reply per amp per second, and
+// `LiveEventSink::upsert` only emits when something actually changed, so an
+// amp that simply keeps answering costs the UI nothing.
+//
+// Heartbeat carries parsed telemetry (see `telemetry.rs`), so it's polled
+// faster than the reference's 140ms cycle — an async Rust task has no
+// event-loop/GC contention to worry about at this rate.
+const DISCOVERY_INTERVAL: Duration = Duration::from_millis(1000);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
-// Three discovery cycles. Only subscribed amps get heartbeats now, so every
-// other discovered amp stays "online" purely on its 4s discovery reply — at
-// two cycles (8s), two lost broadcast replies in a row would flicker it
-// offline in the device list.
-const OFFLINE_TIMEOUT_MS: f64 = 12_000.0;
+// Four discovery cycles. Only subscribed amps get heartbeats, so every other
+// discovered amp stays "online" purely on its discovery reply — the timeout
+// has to tolerate a few lost broadcast replies in a row, which is what ties
+// it to the cadence above rather than to any wall-clock feel. It went from
+// 12s to 4s *because* the cadence went from 4s to 1s: shortening one without
+// the other either flickers amps offline or leaves them stale for seconds.
+const OFFLINE_TIMEOUT_MS: f64 = 4_000.0;
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// FC=27 is far heavier than a 6-byte heartbeat (~2.4KB for a 4-channel amp,
 /// requiring fragmentation + reassembly + a full round trip), but the
@@ -50,10 +58,16 @@ const STATS_INTERVAL: Duration = Duration::from_secs(1);
 /// A periodic sync is this app's own choice, which is why the write interlock
 /// below (`WriteRegistry::has_pending`) is load-bearing here in a way it never
 /// needed to be there.
-/// Bridge state changes only when someone writes it, so this polls far
-/// slower than the config tick. Two pairs alternate across ticks, so a given
-/// pair refreshes at half this rate.
-const BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(1500);
+/// Bridge state changes only when someone writes it, so once every pair of a
+/// device has been reported it refreshes one pair per `BRIDGE_STEADY_INTERVAL`
+/// — far slower than the config tick. Until then the tick primes at
+/// `BRIDGE_PRIME_INTERVAL`, so a freshly subscribed amp learns both pairs in a
+/// few hundred ms rather than seconds: a project amp's fingerprint (hence its
+/// edit lock) cannot complete while a pair is still unknown, and FC=50 no
+/// longer queues behind the FC=27 poll either (see
+/// `RequestRegistry::conflicts_with`).
+const BRIDGE_PRIME_INTERVAL: Duration = Duration::from_millis(200);
+const BRIDGE_STEADY_INTERVAL: Duration = Duration::from_millis(1500);
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Drives the request registry's settle/hard-timeout checks — finer than
 /// `SETTLE_MS` (20ms) so a settled request resolves promptly.
@@ -65,6 +79,16 @@ const DEADLINE_TICK_INTERVAL: Duration = Duration::from_millis(10);
 /// no per-request id to match a reply against). `sent`/`received` reset every
 /// `STATS_INTERVAL`; `last_received_at`/inter-arrival accumulators persist
 /// across print windows so the very first delta after a reset is still valid.
+/// Per-device FC=50 poll state, keyed by IP. `next_pair` round-robins so a
+/// device whose pairs are all known refreshes them in turn; `last_sent` is
+/// what the steady-state cadence gates on. Per device rather than one shared
+/// cursor, so two subscribed amps no longer share a phase and a newly
+/// subscribed one starts from pair 0.
+struct BridgeCursor {
+    next_pair: u8,
+    last_sent: Instant,
+}
+
 #[derive(Default)]
 struct DeviceStats {
     sent: u32,
@@ -162,13 +186,16 @@ async fn run(
     let mut heartbeat_tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
     let mut config_poll_tick = tokio::time::interval(CONFIG_POLL_INTERVAL);
-    let mut bridge_poll_tick = tokio::time::interval(BRIDGE_POLL_INTERVAL);
+    let mut bridge_poll_tick = tokio::time::interval(BRIDGE_PRIME_INTERVAL);
     // FC=50 addresses one pair per request and the request registry keys by
-    // `(ip, function_code)`, so both pairs cannot be in flight at once. This
-    // alternates which pair each tick asks for, giving every pair a refresh
-    // every `2 * BRIDGE_POLL_INTERVAL`.
-    let mut bridge_poll_pair: u8 = 0;
+    // `(ip, function_code)`, so both pairs of a device cannot be in flight at
+    // once — hence one pair per tick per device, tracked here.
+    let mut bridge_cursors: HashMap<String, BridgeCursor> = HashMap::new();
     let mut deadline_tick = tokio::time::interval(DEADLINE_TICK_INTERVAL);
+    // When the discovery arm last actually ran. A write burst gates it off
+    // entirely, and the liveness sweep must not count silence from a stretch
+    // where nobody was asked — see the discovery arm below.
+    let mut last_discovery_at = Instant::now();
     let mut stats: HashMap<String, DeviceStats> = HashMap::new();
     let mut reassembler = FragmentReassembler::default();
     let mut registry = RequestRegistry::default();
@@ -210,7 +237,7 @@ async fn run(
                 // rejected outright rather than registered, since by the time
                 // both are pending it's too late: their responses would already
                 // be interleaving in the shared reassembler.
-                if registry.has_pending_for_ip(&ip) {
+                if registry.conflicts_with(&ip, spec.function_code, spec.expects_fragments) {
                     if let ResultSink::External(tx) = spec.sink {
                         let _ = tx.send(Err(RequestError::Busy));
                     }
@@ -325,16 +352,15 @@ async fn run(
                     inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| (d.id.clone(), d.ip.clone())).collect()
                 };
                 for (_id, ip) in targets {
-                    // Any pending request for this ip (not just FC=27) blocks a
-                    // new poll — the shared per-IP FragmentReassembler can't
-                    // safely interleave two concurrent multi-fragment exchanges,
-                    // so this defers to whatever's already in flight (e.g. an
-                    // on-demand FC=59 fetch) rather than racing it. Just skipped
-                    // this cycle — tried again next tick.
-                    if registry.has_pending_for_ip(&ip) {
+                    // FC=27 is fragmented, so it defers to anything already in
+                    // flight for this ip (e.g. an on-demand FC=59 fetch): the
+                    // shared per-IP FragmentReassembler can't safely interleave
+                    // two concurrent multi-fragment exchanges. Just skipped this
+                    // cycle — tried again next tick.
+                    if registry.conflicts_with(&ip, FC_SYNC_DATA, true) {
                         continue;
                     }
-                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), sink: ResultSink::Internal };
+                    let spec = RequestSpec { ip: ip.clone(), function_code: FC_SYNC_DATA, chx: 0, body: Vec::new(), expects_fragments: true, sink: ResultSink::Internal };
                     let (packet, superseded) = registry.register(spec, Instant::now());
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
@@ -344,29 +370,28 @@ async fn run(
             }
 
             _ = bridge_poll_tick.tick() => {
-                // Same interlocks as the config poll: never race a pending
-                // write, and never race another request on the same IP.
+                // Still never races a pending write. The per-IP request
+                // interlock, though, is now narrow enough to matter: an FC=50
+                // reply is a single datagram, so it rides alongside an
+                // in-flight FC=27 instead of being skipped by it (see
+                // `RequestRegistry::conflicts_with`). That starvation is what
+                // used to stretch a two-pair read out to ~5s.
                 //
-                // Routine poll chatter sits behind `wire_log_enabled()` now
-                // that bridge readback is confirmed working against real
-                // 1.1.8 hardware; only genuine failures still print
-                // unconditionally. Skips are normal and frequent — the
-                // 200ms config poll is often in flight — so they are the
-                // noisiest thing here and the first to go quiet.
+                // Routine poll chatter sits behind `wire_log_enabled()`; only
+                // genuine failures still print unconditionally.
                 if writes.has_pending() {
                     if wire_log_enabled() {
                         println!("[cvr driver] FC=50 poll skipped: a write is still pending");
                     }
                     continue;
                 }
-                // The pair only advances once a request actually goes out.
-                // Advancing unconditionally starved pair 0 completely: the
-                // 1500ms bridge tick and the 200ms config tick phase-locked
-                // such that pair 0's turn always landed while an FC=27 was
-                // in flight, so it was skipped every single time and only
-                // pair 1 was ever polled.
-                let pair = bridge_poll_pair;
-                let targets: Vec<String> = {
+                let now = Instant::now();
+                // One pair per subscribed device: a pair nobody has reported
+                // yet always wins (priming, every tick), otherwise the
+                // device's next pair in turn, and only once its steady-state
+                // interval has elapsed. A device with nothing due contributes
+                // nothing, so a settled system is as quiet as before.
+                let targets: Vec<(String, u8)> = {
                     let inner = sink.state.lock().unwrap();
                     // Only devices some live consumer has subscribed to (`is_polled`, see
                     // `live_control_set_poll_subscription`), and only while online. Every
@@ -374,15 +399,34 @@ async fn run(
                     // matters for a subscribed amp: `mark_stale_offline` never removes
                     // entries, so an unplugged amp would otherwise keep being polled.
                     // Recovery goes through discovery either way.
-                    inner.devices.values().filter(|d| d.online && inner.is_polled(&d.id)).map(|d| d.ip.clone()).collect()
+                    inner
+                        .devices
+                        .values()
+                        .filter(|d| d.online && inner.is_polled(&d.id))
+                        .filter_map(|d| {
+                            let reported = inner.bridge.get(&d.id);
+                            let unknown = (0..BRIDGE_PAIR_COUNT).find(|pair| {
+                                reported
+                                    .and_then(|b| b.bridged.get(*pair as usize).copied().flatten())
+                                    .is_none()
+                            });
+                            if let Some(pair) = unknown {
+                                return Some((d.ip.clone(), pair));
+                            }
+                            match bridge_cursors.get(&d.ip) {
+                                Some(cursor) => (now.saturating_duration_since(cursor.last_sent)
+                                    >= BRIDGE_STEADY_INTERVAL)
+                                    .then_some((d.ip.clone(), cursor.next_pair)),
+                                None => Some((d.ip.clone(), 0)),
+                            }
+                        })
+                        .collect()
                 };
-                if targets.is_empty() && wire_log_enabled() {
-                    println!("[cvr driver] FC=50 poll (pair {pair}): no devices discovered yet");
-                }
-                for ip in targets {
-                    if registry.has_pending_for_ip(&ip) {
+                for (ip, pair) in targets {
+                    // Only another FC=50 for this device can conflict now.
+                    if registry.conflicts_with(&ip, FC_BRIDGE, false) {
                         if wire_log_enabled() {
-                            println!("[cvr driver] FC=50 poll to {ip} (pair {pair}) skipped: another request is in flight");
+                            println!("[cvr driver] FC=50 poll to {ip} (pair {pair}) skipped: another FC=50 is in flight");
                         }
                         continue;
                     }
@@ -391,9 +435,11 @@ async fn run(
                         function_code: FC_BRIDGE,
                         chx: pair,
                         body: Vec::new(),
+                        // A one-byte body — never fragmented.
+                        expects_fragments: false,
                         sink: ResultSink::Internal,
                     };
-                    let (packet, superseded) = registry.register(spec, Instant::now());
+                    let (packet, superseded) = registry.register(spec, now);
                     if let Some(resolved) = superseded {
                         deliver_resolved(resolved, &sink);
                     }
@@ -402,7 +448,14 @@ async fn run(
                             if wire_log_enabled() {
                                 println!("[cvr driver] FC=50 poll -> {ip} pair {pair} ({n} bytes sent)");
                             }
-                            bridge_poll_pair = (bridge_poll_pair + 1) % BRIDGE_PAIR_COUNT;
+                            // Advanced only once a request actually goes out,
+                            // so a skipped pair keeps its turn instead of
+                            // being starved.
+                            let cursor = bridge_cursors
+                                .entry(ip.clone())
+                                .or_insert(BridgeCursor { next_pair: 0, last_sent: now });
+                            cursor.next_pair = (pair + 1) % BRIDGE_PAIR_COUNT;
+                            cursor.last_sent = now;
                         }
                         // A send that fails outright is a real fault, not
                         // routine — always surfaced.
@@ -434,11 +487,29 @@ async fn run(
                 // ageing devices out on evidence we suppressed would mark every
                 // amp offline after OFFLINE_TIMEOUT_MS during a long write burst.
                 if writes.has_pending() { continue; }
+                let now = Instant::now();
+                let since_last = now.saturating_duration_since(last_discovery_at);
+                last_discovery_at = now;
+
                 let query = build_basic_info_query();
                 for addr in directed_broadcast_addresses() {
                     let _ = socket.send_to(&query, (addr, AMP_PORT)).await;
                 }
-                sink.mark_stale_offline(OFFLINE_TIMEOUT_MS);
+
+                // The gate above can hold this arm off for a long stretch (a
+                // fader drag keeps a write pending almost continuously), and
+                // heartbeats are gated with it, so every device's
+                // `last_seen_at` goes stale while nobody is being asked
+                // anything. Sweeping on that silence would mark the whole rig
+                // offline the moment a drag ends. So after a suppressed
+                // stretch, skip one sweep and let this broadcast's replies —
+                // which arrive in milliseconds — refresh liveness first.
+                //
+                // This matters far more at a 4s timeout than it did at 12s:
+                // four seconds of continuous writing is an ordinary drag.
+                if since_last <= DISCOVERY_INTERVAL * 2 {
+                    sink.mark_stale_offline(OFFLINE_TIMEOUT_MS);
+                }
             }
 
             _ = stats_tick.tick() => {

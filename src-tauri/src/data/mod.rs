@@ -1,4 +1,5 @@
 pub mod amp_link;
+pub mod amp_merge;
 pub mod amp_model;
 pub mod capability;
 pub mod common;

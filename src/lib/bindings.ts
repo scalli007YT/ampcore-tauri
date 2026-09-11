@@ -167,7 +167,7 @@ export const commands = {
 	 *  Fetches the full preset slot-name list (FC=59 mode=0) and the currently
 	 *  active preset's name (mode=4) as one command — deliberately not two
 	 *  independently-callable commands, since both share the same FC=59 request
-	 *  registry key and must not overlap (see `send_preset_request`'s doc). The
+	 *  registry key and must not overlap (see `send_request_with_retry`'s doc). The
 	 *  mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
 	 *  the result and emits `live_presets:updated`, same pattern as
 	 *  `live_control_refresh_now`/`parse_and_store_sync_data`.
@@ -207,6 +207,21 @@ export const commands = {
 	 *  `live_bridge:updated` event.
 	 */
 	liveControlGetBridge: () => typedError<DeviceBridge[], AppError>(__TAURI_INVOKE("live_control_get_bridge")),
+	/**
+	 *  Reads every bridge pair now and waits for the answers, instead of waiting
+	 *  for the driver's own bridge tick to come round to them — the FC=50
+	 *  counterpart to `live_control_fetch_presets`. Used when an amp's editor
+	 *  opens: a project amp's fingerprint cannot be completed until every pair
+	 *  has been reported (see `data/fingerprint.rs`), so the editor would
+	 *  otherwise sit locked until the tick catches up.
+	 * 
+	 *  The pairs go out one after another — `RequestRegistry` keys pending
+	 *  requests by `(ip, function_code)`, so two FC=50 requests cannot be in
+	 *  flight at once. Each answer is stored through the same `LiveEventSink`
+	 *  the driver would have used, so `live_bridge:updated` fires exactly as it
+	 *  does for a polled reply.
+	 */
+	liveControlFetchBridge: (deviceId: string) => typedError<DeviceBridge, AppError>(__TAURI_INVOKE("live_control_fetch_bridge", { deviceId })),
 	/**
 	 *  FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
 	 *  is filled from the crosspoint's current state, since the wire packet has
@@ -399,6 +414,14 @@ export const commands = {
 	 *  `data/edit_lock.rs`.
 	 */
 	projectsAmpEditLock: (projectId: string, assignmentId: string) => typedError<AmpEditLock, AppError>(__TAURI_INVOKE("projects_amp_edit_lock", { projectId, assignmentId })),
+	/**
+	 *  Copies the linked network amp's settings into this project amp (offline ←
+	 *  online). All or nothing: the mirrored candidate is re-fingerprinted and
+	 *  only saved when its amp hash equals the online amp's; otherwise nothing is
+	 *  written and the still-differing rows come back. See `data/amp_merge.rs`
+	 *  for what is and isn't copied.
+	 */
+	projectsMergeAmpFromLive: (projectId: string, assignmentId: string) => typedError<AmpMergeResult, AppError>(__TAURI_INVOKE("projects_merge_amp_from_live", { projectId, assignmentId })),
 	/**
 	 *  FC=17 ROTARY_LOCK — locks/unlocks the amp's front-panel knobs. Does not
 	 *  affect what this app may edit. No explicit refetch: the new state comes
@@ -702,6 +725,23 @@ export type AmpLinkValidation = {
 };
 
 /**
+ *  Outcome of `projects_merge_amp_from_live`. Flat rather than a tagged enum,
+ *  like `FingerprintOrigin`: `merged` says which fields are set.
+ */
+export type AmpMergeResult = {
+	merged: boolean,
+	/**  The saved project; `Some` only when `merged`. */
+	project: Project | null,
+	/**  The amp hash both sides now share; `Some` only when `merged`. */
+	ampHash: string | null,
+	/**
+	 *  Candidate-vs-online rows when the hashes still differed and nothing was
+	 *  saved; empty when `merged`.
+	 */
+	remaining: FingerprintRow[],
+};
+
+/**
  *  A reusable, project-independent amp hardware model. Referenced by `AmpAssignment.amp_model_id` to pre-populate
  *  an assignment's channel count during offline planning.
  */
@@ -855,6 +895,7 @@ export type ChannelAmpCanonical = {
 	 */
 	outputNameBase: string,
 	sourceTrims: SourceTrims,
+	/**  Shown, never hashed — see the module doc comment. */
 	backupPriority: BackupPriority,
 };
 
@@ -1233,7 +1274,8 @@ export type FingerprintRow = {
 	live: string | null,
 	differs: boolean,
 	/**
-	 *  `false` for status rows (standby, preset name, knob lock): shown for
+	 *  `false` for status rows (standby, preset name, knob lock) and for
+	 *  backup priority (unverified — see the module doc comment): shown for
 	 *  context, never compared.
 	 */
 	hashed: boolean,

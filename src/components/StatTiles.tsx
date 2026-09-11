@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 import { Stack, Text, UnstyledButton } from "@mantine/core";
 import { ChevronRight } from "lucide-react";
 import { ActionFeedbackContent, actionFeedbackAccent } from "./ActionFeedback";
@@ -127,27 +127,24 @@ export function StatReadout({ value, label }: { value: string; label: string }) 
  * most consequential control on the strip and used to be as quiet as a
  * temperature readout. Icons inherit `currentColor`, so call sites pass
  * them uncoloured. */
-export function StatToggle({
-  label,
-  icon,
-  engaged,
-  accent = "var(--mantine-color-red-6)",
-  visualValidation,
-  onClick,
-}: {
-  label: string;
-  icon: ReactNode;
-  engaged: boolean;
-  accent?: string;
-  /** See `VisualValidation`. */
-  visualValidation?: VisualValidation;
-  onClick?: TileClickHandler;
-}) {
+export const StatToggle = forwardRef<
+  HTMLButtonElement,
+  {
+    label: string;
+    icon: ReactNode;
+    engaged: boolean;
+    accent?: string;
+    /** See `VisualValidation`. */
+    visualValidation?: VisualValidation;
+    onClick?: TileClickHandler;
+  }
+>(function StatToggle({ label, icon, engaged, accent = "var(--mantine-color-red-6)", visualValidation, onClick }, ref) {
   const feedback = useTileFeedback(visualValidation, onClick);
   const tone = feedback.accent ?? (engaged ? accent : undefined);
 
   return (
     <UnstyledButton
+      ref={ref}
       onClick={feedback.handleClick}
       aria-pressed={engaged}
       aria-busy={feedback.busy || undefined}
@@ -171,7 +168,7 @@ export function StatToggle({
       </ActionFeedbackContent>
     </UnstyledButton>
   );
-}
+});
 
 /** A tile that opens something — a popover editor, or a whole sub-view. The
  * corner chevron is what separates it from a `StatReadout` at a glance
@@ -182,39 +179,46 @@ export function StatToggle({
  * are doing something" could only be answered by opening every tile. Now
  * off-default tiles carry the accent and the strip can be read at a
  * glance. */
-export function StatEditorTile({
-  value,
-  label,
-  icon,
-  modified,
-  accent = "var(--mantine-color-amber-6)",
-  opens = "popover",
-  width = STAT_TILE_W,
-  visualValidation,
-  onClick,
-}: {
-  value?: ReactNode;
-  label: string;
-  icon?: ReactNode;
-  modified?: boolean;
-  accent?: string;
-  opens?: "popover" | "view";
-  /** Tile width in px. Defaults to the strip grid's width; only override for
-   * a tile that sits in its own wider column and holds a longer value (e.g.
-   * the Routing tab's Source column). The height is never overridden, so
-   * tiles still line up row by row. */
-  width?: number;
-  /** See `VisualValidation`. A popover tile usually passes a controller,
-   * since its own click only opens the editor. */
-  visualValidation?: VisualValidation;
-  onClick?: TileClickHandler;
-}) {
+export const StatEditorTile = forwardRef<
+  HTMLButtonElement,
+  {
+    value?: ReactNode;
+    label: string;
+    icon?: ReactNode;
+    modified?: boolean;
+    accent?: string;
+    opens?: "popover" | "view";
+    /** Tile width in px. Defaults to the strip grid's width; only override for
+     * a tile that sits in its own wider column and holds a longer value (e.g.
+     * the Routing tab's Source column). The height is never overridden, so
+     * tiles still line up row by row. */
+    width?: number;
+    /** See `VisualValidation`. A popover tile usually passes a controller,
+     * since its own click only opens the editor. */
+    visualValidation?: VisualValidation;
+    onClick?: TileClickHandler;
+  }
+>(function StatEditorTile(
+  {
+    value,
+    label,
+    icon,
+    modified,
+    accent = "var(--mantine-color-amber-6)",
+    opens = "popover",
+    width = STAT_TILE_W,
+    visualValidation,
+    onClick,
+  },
+  ref,
+) {
   const feedback = useTileFeedback(visualValidation, onClick);
   const tone = feedback.accent ?? (modified ? accent : undefined);
   const color = modified ? accent : "var(--mantine-color-text)";
 
   return (
     <UnstyledButton
+      ref={ref}
       onClick={feedback.handleClick}
       aria-busy={feedback.busy || undefined}
       className={`relative shrink-0 cursor-pointer text-center transition-colors duration-200 ${STAT_TILE_FOCUS}`}
@@ -250,7 +254,7 @@ export function StatEditorTile({
       </ActionFeedbackContent>
     </UnstyledButton>
   );
-}
+});
 
 /** Row-density sibling of `StatEditorTile` — same bordered value/label box,
  * same corner-chevron affordance for "this opens something", same accent
@@ -258,31 +262,27 @@ export function StatEditorTile({
  * preset tab briefly used bare `ActionIcon`s here, which de-cluttered the
  * 40-slot list but stopped looking like the rest of the app; this keeps the
  * strip's vocabulary at a size 40 rows can carry. */
-export function PresetActionTile({
-  label,
-  icon,
-  accent,
-  opens,
-  disabled,
-  visualValidation,
-  onClick,
-}: {
-  label: string;
-  icon: ReactNode;
-  /** Set to tint the tile — used for the destructive Store action, matching
-   * the strips' rule that red means "this cuts or destroys something". */
-  accent?: string;
-  opens?: "popover";
-  disabled?: boolean;
-  /** See `VisualValidation`. */
-  visualValidation?: VisualValidation;
-  onClick?: TileClickHandler;
-}) {
+export const PresetActionTile = forwardRef<
+  HTMLButtonElement,
+  {
+    label: string;
+    icon: ReactNode;
+    /** Set to tint the tile — used for the destructive Store action, matching
+     * the strips' rule that red means "this cuts or destroys something". */
+    accent?: string;
+    opens?: "popover";
+    disabled?: boolean;
+    /** See `VisualValidation`. */
+    visualValidation?: VisualValidation;
+    onClick?: TileClickHandler;
+  }
+>(function PresetActionTile({ label, icon, accent, opens, disabled, visualValidation, onClick }, ref) {
   const feedback = useTileFeedback(visualValidation, onClick);
   const tone = feedback.accent ?? accent;
 
   return (
     <UnstyledButton
+      ref={ref}
       onClick={feedback.handleClick}
       disabled={disabled}
       aria-busy={feedback.busy || undefined}
@@ -312,4 +312,4 @@ export function PresetActionTile({
       </ActionFeedbackContent>
     </UnstyledButton>
   );
-}
+});

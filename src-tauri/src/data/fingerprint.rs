@@ -19,13 +19,23 @@
 //!   bridge pairs) and every channel's remaining settings: the speaker hashes,
 //!   input EQ, source, matrix, input delay, trim, volume, mutes, noise-gate
 //!   on/off, input name, output name (without its `_XXXX` suffix, which is
-//!   derived from the speaker hash), per-source trim/delay and backup priority.
+//!   derived from the speaker hash), and per-source trim/delay.
 //!
-//! Everything the amp stores as a *setting* in FC=27 is hashed. Pure status —
-//! standby, the last recalled preset's name, the front-panel knob lock — is
-//! carried in `AmpFingerprint.status` and shown, never hashed. Not covered at
-//! all: FIR coefficients (not in FC=27), the noise-gate threshold (no 1.1.8
-//! readback), MAC/IP (identity, not config).
+//! Everything the amp stores as a *setting* in FC=27 is hashed, with one
+//! current exception: **backup priority** is read and shown but deliberately
+//! left out of the hash. `channel_config_v118.rs`'s trailer offset for it
+//! (`trailer_base + 140`) is unverified against real hardware, and a live
+//! capture showed the identical `{enabled, first, second, threshold}` on
+//! every channel — including `first == second`, which nothing would
+//! configure — the signature of a misaligned read rather than real
+//! per-channel config. Hashing an unverified field would lock every linked
+//! amp on a value that might just be wrong; once the offset is confirmed
+//! against hardware, move it back into `encode_channel_amp`.
+//!
+//! Pure status — standby, the last recalled preset's name, the front-panel
+//! knob lock — is carried in `AmpFingerprint.status` and shown, never hashed.
+//! Not covered at all: FIR coefficients (not in FC=27), the noise-gate
+//! threshold (no 1.1.8 readback), MAC/IP (identity, not config).
 //!
 //! **What the JSON shows vs. what is hashed.** The JSON shows what the amp
 //! actually stores, in natural units, including a bypassed band's or a
@@ -87,19 +97,23 @@ use crate::live::state::DiscoveredDevice;
 /// instead of the FC=27 header, which holds the firmware/model ID string.
 ///
 /// 8: knob gain removed (CVR amps have no such setting).
-pub const FINGERPRINT_VERSION: u8 = 8;
+///
+/// 9: backup priority removed from the hash (still shown) — its trailer
+/// offset is unverified against hardware; see the module doc comment.
+pub const FINGERPRINT_VERSION: u8 = 9;
 
 /// `_XXXX` — separator plus 4 hex chars appended to an output name.
 pub const HASH_SUFFIX_LEN: usize = 5;
 
-/// Rounding steps, as steps per unit.
-const FREQ_STEPS: f64 = 10.0; // 0.1 Hz
-const GAIN_STEPS: f64 = 100.0; // 0.01 dB
-const Q_STEPS: f64 = 1000.0; // 0.001
-const DELAY_STEPS: f64 = 100.0; // 0.01 ms
-const VOLT_STEPS: f64 = 100.0; // 0.01 V
-const WHOLE_STEPS: f64 = 1.0; // limiter ms / release multiplier (u16/u8 on the wire)
-const OHM_STEPS: f64 = 10.0; // 0.1 Ω
+/// Rounding steps, as steps per unit. Shared with `amp_merge.rs`, which stores
+/// merged values at exactly these steps.
+pub(crate) const FREQ_STEPS: f64 = 10.0; // 0.1 Hz
+pub(crate) const GAIN_STEPS: f64 = 100.0; // 0.01 dB
+pub(crate) const Q_STEPS: f64 = 1000.0; // 0.001
+pub(crate) const DELAY_STEPS: f64 = 100.0; // 0.01 ms
+pub(crate) const VOLT_STEPS: f64 = 100.0; // 0.01 V
+pub(crate) const WHOLE_STEPS: f64 = 1.0; // limiter ms / release multiplier (u16/u8 on the wire)
+pub(crate) const OHM_STEPS: f64 = 10.0; // 0.1 Ω
 
 /// Byte written for an absent optional value.
 const NONE_TAG: u8 = 0xFF;
@@ -261,6 +275,7 @@ pub struct ChannelAmpCanonical {
     /// default "Out{letter}" label.
     pub output_name_base: String,
     pub source_trims: SourceTrims,
+    /// Shown, never hashed — see the module doc comment.
     pub backup_priority: BackupPriority,
 }
 
@@ -611,7 +626,7 @@ fn build(
 /// Casts through `f32` first — the precision the wire actually stores — then
 /// rounds to the nearest step, so an offline `f64` and its live `f32` readback
 /// land on the same value.
-fn round_to_step(value: f64, steps_per_unit: f64) -> f64 {
+pub(crate) fn round_to_step(value: f64, steps_per_unit: f64) -> f64 {
     let wire = value as f32 as f64;
     if !wire.is_finite() {
         return 0.0;
@@ -722,7 +737,7 @@ fn canonical_amp_fields(input: &ChannelInput, matrix_input_count: u32) -> Channe
 /// the device stores and reports that same default as a literal name (a real
 /// DSP-2004 reads back "In1".."In4"). Both canonicalize to "" so the default
 /// never reads as a mismatch.
-fn canonical_input_name(channel_index: u32, name: Option<&str>) -> String {
+pub(crate) fn canonical_input_name(channel_index: u32, name: Option<&str>) -> String {
     let name = name.map(str::trim).unwrap_or("");
     if name.eq_ignore_ascii_case(&format!("In{}", channel_index + 1)) {
         String::new()
@@ -735,7 +750,7 @@ fn canonical_input_name(channel_index: u32, name: Option<&str>) -> String {
 /// derived from `speakerHash`, so hashing it would count every change twice),
 /// and the default "Out{letter}"/"Out{n}" label treated as unnamed — same rule
 /// as `canonical_input_name`.
-fn canonical_output_name(channel_index: u32, name: Option<&str>) -> String {
+pub(crate) fn canonical_output_name(channel_index: u32, name: Option<&str>) -> String {
     let base = split_hash_suffix(name.map(str::trim).unwrap_or("")).0.trim();
     let letter = format!("Out{}", output_letter(channel_index));
     let number = format!("Out{}", channel_index + 1);
@@ -951,14 +966,8 @@ fn encode_channel_amp(h: &mut HashInput, channel_index: u32, speaker_hash: u16, 
         h.i32(steps(trim.trim_db, GAIN_STEPS));
         h.i32(steps(trim.delay_ms, DELAY_STEPS));
     }
-    // A disabled backup switch ignores its priority and threshold.
-    let priority = &fields.backup_priority;
-    h.bool(priority.enabled);
-    if priority.enabled {
-        h.u8(priority.first);
-        h.u8(priority.second);
-        h.i32(priority.threshold_db);
-    }
+    // `backup_priority` is deliberately not hashed — see the module doc
+    // comment.
 }
 
 fn encode_bridge_pairs(h: &mut HashInput, pairs: &[Option<bool>]) {
@@ -989,7 +998,8 @@ pub struct FingerprintRow {
     pub project: Option<String>,
     pub live: Option<String>,
     pub differs: bool,
-    /// `false` for status rows (standby, preset name, knob lock): shown for
+    /// `false` for status rows (standby, preset name, knob lock) and for
+    /// backup priority (unverified — see the module doc comment): shown for
     /// context, never compared.
     pub hashed: bool,
 }
@@ -1007,6 +1017,12 @@ fn push_entry(out: &mut Vec<Entry>, group: &str, label: impl Into<String>, value
 
 fn push_status(out: &mut Vec<Entry>, label: &str, value: String) {
     out.push(Entry { group: "Status".to_string(), label: label.to_string(), value, hashed: false });
+}
+
+/// Like `push_entry`, but for a setting that's shown for context and never
+/// compared — currently only `backup_priority` (see the module doc comment).
+fn push_info(out: &mut Vec<Entry>, group: &str, label: impl Into<String>, value: impl Into<String>) {
+    out.push(Entry { group: group.to_string(), label: label.into(), value: value.into(), hashed: false });
 }
 
 fn on_off(value: bool) -> &'static str {
@@ -1099,7 +1115,7 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
         } else {
             "off".to_string()
         };
-        push_entry(&mut out, &group, "Backup priority", priority_value);
+        push_info(&mut out, &group, "Backup priority", priority_value);
     }
 
     for channel in &channels {
