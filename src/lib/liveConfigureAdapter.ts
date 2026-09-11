@@ -55,13 +55,17 @@ export const LIVE_READABLE_CHANNEL_FIELDS: readonly (keyof AmpChannel)[] = [
   "outputMuted",
   "outputBridged",
   "powerMode",
+  "ohms",
+  "firBypassed",
+  "sourceTrims",
+  "backupPriority",
 ];
 
 /** Maps one polled `ChannelConfig` onto the shape `AmpConfigureView`'s tabs
  * already expect (`AmpAssignment["channels"][number]`) — most fields are a
  * direct passthrough since `ChannelEq`/`Limiter`/`MatrixCrosspoint`/
  * `ChannelSource` are literally the same Rust types on both sides (see
- * `channel_config.rs`). Fields with no live-wire equivalent (`ohms`) or no
+ * `channel_config.rs`). `ohms` is the amp's own `loadOhms`; fields with no
  * read-side parsing yet (`noiseGateThresholdDbu`) get placeholder defaults,
  * never a value implied to be live-accurate — `LIVE_READABLE_CHANNEL_FIELDS`
  * is the exact split.
@@ -69,12 +73,14 @@ export const LIVE_READABLE_CHANNEL_FIELDS: readonly (keyof AmpChannel)[] = [
  * all-default channel rather than leaving a hole for callers to crash on. */
 function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number, bridged: boolean): AmpChannel {
   if (!config) {
-    return { channelIndex, ohms: 8 };
+    return { channelIndex, ohms: 8, source: { kind: "analog", index: channelIndex } };
   }
   return {
     channelIndex: config.channelIndex,
-    ohms: 8,
-    source: config.source,
+    ohms: config.loadOhms ?? 8,
+    // A channel always has a source. The 1.1.8/1.1.9 parsers always read one,
+    // so this fallback is unreachable today; it only keeps the type honest.
+    source: config.source ?? { kind: "analog", index: config.channelIndex },
     matrixCrosspoints: config.matrixCrosspoints,
     delayInMs: config.delayInMs ?? 0,
     inputMuted: config.inputMuted,
@@ -95,6 +101,13 @@ function mapLiveChannel(config: ChannelConfig | undefined, channelIndex: number,
     // channel.
     outputBridged: bridged,
     powerMode: config.powerMode ?? "lowOhm",
+    firBypassed: config.firBypassed,
+    sourceTrims: {
+      analog: { trimDb: config.analogTrimDb ?? 0, delayMs: config.analogDelayMs ?? 0 },
+      dante: { trimDb: config.danteTrimDb ?? 0, delayMs: config.danteDelayMs ?? 0 },
+      aes3: { trimDb: config.aes3TrimDb ?? 0, delayMs: config.aes3DelayMs ?? 0 },
+    },
+    backupPriority: config.backupPriority,
   };
 }
 
@@ -126,6 +139,7 @@ export function buildLiveAssignmentViewModel(
     ampModelId: null,
     firmwareVersion: device.firmwareVersion,
     channels,
+    deviceName: device.name || null,
   };
 }
 
@@ -262,29 +276,16 @@ export function createLiveConfigureActions(deviceId: string): ConfigureActions {
     async setChannelName(channelIndex, side, name) {
       return reportWrite("Set channel name", commands.liveControlSetChannelName(deviceId, channelIndex, side, name));
     },
-    /** FC=11 carries only the source *kind*; for Analog, `index` goes out as
-     * a follow-up FC=79 write selecting the physical input (see
-     * `live_control_set_channel_source`). Clearing a source
-     * (`kind === null`) is not something FC=11 can express — a live channel
-     * always has some source selected — so it is rejected up front rather
-     * than sent as a packet that would mean something else. */
     /** Re-enabled now that `bridgedPairs` gives the UI a real readback —
      * see the `outputBridged` note in `mapLiveChannel`. `channelIndex` is
      * the pair's leader; FC=50 addresses pairs by their leader channel. */
     async setOutputBridge(pairLeaderChannelIndex, bridged) {
       return reportWrite("Set bridge", commands.liveControlSetOutputBridge(deviceId, pairLeaderChannelIndex, bridged));
     },
+    /** FC=11 carries only the source *kind*; for Analog, `index` goes out as
+     * a follow-up FC=79 write selecting the physical input (see
+     * `live_control_set_channel_source`). */
     async setChannelSource(channelIndex, kind, index) {
-      if (kind === null) {
-        const message = "A live channel always has a source — pick Analog, Dante or AES3 instead of clearing it.";
-        notifications.show({
-          color: "red",
-          title: "Set source failed",
-          message,
-          autoClose: false,
-        });
-        return actionFailed(message);
-      }
       return reportWrite("Set source", commands.liveControlSetChannelSource(deviceId, channelIndex, kind, index));
     },
   };

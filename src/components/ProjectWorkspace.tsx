@@ -4,6 +4,11 @@ import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { OperatorView } from "./OperatorView";
 import { WorkspaceView } from "./WorkspaceView";
+import { useAmpEditLock } from "../hooks/useAmpEditLock";
+import { useLiveDevices } from "../hooks/useLiveDevices";
+import { useLiveDriver } from "../hooks/useLiveDriver";
+import { useLivePolling } from "../hooks/useLivePolling";
+import { linkedDeviceFor } from "../lib/ampLinkStatus";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 
 interface ProjectWorkspaceProps {
@@ -46,6 +51,15 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
     .filter((a): a is AmpAssignment => a !== undefined);
 
   const activeDevice = openAssignments.find((a) => deviceTabValue(a.id) === activeTab) ?? null;
+
+  // A linked, online amp is polled while its editor is open — the edit lock
+  // needs its FC=27 settings to fingerprint it.
+  useLiveDriver();
+  const { devices } = useLiveDevices();
+  const linkedDevice = activeDevice ? linkedDeviceFor(activeDevice, devices) : undefined;
+  const linkedOnline = linkedDevice?.online ?? false;
+  useLivePolling(linkedDevice && linkedOnline ? [linkedDevice.id] : []);
+  const editLock = useAmpEditLock(project.id, activeDevice?.id, linkedDevice?.id, linkedOnline);
 
   return (
     <div className="flex h-full flex-col">
@@ -120,6 +134,8 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
                 assignment: activeDevice,
                 ampModel: activeDevice.ampModelId ? ampModels?.find((m) => m.id === activeDevice.ampModelId) : undefined,
                 onProjectUpdate,
+                editLock,
+                linkedDevice,
               }}
             />
           )}

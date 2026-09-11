@@ -6,6 +6,7 @@ mod live;
 use tauri::Manager;
 use tauri_specta::{collect_commands, Builder};
 
+use commands::amp_links::{projects_amp_edit_lock, projects_link_amp, projects_unlink_amp, projects_validate_amp_link};
 use commands::amp_models::{amp_models_archive, amp_models_create, amp_models_list, amp_models_update};
 use commands::capability::amp_capability_resolve;
 use commands::device_links::{device_model_link_auto_match, device_model_link_get_all, device_model_link_set};
@@ -21,6 +22,7 @@ use commands::live_control::{
     live_control_set_channel_delay_in, live_control_set_channel_input_mute, live_control_set_channel_output,
     live_control_set_channel_phase_invert, live_control_set_channel_power_mode, live_control_set_crossover_slot,
     live_control_set_eq_band, live_control_set_output_mute, live_control_start, live_control_stop, live_control_set_poll_subscription,
+    live_control_set_rotary_lock,
 };
 use commands::projects::{
     projects_add_amp_assignment, projects_create, projects_delete, projects_get, projects_list,
@@ -107,6 +109,11 @@ pub fn run() {
             fingerprint_project,
             fingerprint_live_device,
             fingerprint_live_devices,
+            projects_validate_amp_link,
+            projects_link_amp,
+            projects_unlink_amp,
+            projects_amp_edit_lock,
+            live_control_set_rotary_lock,
         ]);
 
     #[cfg(debug_assertions)]

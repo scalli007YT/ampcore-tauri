@@ -117,6 +117,12 @@ pub struct RmsLimiter {
     pub threshold_vrms: f64,
     pub attack_ms: f64,
     pub release_multiplier: f64,
+    /// Vendor `RMS_Limiter_Auto`. Read back, not yet editable here.
+    #[serde(default)]
+    pub auto: bool,
+    /// Vendor `RMS_Limiter_max` (V). Read back, not yet editable here.
+    #[serde(default)]
+    pub max_vrms: f64,
 }
 
 /// Instantaneous peak limiter stage — ranged by `AmpParamRanges.peak_limiter_*`.
@@ -127,6 +133,9 @@ pub struct PeakLimiter {
     pub threshold_vp: f64,
     pub hold_ms: f64,
     pub release_ms: f64,
+    /// Vendor `peak_Limiter_max` (V). Read back, not yet editable here.
+    #[serde(default)]
+    pub max_vp: f64,
 }
 
 /// A channel's output protection: independent RMS and Peak limiter stages,
@@ -154,17 +163,48 @@ pub struct LimiterPatch {
     pub peak_release_ms: Option<f64>,
 }
 
-/// Per-channel config on an amp assignment. `ohms` is the channel's
-/// independently authored load impedance, used by the Limiter.
+/// One trim + delay pair for a single input source kind.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTrim {
+    pub trim_db: f64,
+    pub delay_ms: f64,
+}
+
+/// Per-source gain matching (vendor `Ana/Dante/AES_gain_matching`) — each
+/// source kind feeding a channel has its own trim and delay.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTrims {
+    pub analog: SourceTrim,
+    pub dante: SourceTrim,
+    pub aes3: SourceTrim,
+}
+
+/// Backup source switching for one channel (vendor `StruPriority`). `first`/
+/// `second` are the raw source codes as stored on the amp — which kind a code
+/// names depends on the model's source set, so they are not mapped here.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPriority {
+    pub enabled: bool,
+    pub first: u8,
+    pub second: u8,
+    pub threshold_db: i32,
+}
+
+/// Per-channel config on an amp assignment. `ohms` is the channel's load
+/// impedance, used by the Limiter; the amp reports its own as `load_data`.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AmpChannel {
     pub channel_index: u32,
     pub ohms: f64,
     /// Which physical source feeds this channel's input — Routing tab.
-    /// `None` until the user picks one.
-    #[serde(default)]
-    pub source: Option<ChannelSource>,
+    /// Always set: a physical input always has a source. New channels
+    /// default to Analog N (1:1); older files are backfilled on load (see
+    /// `CURRENT_PROJECT_SCHEMA_VERSION`).
+    pub source: ChannelSource,
     /// One crosspoint per possible matrix source (0..matrix_input_count) —
     /// Matrix tab. Grown/shrunk alongside `channels` whenever the assigned
     /// model (hence its topology) changes; see `reconcile_matrix_size`.
@@ -236,6 +276,15 @@ pub struct AmpChannel {
     /// offers), though CVR currently offers all three unconditionally.
     #[serde(default = "default_power_mode")]
     pub power_mode: PowerMode,
+    /// FIR filter bypass. Read back, not yet editable here.
+    #[serde(default)]
+    pub fir_bypassed: bool,
+    /// Per-source trim/delay. Read back, not yet editable here.
+    #[serde(default)]
+    pub source_trims: SourceTrims,
+    /// Backup source switching. Read back, not yet editable here.
+    #[serde(default)]
+    pub backup_priority: BackupPriority,
 }
 
 /// One assigned amp "slot" within a Project. `id` is independent of `mac` so
@@ -258,6 +307,10 @@ pub struct AmpAssignment {
     #[serde(default)]
     pub firmware_version: Option<String>,
     pub channels: Vec<AmpChannel>,
+    /// The amp's user-set name (FC=60 `CUSTOMER_NAME_MODIFY`, read back via FC=0
+    /// BASIC_INFO). Not yet editable here.
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -277,7 +330,32 @@ pub struct Project {
 /// the Speaker Library itself. Older files still load — serde ignores the
 /// leftover fields — and `ProjectDataState::load` rewrites any file below this
 /// version once, which strips them from disk.
-pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 11;
+///
+/// Bumped to 12 when `AmpChannel.source` became required: files below 12 with
+/// a missing/`null` source load as Analog `channelIndex` (see
+/// `store::backfill_channel_sources`) and are rewritten once.
+///
+/// Bumped to 13 for full FC=27 coverage: limiter auto/max, and
+/// `AmpChannel`/`AmpAssignment` fields for FIR bypass, per-source trims,
+/// backup priority and device name. All default via serde
+/// (off/zero/empty); files below 13 are rewritten once.
+///
+/// Bumped to 14 when dynamic EQ was dropped for all models: the schema-13
+/// `AmpChannel.dynamic_eq` is gone. serde ignores the leftover field, and files
+/// below 14 are rewritten once, which strips it from disk.
+///
+/// Bumped to 15 when the schema-13 `ChannelEq.bypassed` was dropped: CVR amps
+/// have no whole-EQ bypass, only per-band active/bypassed. Same leftover-field
+/// handling as 14.
+///
+/// Bumped to 16 when input/output channel linking was dropped for all models:
+/// the schema-13 `AmpAssignment.link_input`/`link_output` are gone. Same
+/// leftover-field handling as 14.
+///
+/// Bumped to 17 when the schema-13 `AmpChannel.knob_gain_db` was dropped: CVR
+/// amps have no per-channel knob gain setting. Same leftover-field handling
+/// as 14.
+pub const CURRENT_PROJECT_SCHEMA_VERSION: u32 = 17;
 
 impl Project {
     pub fn new(name: String, description: String) -> Self {
@@ -314,6 +392,7 @@ impl AmpAssignment {
             amp_model_id,
             firmware_version,
             channels,
+            device_name: None,
         }
     }
 
@@ -334,9 +413,11 @@ impl AmpAssignment {
     /// `matrix_input_count`, preserving existing crosspoint values at
     /// surviving indices — same non-destructive rule as
     /// `reconcile_channel_count`. Called whenever the assigned model (hence
-    /// its resolved topology) changes.
+    /// its resolved topology) changes. A newly added crosspoint follows the
+    /// amp's natural 1:1 routing: In N → Out N active at 0 dB, the rest off.
     pub fn reconcile_matrix_size(&mut self, matrix_input_count: u32) {
         for channel in &mut self.channels {
+            let channel_index = channel.channel_index;
             if channel.matrix_crosspoints.len() as u32 > matrix_input_count {
                 channel.matrix_crosspoints.truncate(matrix_input_count as usize);
             } else {
@@ -344,7 +425,7 @@ impl AmpAssignment {
                     channel.matrix_crosspoints.push(MatrixCrosspoint {
                         source_index,
                         gain_db: 0.0,
-                        active: false,
+                        active: source_index == channel_index,
                     });
                 }
             }
@@ -370,7 +451,9 @@ fn new_channel(channel_index: u32) -> AmpChannel {
     AmpChannel {
         channel_index,
         ohms: 8.0,
-        source: None,
+        // Every built-in CVR model has one analog input per channel
+        // (`capability::cvr::builtin_topology`), so Analog N is always in range.
+        source: ChannelSource { kind: SourceKind::Analog, index: channel_index },
         matrix_crosspoints: Vec::new(),
         delay_in_ms: 0.0,
         input_muted: false,
@@ -388,6 +471,9 @@ fn new_channel(channel_index: u32) -> AmpChannel {
         output_muted: false,
         output_bridged: false,
         power_mode: default_power_mode(),
+        fir_bypassed: false,
+        source_trims: SourceTrims::default(),
+        backup_priority: BackupPriority::default(),
     }
 }
 
@@ -399,8 +485,15 @@ fn default_power_mode() -> PowerMode {
 /// Limiter sub-tab never opens showing an out-of-range number.
 fn default_limiter() -> Limiter {
     Limiter {
-        rms: RmsLimiter { enabled: false, threshold_vrms: 100.0, attack_ms: 5.0, release_multiplier: 4.0 },
-        peak: PeakLimiter { enabled: false, threshold_vp: 140.0, hold_ms: 10.0, release_ms: 50.0 },
+        rms: RmsLimiter {
+            enabled: false,
+            threshold_vrms: 100.0,
+            attack_ms: 5.0,
+            release_multiplier: 4.0,
+            auto: false,
+            max_vrms: 0.0,
+        },
+        peak: PeakLimiter { enabled: false, threshold_vp: 140.0, hold_ms: 10.0, release_ms: 50.0, max_vp: 0.0 },
     }
 }
 

@@ -497,8 +497,8 @@ async fn run(
 /// *start* of the body rather than after the channel blocks (where an
 /// earlier attempt wrongly placed it, via `trailer_base`). Bridge state is
 /// read from FC=50 rather than from here (see `bridge.rs`), but the finding
-/// means absolute offsets 32/33 are worth checking against this app's
-/// `rotary_locked`, which currently reads `trailer_base + 33`.
+/// puts `Standby`/`Rotary_lock` at absolute offsets 32/33, which is where
+/// `channel_config_v118::parse_channel_config` reads them.
 ///
 /// FC=27 carries configuration, not telemetry (levels/temps arrive on their
 /// own function code), so a quiescent amp should print nothing at all and a

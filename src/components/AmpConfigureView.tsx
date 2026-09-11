@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Alert,
   Badge,
   Button,
   Center,
@@ -31,6 +32,7 @@ import {
   SquareArrowRightExit,
   ShieldAlert,
   ListPlus,
+  Lock,
   Volume2,
   VolumeX,
   Waves,
@@ -41,7 +43,9 @@ import {
   FingerprintInspector,
   type FingerprintTarget,
 } from "./FingerprintInspector";
+import { FingerprintMismatchModal } from "./FingerprintMismatchModal";
 import { LimiterEditor } from "./LimiterEditor";
+import { RotaryLockToggle } from "./RotaryLockToggle";
 import {
   PresetActionTile,
   StatEditorTile,
@@ -57,6 +61,7 @@ import {
   commands,
   type AmpAssignment,
   type AmpCapability_Serialize as AmpCapability,
+  type AmpEditLock,
   type AmpModelCatalogEntry,
   type ChannelConfigSnapshot,
   type ChannelEq,
@@ -75,6 +80,8 @@ import {
 } from "../lib/channelTelemetry";
 import {
   createProjectConfigureActions,
+  lockConfigureActions,
+  LOCKED_CONFIGURE_CAPABILITIES,
   PROJECT_CONFIGURE_CAPABILITIES,
   type ConfigureActions,
   type ConfigureCapabilities,
@@ -96,6 +103,11 @@ export type ConfigureSource =
       assignment: AmpAssignment;
       ampModel?: AmpModelCatalogEntry;
       onProjectUpdate: (project: Project) => void;
+      /** Edit-lock state for this amp (`useAmpEditLock`); `locked` makes the
+       * whole editor read-only. */
+      editLock?: AmpEditLock | null;
+      /** The discovered network amp this project amp is linked to, if any. */
+      linkedDevice?: DiscoveredDevice;
     }
   | {
       kind: "live";
@@ -118,6 +130,8 @@ interface AmpConfigureViewProps {
 type SkeletonVariant = "list" | "grid";
 
 const DEFAULT_CHANNEL_COUNT = 4;
+
+const LOCKED_MESSAGE = "Locked — the offline amp differs from the online amp.";
 
 const TABS = [
   {
@@ -180,18 +194,15 @@ function SourcePicker({
   channelIndex,
   onSelect,
 }: {
-  source: ChannelSource | null | undefined;
+  source: ChannelSource;
   sourceCounts: SourceChannelCount[];
   channelIndex: number;
-  onSelect: (
-    kind: SourceKind | null,
-    index: number | null,
-  ) => Promise<ActionResult>;
+  onSelect: (kind: SourceKind, index: number) => Promise<ActionResult>;
 }) {
   // The tile only opens the menu; the write fires from a menu item, so the
   // tile follows this controller rather than its own click.
   const feedback = useActionFeedback();
-  const select = (kind: SourceKind | null, index: number | null) =>
+  const select = (kind: SourceKind, index: number) =>
     void feedback.track(onSelect(kind, index));
 
   return (
@@ -200,15 +211,13 @@ function SourcePicker({
         <div>
           <StatEditorTile
             width={SOURCE_TILE_WIDTH}
-            value={source ? SOURCE_LABELS[source.kind] : "—"}
-            label={source ? `Input ${source.index + 1}` : "No source"}
+            value={SOURCE_LABELS[source.kind]}
+            label={`Input ${source.index + 1}`}
             visualValidation={feedback}
           />
         </div>
       </Menu.Target>
       <Menu.Dropdown>
-        <Menu.Item onClick={() => select(null, null)}>No source</Menu.Item>
-        <Menu.Divider />
         {sourceCounts.map((sc) => {
           if (sc.patchable && sc.channelCount > 1) {
             return (
@@ -1622,8 +1631,8 @@ function RoutingTab({
 
   async function handleSourceChange(
     channelIndex: number,
-    kind: SourceKind | null,
-    index: number | null,
+    kind: SourceKind,
+    index: number,
   ) {
     if (!actions.setChannelSource) return ACTION_UNAVAILABLE;
     return actions.setChannelSource(channelIndex, kind, index);
@@ -2245,20 +2254,60 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
     };
   }, [ampModel, firmwareVersion]);
 
+  const editLock =
+    source?.kind === "project" ? (source.editLock ?? null) : null;
+  const locked = editLock?.locked ?? false;
+
   const actions: ConfigureActions | undefined =
     source?.kind === "project"
-      ? createProjectConfigureActions(
-          source.project.id,
-          source.assignment.id,
-          source.onProjectUpdate,
-        )
+      ? locked
+        ? lockConfigureActions(LOCKED_MESSAGE)
+        : createProjectConfigureActions(
+            source.project.id,
+            source.assignment.id,
+            source.onProjectUpdate,
+          )
       : source?.kind === "live"
         ? createLiveConfigureActions(source.device.id)
         : undefined;
   const capabilities: ConfigureCapabilities =
     source?.kind === "live"
       ? LIVE_CONFIGURE_CAPABILITIES
-      : PROJECT_CONFIGURE_CAPABILITIES;
+      : locked
+        ? LOCKED_CONFIGURE_CAPABILITIES
+        : PROJECT_CONFIGURE_CAPABILITIES;
+
+  // The comparison opens by itself the first time an amp turns out locked
+  // with differences; afterwards only from the banner.
+  const [mismatchOpen, setMismatchOpen] = useState(false);
+  const autoOpenedFor = useRef<string | null>(null);
+  const lockAssignmentId =
+    source?.kind === "project" ? source.assignment.id : null;
+  const showsDifferences =
+    editLock?.state === "mismatch" || editLock?.state === "unreadable";
+  useEffect(() => {
+    if (
+      !showsDifferences ||
+      !lockAssignmentId ||
+      autoOpenedFor.current === lockAssignmentId
+    )
+      return;
+    autoOpenedFor.current = lockAssignmentId;
+    setMismatchOpen(true);
+  }, [showsDifferences, lockAssignmentId]);
+
+  // Front-panel lock toggle target: the live device itself, or a project
+  // amp's linked network amp while it is online.
+  const rotaryDeviceId =
+    source?.kind === "live"
+      ? source.device.id
+      : source?.kind === "project" && source.linkedDevice?.online
+        ? source.linkedDevice.id
+        : undefined;
+  const rotaryLocked =
+    source?.kind === "live"
+      ? source.channelConfig?.rotaryLocked
+      : editLock?.rotaryLocked;
 
   // Preset Configuration is a live-device-only concept (FC=59 presets live on
   // the physical amp; a Project with no live device has nothing to fetch) —
@@ -2285,7 +2334,38 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         : undefined;
 
   return (
-    <Tabs defaultValue="input" orientation="vertical" className="h-full">
+    <div className="flex h-full min-h-0 flex-col">
+      {editLock?.state === "checking" && (
+        <Alert
+          radius={0}
+          py={6}
+          color="gray"
+          variant="light"
+          icon={<Loader size={14} />}
+        >
+          <Text size="sm">Checking the linked amp — editing is paused until its settings are read.</Text>
+        </Alert>
+      )}
+      {showsDifferences && (
+        <Alert radius={0} py={6} color="red" variant="light" icon={<Lock size={16} />}>
+          <Group justify="space-between" wrap="wrap" gap="xs">
+            <Text size="sm">
+              {editLock?.state === "unreadable"
+                ? "Locked — the online amp's settings can't be fully compared."
+                : "Locked — the offline amp differs from the online amp."}
+            </Text>
+            <Button size="compact-xs" variant="light" color="red" onClick={() => setMismatchOpen(true)}>
+              Show differences
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      <FingerprintMismatchModal
+        opened={mismatchOpen}
+        onClose={() => setMismatchOpen(false)}
+        lock={editLock}
+      />
+    <Tabs defaultValue="input" orientation="vertical" className="min-h-0 flex-1">
       {/* `min-w-0` on the panel is what lets the tab body shrink below its
           content's intrinsic width instead of pushing the whole window into
           a horizontal scroll; the rail itself scrolls once five tabs no
@@ -2305,6 +2385,10 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
           </Tooltip>
         ))}
         <FingerprintInspector target={fingerprintTarget} />
+        {(source?.kind === "live" ||
+          (source?.kind === "project" && source.linkedDevice)) && (
+          <RotaryLockToggle deviceId={rotaryDeviceId} rotaryLocked={rotaryLocked} />
+        )}
       </Tabs.List>
 
       {visibleTabs.map(({ value, label, skeleton }) => {
@@ -2352,10 +2436,19 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
             value={value}
             className="min-h-0 min-w-0 flex-1"
           >
-            {content}
+            {/* Native disabled fieldset: every input and button inside goes
+                inert while locked; `lockConfigureActions` backs it up. */}
+            <fieldset
+              disabled={locked}
+              className="h-full min-h-0 min-w-0"
+              style={{ border: 0, margin: 0, padding: 0 }}
+            >
+              {content}
+            </fieldset>
           </Tabs.Panel>
         );
       })}
     </Tabs>
+    </div>
   );
 }

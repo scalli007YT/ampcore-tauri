@@ -761,9 +761,8 @@ export function EqEditor({ assignment, channelIndex, direction, capability, acti
     >
       {!interactive && (
         <Text size="xs" c="dimmed" ta="center">
-          Read-only here — no live write command for EQ exists yet, so nothing can be dragged or edited on this
-          device. Click a band to select it (highlights its column below) and see its isolated response, but freq,
-          gain, and Q are display-only until a live EQ write is built.
+          Read-only — EQ can't be edited here right now. Click a band to select it (highlights its column below) and
+          see its isolated response; freq, gain, and Q are display-only.
         </Text>
       )}
       <ResponseGraph

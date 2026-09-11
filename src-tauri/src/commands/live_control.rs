@@ -863,6 +863,24 @@ pub async fn live_control_set_channel_phase_invert(
     Ok(tally.finish())
 }
 
+/// FC=17 ROTARY_LOCK — locks/unlocks the amp's front-panel knobs. Does not
+/// affect what this app may edit. No explicit refetch: the new state comes
+/// back through the next FC=27 poll (`rotary_locked`).
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_rotary_lock(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    locked: bool,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet = write::build_set_rotary_lock(firmware_family.as_deref(), locked)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_power_mode(

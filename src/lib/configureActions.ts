@@ -10,7 +10,7 @@ import {
   type Project,
   type SourceKind,
 } from "./bindings";
-import { toActionResult, type ActionResult } from "./actionResult";
+import { actionFailed, toActionResult, type ActionResult } from "./actionResult";
 
 /** Every mutation `AmpConfigureView`'s tabs (and `EqEditor`/`LimiterEditor`)
  * can make, abstracted away from *how* — Project mode persists to a
@@ -49,7 +49,7 @@ export interface ConfigureActions {
 
   setChannelName?(channelIndex: number, side: EqDirection, name: string | null): Promise<ActionResult>;
   setOutputBridge?(pairLeaderChannelIndex: number, bridged: boolean): Promise<ActionResult>;
-  setChannelSource?(channelIndex: number, kind: SourceKind | null, index: number | null): Promise<ActionResult>;
+  setChannelSource?(channelIndex: number, kind: SourceKind, index: number | null): Promise<ActionResult>;
   setMatrixCrosspoint?(
     channelIndex: number,
     sourceIndex: number,
@@ -83,6 +83,26 @@ export interface ConfigureCapabilities {
 export const PROJECT_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
   ohmsEditable: true,
 };
+
+export const LOCKED_CONFIGURE_CAPABILITIES: ConfigureCapabilities = {
+  ohmsEditable: false,
+};
+
+/** Actions for an edit-locked project amp (see `data/edit_lock.rs`). Required
+ * members refuse with `message`; optional members are omitted so the controls
+ * that already gate on them (EQ graph, bridge, source, matrix, limiter…) render
+ * disabled. The lock banner is the explanation their absence needs. */
+export function lockConfigureActions(message: string): ConfigureActions {
+  const refuse = async () => actionFailed(message);
+  return {
+    setChannelDelayIn: refuse,
+    setChannelInputMute: refuse,
+    setChannelOutput: refuse,
+    setChannelPhaseInvert: refuse,
+    setChannelOutputMute: refuse,
+    setChannelPowerMode: refuse,
+  };
+}
 
 type ProjectCommandResult = { status: "ok"; data: Project } | { status: "error"; error: AppError };
 
