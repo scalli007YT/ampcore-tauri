@@ -237,9 +237,9 @@ pub fn projects_set_channel_ohms(
     Ok(project)
 }
 
-/// Sets (or clears) which physical source feeds a channel's input — Routing
-/// tab. `kind: None` clears the source entirely (`index` is ignored). A
-/// `kind` with no `index` defaults to physical input 0 of that kind.
+/// Sets which physical source feeds a channel's input — Routing tab. There is
+/// no "no source": a physical input always has one. A `kind` with no `index`
+/// defaults to physical input 0 of that kind.
 #[tauri::command]
 #[specta::specta]
 pub fn projects_set_channel_source(
@@ -248,7 +248,7 @@ pub fn projects_set_channel_source(
     project_id: String,
     assignment_id: String,
     channel_index: u32,
-    kind: Option<SourceKind>,
+    kind: SourceKind,
     index: Option<u32>,
 ) -> Result<Project, AppError> {
     let mut inner = state.0.lock().map_err(|e| e.to_string())?;
@@ -270,7 +270,7 @@ pub fn projects_set_channel_source(
         .find(|c| c.channel_index == channel_index)
         .ok_or_else(|| AppError::from(format!("channel {} not found", channel_index)))?;
 
-    channel.source = kind.map(|kind| ChannelSource { kind, index: index.unwrap_or(0) });
+    channel.source = ChannelSource { kind, index: index.unwrap_or(0) };
     project.touch();
 
     let project = project.clone();

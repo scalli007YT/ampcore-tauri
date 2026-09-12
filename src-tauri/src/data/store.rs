@@ -235,11 +235,37 @@ fn load_projects(data_dir: &Path) -> Result<Vec<Project>, String> {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("json") {
             let contents = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let project: Project = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+            let mut value: serde_json::Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+            backfill_channel_sources(&mut value);
+            let project: Project = serde_json::from_value(value).map_err(|e| e.to_string())?;
             projects.push(project);
         }
     }
     Ok(projects)
+}
+
+/// Schema 12 made `AmpChannel.source` required. Files written before that may
+/// carry a missing or `null` source; those load as Analog `channelIndex` — the
+/// same 1:1 default a new channel gets. Runs on the raw JSON because the typed
+/// `Project` can no longer represent "no source". Idempotent.
+fn backfill_channel_sources(project: &mut serde_json::Value) {
+    let Some(assignments) = project.get_mut("ampAssignments").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for assignment in assignments {
+        let Some(channels) = assignment.get_mut("channels").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for channel in channels {
+            let Some(channel) = channel.as_object_mut() else {
+                continue;
+            };
+            if channel.get("source").map_or(true, |source| source.is_null()) {
+                let index = channel.get("channelIndex").and_then(|v| v.as_u64()).unwrap_or(0);
+                channel.insert("source".to_string(), serde_json::json!({ "kind": "analog", "index": index }));
+            }
+        }
+    }
 }
 
 fn load_json_or_default<T>(path: &Path) -> Result<T, String>

@@ -90,6 +90,14 @@ pub fn build_set_phase_invert(firmware_family: Option<&str>, channel_index: u8, 
     }
 }
 
+pub fn build_set_rotary_lock(firmware_family: Option<&str>, locked: bool) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_rotary_lock(locked)),
+        Some("1.1.9") => Some(super::write_v119::build_set_rotary_lock(locked)),
+        _ => None,
+    }
+}
+
 pub fn build_set_power_mode(firmware_family: Option<&str>, channel_index: u8, mode: PowerMode) -> Option<Vec<u8>> {
     match firmware_family {
         Some("1.1.8") => Some(super::write_v118::build_set_power_mode(channel_index, mode)),

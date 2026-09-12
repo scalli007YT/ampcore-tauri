@@ -82,6 +82,18 @@ pub struct RequestSpec {
     /// poll) issue them across successive ticks instead.
     pub chx: u8,
     pub body: Vec<u8>,
+    /// Whether this function code's reply arrives as several fragments —
+    /// true for FC=27 (always fragmented) and FC=59, false for a
+    /// single-datagram reply like FC=50's one-byte body.
+    ///
+    /// This is what `conflicts_with` gates on. Only a fragmented exchange
+    /// needs the per-IP `FragmentReassembler`, so only those wait for a clear
+    /// line; a single-datagram request rides alongside one safely
+    /// (`FragmentReassembler::accept` returns `Single` without ever touching
+    /// its `by_ip` state). **Default to `true` for a new function code**:
+    /// wrongly exclusive only costs latency, wrongly concurrent garbles a
+    /// reassembly buffer.
+    pub expects_fragments: bool,
     pub sink: ResultSink,
 }
 
@@ -117,13 +129,29 @@ pub struct RequestRegistry {
 }
 
 impl RequestRegistry {
-    /// True if a request for `ip` is in flight under ANY function code — the
-    /// driver uses this (not `has_pending`) before registering anything new
-    /// for that ip, since the shared per-IP `FragmentReassembler` can't
-    /// safely interleave two concurrent multi-fragment exchanges regardless
-    /// of which function codes they're for (see `RequestError::Busy`).
-    pub fn has_pending_for_ip(&self, ip: &str) -> bool {
-        self.pending.keys().any(|(pending_ip, _)| pending_ip == ip)
+    /// Whether registering this request now would clash with something
+    /// already in flight for the same ip. The driver calls this before
+    /// registering anything; a clash is reported to external callers as
+    /// `RequestError::Busy`.
+    ///
+    /// Two ways to clash:
+    /// - the same `(ip, function_code)` is already pending — `pending` holds
+    ///   at most one entry per key, so a second would supersede the first; or
+    /// - the new request expects fragments and anything at all is in flight
+    ///   for that ip.
+    ///
+    /// The second is the real constraint, and it is deliberately one-sided.
+    /// The per-IP `FragmentReassembler` cannot interleave two multi-fragment
+    /// exchanges, so a *fragmented* request waits for a clear line. It is
+    /// indifferent to a single-datagram reply, which `accept()` returns as
+    /// `Single` without ever touching per-IP state — so a *single-datagram*
+    /// request goes out even while a fragmented one is mid-flight. That is
+    /// what stops the 200ms FC=27 poll starving FC=50 bridge reads, which it
+    /// used to do for seconds at a time.
+    pub fn conflicts_with(&self, ip: &str, function_code: u8, expects_fragments: bool) -> bool {
+        self.pending
+            .keys()
+            .any(|(pending_ip, pending_fc)| pending_ip == ip && (*pending_fc == function_code || expects_fragments))
     }
 
     /// Registers a new request, bumping the `(ip, fc)` generation counter.
@@ -605,5 +633,62 @@ fn coalesce_key(spec: &WriteSpec) -> Option<(u8, u8, u8, u8)> {
     // header[3] = chx, header[4] = segment, header[9] = in_out_flag —
     // see `protocol::build_struct_header`.
     Some((function_code, header[3], header[4], header[9]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FC_SYNC_DATA: u8 = 27;
+    const FC_BRIDGE: u8 = 50;
+    const FC_SAVE_RECALL: u8 = 59;
+    const IP: &str = "10.0.0.2";
+
+    fn spec(ip: &str, function_code: u8, expects_fragments: bool) -> RequestSpec {
+        RequestSpec {
+            ip: ip.to_string(),
+            function_code,
+            chx: 0,
+            body: Vec::new(),
+            expects_fragments,
+            sink: ResultSink::Internal,
+        }
+    }
+
+    #[test]
+    fn a_single_datagram_request_rides_alongside_a_fragmented_one() {
+        let mut registry = RequestRegistry::default();
+        let _ = registry.register(spec(IP, FC_SYNC_DATA, true), Instant::now());
+        // The whole point: an FC=50 bridge read no longer waits behind the
+        // 200ms FC=27 poll, which used to starve it for seconds.
+        assert!(!registry.conflicts_with(IP, FC_BRIDGE, false));
+        // A second fragmented exchange still has to wait, though.
+        assert!(registry.conflicts_with(IP, FC_SAVE_RECALL, true));
+    }
+
+    #[test]
+    fn a_fragmented_request_waits_for_a_single_datagram_one() {
+        let mut registry = RequestRegistry::default();
+        let _ = registry.register(spec(IP, FC_BRIDGE, false), Instant::now());
+        assert!(registry.conflicts_with(IP, FC_SYNC_DATA, true));
+        // Two single-datagram reads under different codes coexist.
+        assert!(!registry.conflicts_with(IP, 17, false));
+    }
+
+    #[test]
+    fn the_same_function_code_always_conflicts() {
+        let mut registry = RequestRegistry::default();
+        let _ = registry.register(spec(IP, FC_BRIDGE, false), Instant::now());
+        // `pending` holds one entry per (ip, fc), so a second would supersede
+        // the first rather than run beside it.
+        assert!(registry.conflicts_with(IP, FC_BRIDGE, false));
+    }
+
+    #[test]
+    fn another_device_never_conflicts() {
+        let mut registry = RequestRegistry::default();
+        let _ = registry.register(spec(IP, FC_SYNC_DATA, true), Instant::now());
+        assert!(!registry.conflicts_with("10.0.0.3", FC_SYNC_DATA, true));
+    }
 }
 

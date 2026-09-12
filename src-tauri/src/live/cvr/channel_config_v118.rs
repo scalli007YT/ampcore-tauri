@@ -20,7 +20,9 @@
 
 use crate::data::capability::{CrossoverFilterType, EqFilterType, PowerMode, SourceKind};
 use crate::data::common::now_millis;
-use crate::data::project::{ChannelEq, ChannelSource, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint, PeakLimiter, RmsLimiter};
+use crate::data::project::{
+    BackupPriority, ChannelEq, ChannelSource, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint, PeakLimiter, RmsLimiter,
+};
 
 use super::channel_config::{ChannelConfig, ChannelConfigSnapshot};
 
@@ -60,7 +62,12 @@ fn i8_at(body: &[u8], abs: usize) -> i8 {
 /// than the reference's synthetic `"Ch{n}{field}"` fallback label — an
 /// absent name should read as absent, not as fabricated placeholder text.
 fn ascii_16(body: &[u8], abs: usize) -> Option<String> {
-    let bytes = body.get(abs..abs + 16)?;
+    ascii_n(body, abs, 16)
+}
+
+/// `ascii_16` for any fixed field width (device and preset names are 32).
+fn ascii_n(body: &[u8], abs: usize, len: usize) -> Option<String> {
+    let bytes = body.get(abs..abs + len)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     if end == 0 {
         return None;
@@ -234,6 +241,9 @@ fn parse_eq_block(body: &[u8], block_offset: usize) -> EqBlockResult {
         }
     }
 
+    // The vendor struct has one more byte after the 10 filters
+    // (`f_CH_bypass`), but CVR amps have no whole-EQ bypass — bands are only
+    // active or bypassed individually — so it is deliberately not read.
     EqBlockResult { hp: hp.unwrap(), bands, lp: lp.unwrap() }
 }
 
@@ -258,9 +268,18 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
 
     let raw_source_code = u8_at(body, at(85));
 
+    // Trailer `SourcePrioritys[4]`: [first, second, enabled, threshold i8].
+    // `enabled == 1` per the reference web app — verify on hardware.
+    let priority_base = trailer_base + 140 + channel_index as usize * 4;
+    let backup_priority = BackupPriority {
+        first: u8_at(body, priority_base),
+        second: u8_at(body, priority_base + 1),
+        enabled: u8_at(body, priority_base + 2) == 1,
+        threshold_db: i8_at(body, priority_base + 3) as i32,
+    };
+
     ChannelConfig {
         channel_index,
-        gain_in: i8_at(body, at(117)) as i32,
         delay_in_ms: f32_le(body, at(86)),
         input_muted,
         matrix_crosspoints,
@@ -281,12 +300,18 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
                 threshold_vrms: f32_le(body, at(98)) as f64,
                 attack_ms: u16_le(body, at(95)) as f64,
                 release_multiplier: u8_at(body, at(97)) as f64,
+                // Vendor `RMS_Auto = (auto == 0)` — verify on hardware.
+                auto: u8_at(body, at(103)) == 0,
+                max_vrms: f32_le(body, at(104)) as f64,
             },
             peak: PeakLimiter {
                 enabled: u8_at(body, at(116)) == 0, // active-low
                 threshold_vp: f32_le(body, at(112)) as f64,
                 hold_ms: u16_le(body, at(108)) as f64,
                 release_ms: u16_le(body, at(110)) as f64,
+                // Vendor `peak_Limiter_max` — these 4 bytes used to be misread
+                // as a signed `gain_in` byte.
+                max_vp: f32_le(body, at(117)) as f64,
             },
         },
         fir_bypassed: u8_at(body, at(404)) != 0, // inverted: 0=enabled
@@ -300,8 +325,14 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         dante_delay_ms: f32_le(body, at(48)),
         aes3_trim_db: f32_le(body, at(52)),
         aes3_delay_ms: f32_le(body, at(56)),
+        load_ohms: f32_le(body, at(410)),
+        backup_priority,
     }
 }
+
+// Channel bytes 446–551 hold the vendor's dynamic EQ (`SynDEQ_Data`). Dynamic
+// EQ is not supported by this app for any model, so they are deliberately
+// not read.
 
 /// `body` = the pure per-channel-data region (StructHeader/checksum already
 /// stripped by the caller — see `channel_config.rs`'s dispatcher doc).
@@ -326,22 +357,28 @@ pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
 
     let channels = (0..channel_count as u32).map(|c| parse_channel(body, c, trailer_base)).collect();
 
-    // Backup priority order lives in one of two trailer layouts depending on
-    // which secondary source families the amp has (Dante+AES3 vs. a single
-    // secondary source) — data this parser doesn't have without a catalog-
-    // model link. Known gap: `None` rather than guessing which variant
-    // applies.
-    let backup_priority = None;
-
-    // Rotary lock: the standard trailerBase+33 byte, strict 0/1 decode,
-    // covers the 4-channel case this parser targets. The reference's
-    // alternate 2-channel "DP_1" `bufferLen-486` layout is a known gap here.
-    let rotary_lock_byte = u8_at(body, trailer_base + 33);
-    let rotary_locked = match rotary_lock_byte {
+    // Header (absolute, before channel A's fields): `Machine_Dname[32]` — on a
+    // real DSP-2004 this holds the firmware/model ID string, not the user's
+    // name (that is FC=0 BASIC_INFO's `DiscoveredDevice.name`), so it is not
+    // read — then `Standby` @32, `Rotary_lock` @33, bridges @34/35 (bridges come from
+    // FC=50 instead — see `bridge.rs`). Confirmed by `driver.rs`'s
+    // `log_sync_body_diff`: toggling bridge pair 0 changed absolute byte 34.
+    // The lock used to be read at `trailer_base + 33`, which lands inside
+    // channel D's dynamic-EQ block.
+    let flag = |abs: usize| match u8_at(body, abs) {
         0 => Some(false),
         1 => Some(true),
         _ => None,
     };
+    let standby = flag(32);
+    let rotary_locked = flag(33);
+
+    // Trailer from `trailer_base + 36`: `link_input[8]` and `link_output[8]`
+    // (i32 channel link groups — not supported by this app for any model, so
+    // deliberately not read), then `Scene_mode_name[32]`; mutes, analog
+    // matrix and priority follow and are read per channel in `parse_channel`.
+    // The trailing vendor `Gains[4]` is no setting on CVR amps and is not read.
+    let preset_name = ascii_n(body, trailer_base + 100, 32);
 
     // `Bridge_data.Bridge` is wire-inverted like MUTE: 0 = bridged.
     // Confirmed twice over — the reference's readback (`bridged: raw === 0`)
@@ -352,5 +389,27 @@ pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
     // truncated to the pairs this payload's channel count actually has —
     // never padded out to a fixed 2, which would invent a C/D pair on a
     // 2-channel amp.
-    Some(ChannelConfigSnapshot { channels, backup_priority, rotary_locked, received_at: now_millis() })
+    Some(ChannelConfigSnapshot {
+        channels,
+        standby,
+        rotary_locked,
+        preset_name,
+        received_at: now_millis(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_flags_are_read_at_absolute_offsets() {
+        let mut body = vec![0u8; 4 * BYTES_PER_CHANNEL + TRAILER_SIZE_V118];
+        body[32] = 1; // standby
+        body[33] = 1; // knob lock
+        body[4 * BYTES_PER_CHANNEL + 33] = 7; // the old, wrong offset
+        let snapshot = parse_channel_config(&body).unwrap();
+        assert_eq!(snapshot.standby, Some(true));
+        assert_eq!(snapshot.rotary_locked, Some(true));
+    }
 }

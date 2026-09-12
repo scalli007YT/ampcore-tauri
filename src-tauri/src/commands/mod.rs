@@ -1,3 +1,4 @@
+pub mod amp_links;
 pub mod amp_models;
 pub mod capability;
 pub mod device_links;

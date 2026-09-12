@@ -47,6 +47,10 @@ pub fn build_set_power_mode(channel_index: u8, mode: PowerMode) -> Vec<u8> {
     super::write_v118::build_set_power_mode(channel_index, mode)
 }
 
+pub fn build_set_rotary_lock(locked: bool) -> Vec<u8> {
+    super::write_v118::build_set_rotary_lock(locked)
+}
+
 pub fn build_set_eq_filter_type(channel_index: u8, in_out_flag: u8, segment: u8, type_code: u8, active: bool) -> Vec<u8> {
     super::write_v118::build_set_eq_filter_type(channel_index, in_out_flag, segment, type_code, active)
 }

@@ -17,6 +17,7 @@ pub const FC_MUTE: u8 = 10;
 pub const FC_SOURCE_SELECT: u8 = 11;
 pub const FC_ROUTING: u8 = 12;
 pub const FC_DELAY: u8 = 14;
+pub const FC_ROTARY_LOCK: u8 = 17;
 pub const FC_PHASE: u8 = 18;
 pub const FC_FILTER_TYPE: u8 = 30;
 pub const FC_FILTER_GAIN: u8 = 31;
@@ -103,6 +104,16 @@ pub fn build_set_delay_out(channel_index: u8, delay_ms: f32) -> Vec<u8> {
         IN_OUT_FLAG_OUTPUT,
         &delay_ms.to_le_bytes(),
     )
+}
+
+/// FC=17 ROTARY_LOCK, `chx=0`, `in_out_flag=0`. Wire body: `0x01`=front-panel
+/// knobs locked, `0x00`=unlocked. Function code from the vendor source's
+/// `Struct_test.Gongneng` enum (17th entry, after STANDBY/RESET); body and
+/// header fields from the reference web app's `setAmpLock` action. Read back
+/// through FC=27's `rotary_locked`.
+pub fn build_set_rotary_lock(locked: bool) -> Vec<u8> {
+    let body = [u8::from(locked)];
+    build_control_packet(FC_ROTARY_LOCK, 0, 0, 0, IN_OUT_FLAG_INPUT, &body)
 }
 
 /// FC=18 PHASE, `in_out_flag=1` (output). Wire body: `0x01`=inverted,

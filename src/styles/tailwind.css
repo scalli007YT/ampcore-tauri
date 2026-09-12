@@ -20,6 +20,88 @@
    media query, so it stays in sync with the in-app theme toggle. */
 @custom-variant dark (&:where([data-mantine-color-scheme="dark"], [data-mantine-color-scheme="dark"] *));
 
+/* Link Amp modal match strip (AmpLinkModal.tsx). */
+@keyframes link-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes link-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes link-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+
+/* Merge panel (AmpMergePanel.tsx) — data travels online (right) → offline
+   (left), so every motion here runs right to left. */
+@keyframes merge-flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: -18px 0;
+  }
+}
+
+@keyframes merge-shimmer {
+  from {
+    transform: translateX(400%);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes merge-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-4px);
+  }
+  40% {
+    transform: translateX(4px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(3px);
+  }
+}
+
+@keyframes merge-pulse {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--mantine-color-green-filled) 55%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 16px transparent;
+  }
+}
+
 html,
 body,
 #root {

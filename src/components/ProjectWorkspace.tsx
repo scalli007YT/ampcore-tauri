@@ -4,6 +4,15 @@ import { Server, X } from "lucide-react";
 import { AmpConfigureView } from "./AmpConfigureView";
 import { OperatorView } from "./OperatorView";
 import { WorkspaceView } from "./WorkspaceView";
+import { useAmpEditLock } from "../hooks/useAmpEditLock";
+import { useLinkedSync } from "../hooks/useLinkedSync";
+import { useLiveBridge } from "../hooks/useLiveBridge";
+import { useLiveChannelConfig } from "../hooks/useLiveChannelConfig";
+import { useLiveDevices } from "../hooks/useLiveDevices";
+import { useLiveDriver } from "../hooks/useLiveDriver";
+import { useLivePolling } from "../hooks/useLivePolling";
+import { useLiveTelemetry } from "../hooks/useLiveTelemetry";
+import { linkedDeviceFor } from "../lib/ampLinkStatus";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 
 interface ProjectWorkspaceProps {
@@ -46,6 +55,39 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
     .filter((a): a is AmpAssignment => a !== undefined);
 
   const activeDevice = openAssignments.find((a) => deviceTabValue(a.id) === activeTab) ?? null;
+
+  // A linked, online amp is polled while its editor is open — the edit lock
+  // needs its FC=27 settings to fingerprint it.
+  useLiveDriver();
+  const { devices } = useLiveDevices();
+  const linkedDevice = activeDevice ? linkedDeviceFor(activeDevice, devices) : undefined;
+  const linkedOnline = linkedDevice?.online ?? false;
+  useLivePolling(linkedDevice && linkedOnline ? [linkedDevice.id] : []);
+  // Primes FC=50 bridge state for this amp (see `useLiveBridge`): the edit
+  // lock can't fingerprint the online amp until every pair is reported, so
+  // without this the editor opens locked until the bridge tick catches up.
+  useLiveBridge(linkedDevice && linkedOnline ? linkedDevice.id : undefined);
+  const editLock = useAmpEditLock(project.id, activeDevice?.id, linkedDevice?.id, linkedOnline);
+
+  // Once the two fingerprints match, the amp takes over as the source of
+  // truth: the editor writes to it directly and this project follows it.
+  const channelConfigById = useLiveChannelConfig();
+  const telemetryById = useLiveTelemetry();
+  const { following } = useLinkedSync({
+    projectId: project.id,
+    assignmentId: activeDevice?.id,
+    lock: editLock,
+    deviceName: linkedDevice?.name,
+    onProjectUpdate,
+  });
+  const liveThrough =
+    following && linkedDevice && linkedOnline
+      ? {
+          device: linkedDevice,
+          channelConfig: channelConfigById[linkedDevice.id],
+          telemetry: telemetryById[linkedDevice.id],
+        }
+      : undefined;
 
   return (
     <div className="flex h-full flex-col">
@@ -120,6 +162,9 @@ export function ProjectWorkspace({ project, onProjectUpdate, activeTab, onActive
                 assignment: activeDevice,
                 ampModel: activeDevice.ampModelId ? ampModels?.find((m) => m.id === activeDevice.ampModelId) : undefined,
                 onProjectUpdate,
+                editLock,
+                linkedDevice,
+                liveThrough,
               }}
             />
           )}

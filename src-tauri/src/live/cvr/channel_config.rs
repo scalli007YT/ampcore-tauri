@@ -11,13 +11,12 @@ use serde::Serialize;
 use specta::Type;
 
 use crate::data::capability::PowerMode;
-use crate::data::project::{ChannelEq, ChannelSource, Limiter, MatrixCrosspoint};
+use crate::data::project::{BackupPriority, ChannelEq, ChannelSource, Limiter, MatrixCrosspoint};
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfig {
     pub channel_index: u32,
-    pub gain_in: i32,
     pub delay_in_ms: f32,
     /// Sourced from the trailer's `muteIn` block, NOT any channel-body byte
     /// — see `channel_config_v118.rs`.
@@ -48,18 +47,23 @@ pub struct ChannelConfig {
     pub dante_delay_ms: f32,
     pub aes3_trim_db: f32,
     pub aes3_delay_ms: f32,
+    /// Vendor `load_data` — the load impedance the amp is set to (Ω; unit to
+    /// verify on hardware).
+    pub load_ohms: f32,
+    pub backup_priority: BackupPriority,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfigSnapshot {
     pub channels: Vec<ChannelConfig>,
-    /// `None` when the payload shape doesn't match the variant this parser
-    /// implements — a known gap, not a guess (see `channel_config_v118.rs`).
-    pub backup_priority: Option<Vec<Vec<u8>>>,
-    /// `None` for payload shapes this parser doesn't special-case (e.g. the
-    /// reference's 2-channel `DP_1` layout) — known gap, not a guess.
+    /// Header `Standby`; `None` for a byte other than 0/1.
+    pub standby: Option<bool>,
+    /// Header `Rotary_lock` (front-panel knob lock); `None` for a byte other
+    /// than 0/1.
     pub rotary_locked: Option<bool>,
+    /// Label of the last recalled preset (trailer `Scene_mode_name`).
+    pub preset_name: Option<String>,
     pub received_at: f64,
 }
 

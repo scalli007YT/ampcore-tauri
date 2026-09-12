@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use super::amp_model::AmpModelCatalogEntry;
+use crate::live::state::DiscoveredDevice;
 
 /// Persists which catalog `AmpModelCatalogEntry` a live-discovered device
 /// (identified by MAC, not by any Project's `AmpAssignment`) should be
@@ -68,4 +69,22 @@ pub fn match_catalog_model<'a>(
     }
 
     Some(matched)
+}
+
+/// Read-only: which catalog model a live device currently resolves to. A
+/// saved link (manual pick or earlier auto-match) wins over re-matching;
+/// otherwise `match_catalog_model`. Never persists anything — use
+/// `device_model_link_auto_match` when a match should be recorded.
+pub fn resolve_device_model<'a>(
+    models: &'a [AmpModelCatalogEntry],
+    links: &[DeviceModelLink],
+    device: &DiscoveredDevice,
+) -> Option<&'a AmpModelCatalogEntry> {
+    links
+        .iter()
+        .find(|l| l.mac == device.mac)
+        .and_then(|l| models.iter().find(|m| m.id == l.amp_model_id))
+        .or_else(|| {
+            match_catalog_model(models, &device.firmware_version, device.digital_input_channels, device.output_channels)
+        })
 }

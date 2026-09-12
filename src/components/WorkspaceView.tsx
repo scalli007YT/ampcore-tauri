@@ -15,12 +15,23 @@ import {
   Text,
   TextInput,
   ThemeIcon,
+  Tooltip,
 } from "@mantine/core";
-import { Pencil, Server, X } from "lucide-react";
+import { Link, Pencil, Server, X } from "lucide-react";
 import { AmpCatalogueModal } from "./AmpCatalogueModal";
+import { AmpLinkModal } from "./AmpLinkModal";
 import { commands, type AmpAssignment, type AmpModelCatalogEntry, type Project } from "../lib/bindings";
 import { firmwareOptionsFor } from "../lib/firmwareOptions";
 import { useIsCompact } from "../lib/breakpoints";
+import { AMP_LINK_STATUS_META, ampLinkStatus } from "../lib/ampLinkStatus";
+import { useLiveDevices } from "../hooks/useLiveDevices";
+import { useLiveDriver } from "../hooks/useLiveDriver";
+
+/** Neutral amp-card controls (edit, link): gray with a white icon in dark mode,
+ * light gray with a black icon in light mode. Delete keeps Mantine's red. */
+const CARD_CONTROL_CLASS =
+  "bg-[var(--mantine-color-gray-3)] text-black hover:bg-[var(--mantine-color-gray-4)] " +
+  "dark:bg-[var(--mantine-color-gray-7)] dark:text-white dark:hover:bg-[var(--mantine-color-gray-6)]";
 
 interface WorkspaceViewProps {
   project: Project;
@@ -40,6 +51,12 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
   const [editFirmwareVersion, setEditFirmwareVersion] = useState<string | null>(null);
   const [savingLabel, setSavingLabel] = useState(false);
   const [labelError, setLabelError] = useState<string | null>(null);
+  // By id, so the modal sees the updated assignment (new MAC) after Assign/Unlink.
+  const [linkTargetId, setLinkTargetId] = useState<string | null>(null);
+
+  // Status dots need discovery running whenever the project workspace is open.
+  useLiveDriver();
+  const { devices, ready: devicesReady } = useLiveDevices();
 
   const modelsById = useMemo(() => {
     const map = new Map<string, AmpModelCatalogEntry>();
@@ -59,6 +76,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
 
   const assignments = project.ampAssignments;
   const selectedAssignment = assignments.find((a) => a.id === selectedId) ?? null;
+  const linkTarget = assignments.find((a) => a.id === linkTargetId) ?? null;
 
   function modelNameFor(assignment: AmpAssignment) {
     const model = assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined;
@@ -155,6 +173,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
               const isSelected = assignment.id === selectedId;
               const model = assignment.ampModelId ? modelsById.get(assignment.ampModelId) : undefined;
               const isCvr = model?.brand === "CVR";
+              const linkStatus = AMP_LINK_STATUS_META[ampLinkStatus(assignment, devices)];
 
               return (
                 <div key={assignment.id} className="group flex flex-col items-center gap-1.5">
@@ -193,7 +212,7 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                       </Badge>
                     )}
                     <ActionIcon
-                      className="absolute -top-1.5 -left-1.5 opacity-0 transition-opacity group-hover:opacity-100"
+                      className={`absolute -top-1.5 -left-1.5 opacity-0 transition-opacity group-hover:opacity-100 ${CARD_CONTROL_CLASS}`}
                       size="sm"
                       radius="sm"
                       color="gray"
@@ -223,6 +242,28 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
                     >
                       <X size={12} />
                     </ActionIcon>
+                    <ActionIcon
+                      className={`absolute -bottom-1.5 -left-1.5 opacity-0 transition-opacity group-hover:opacity-100 ${CARD_CONTROL_CLASS}`}
+                      size="sm"
+                      radius="sm"
+                      color="gray"
+                      variant="filled"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLinkTargetId(assignment.id);
+                      }}
+                      aria-label="Link amp"
+                    >
+                      <Link size={12} />
+                    </ActionIcon>
+                    <Tooltip label={linkStatus.label} withArrow openDelay={300}>
+                      <span
+                        role="img"
+                        aria-label={linkStatus.label}
+                        className="absolute -right-1 -bottom-1 size-3 rounded-full border-2 border-solid border-[var(--mantine-color-body)]"
+                        style={{ backgroundColor: `var(--mantine-color-${linkStatus.color}-filled)` }}
+                      />
+                    </Tooltip>
                   </Box>
                   <div className="flex flex-col items-center gap-px">
                     <Text size="xs" ta="center" lineClamp={2} className="max-w-[90px]">
@@ -261,6 +302,17 @@ export function WorkspaceView({ project, onProjectUpdate, ampModels, onOpenDevic
         projectId={project.id}
         ampModels={ampModels}
         onProjectUpdate={onProjectUpdate}
+      />
+
+      <AmpLinkModal
+        project={project}
+        assignment={linkTarget}
+        displayName={linkTarget ? nameFor(linkTarget) : ""}
+        modelName={linkTarget ? modelNameFor(linkTarget) : null}
+        devices={devices}
+        devicesReady={devicesReady}
+        onProjectUpdate={onProjectUpdate}
+        onClose={() => setLinkTargetId(null)}
       />
 
       <Modal opened={editTarget !== null} onClose={() => setEditTarget(null)} title="Edit Amp" centered size="sm">

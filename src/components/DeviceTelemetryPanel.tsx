@@ -98,7 +98,15 @@ function ChannelConfigBlock({ channel }: { channel: ChannelConfig }) {
       <Group gap="lg" wrap="wrap" mb="sm">
         <InfoField label="input name" value={channel.inputName ?? `In${channel.channelIndex + 1}`} />
         <InfoField label="output name" value={channel.outputName ?? `Out${label}`} />
-        <InfoField label="gain in" value={`${channel.gainIn}dB`} />
+        <InfoField label="load" value={fmtNum(channel.loadOhms, "Ω")} />
+        <InfoField
+          label="backup"
+          value={
+            channel.backupPriority.enabled
+              ? `${channel.backupPriority.first}/${channel.backupPriority.second} @ ${channel.backupPriority.thresholdDb}dB`
+              : "off"
+          }
+        />
         <InfoField label="delay in" value={fmtNum(channel.delayInMs, "ms")} />
         <InfoField label="input muted" value={channel.inputMuted ? "yes" : "no"} />
         <InfoField label="output trim" value={fmtNum(channel.outputTrimDb, "dB")} />
@@ -217,9 +225,10 @@ function ChannelConfigSection({ snapshot }: { snapshot: ChannelConfigSnapshot })
           value={snapshot.rotaryLocked === null ? "— (unknown)" : snapshot.rotaryLocked ? "yes" : "no"}
         />
         <InfoField
-          label="backup priority"
-          value={snapshot.backupPriority === null ? "— (unknown source config)" : JSON.stringify(snapshot.backupPriority)}
+          label="standby"
+          value={snapshot.standby === null ? "— (unknown)" : snapshot.standby ? "yes" : "no"}
         />
+        <InfoField label="preset" value={snapshot.presetName ?? "—"} />
       </Group>
       <Stack gap="xl">
         {snapshot.channels.map((ch) => (

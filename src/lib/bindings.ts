@@ -38,11 +38,11 @@ export const commands = {
 	projectsSetAmpModel: (projectId: string, assignmentId: string, ampModelId: string | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_amp_model", { projectId, assignmentId, ampModelId })),
 	projectsSetChannelOhms: (projectId: string, assignmentId: string, channelIndex: number, ohms: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_ohms", { projectId, assignmentId, channelIndex, ohms })),
 	/**
-	 *  Sets (or clears) which physical source feeds a channel's input — Routing
-	 *  tab. `kind: None` clears the source entirely (`index` is ignored). A
-	 *  `kind` with no `index` defaults to physical input 0 of that kind.
+	 *  Sets which physical source feeds a channel's input — Routing tab. There is
+	 *  no "no source": a physical input always has one. A `kind` with no `index`
+	 *  defaults to physical input 0 of that kind.
 	 */
-	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, kind: "analog" | "dante" | "aes3" | "backup" | null, index: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, kind, index })),
+	projectsSetChannelSource: (projectId: string, assignmentId: string, channelIndex: number, kind: SourceKind, index: number | null) => typedError<Project, AppError>(__TAURI_INVOKE("projects_set_channel_source", { projectId, assignmentId, channelIndex, kind, index })),
 	/**
 	 *  Partial update of one Matrix-tab crosspoint — only touches the fields the
 	 *  caller passes (`Some`), matching the other partial-update commands'
@@ -167,7 +167,7 @@ export const commands = {
 	 *  Fetches the full preset slot-name list (FC=59 mode=0) and the currently
 	 *  active preset's name (mode=4) as one command — deliberately not two
 	 *  independently-callable commands, since both share the same FC=59 request
-	 *  registry key and must not overlap (see `send_preset_request`'s doc). The
+	 *  registry key and must not overlap (see `send_request_with_retry`'s doc). The
 	 *  mode=4 request is only sent after the mode=0 oneshot has resolved. Stores
 	 *  the result and emits `live_presets:updated`, same pattern as
 	 *  `live_control_refresh_now`/`parse_and_store_sync_data`.
@@ -207,6 +207,21 @@ export const commands = {
 	 *  `live_bridge:updated` event.
 	 */
 	liveControlGetBridge: () => typedError<DeviceBridge[], AppError>(__TAURI_INVOKE("live_control_get_bridge")),
+	/**
+	 *  Reads every bridge pair now and waits for the answers, instead of waiting
+	 *  for the driver's own bridge tick to come round to them — the FC=50
+	 *  counterpart to `live_control_fetch_presets`. Used when an amp's editor
+	 *  opens: a project amp's fingerprint cannot be completed until every pair
+	 *  has been reported (see `data/fingerprint.rs`), so the editor would
+	 *  otherwise sit locked until the tick catches up.
+	 * 
+	 *  The pairs go out one after another — `RequestRegistry` keys pending
+	 *  requests by `(ip, function_code)`, so two FC=50 requests cannot be in
+	 *  flight at once. Each answer is stored through the same `LiveEventSink`
+	 *  the driver would have used, so `live_bridge:updated` fires exactly as it
+	 *  does for a polled reply.
+	 */
+	liveControlFetchBridge: (deviceId: string) => typedError<DeviceBridge, AppError>(__TAURI_INVOKE("live_control_fetch_bridge", { deviceId })),
 	/**
 	 *  FC=12 ROUTING. `gain_db`/`active` are both optional; whichever is omitted
 	 *  is filled from the crosspoint's current state, since the wire packet has
@@ -379,6 +394,40 @@ export const commands = {
 	 *  Devices never polled are skipped rather than failing the whole call.
 	 */
 	fingerprintLiveDevices: () => typedError<AmpFingerprint[], AppError>(__TAURI_INVOKE("fingerprint_live_devices")),
+	/**
+	 *  Read-only: can `device_id` be linked to this project amp? See
+	 *  `data/amp_link.rs` for the checks.
+	 */
+	projectsValidateAmpLink: (projectId: string, assignmentId: string, deviceId: string) => typedError<AmpLinkValidation, AppError>(__TAURI_INVOKE("projects_validate_amp_link", { projectId, assignmentId, deviceId })),
+	/**
+	 *  Links a live device to a project amp by writing its MAC. Re-validates
+	 *  under the project lock and refuses on any failing check — the frontend's
+	 *  earlier validation is never trusted. Config is not touched; matching
+	 *  offline and online settings happens in the editor.
+	 */
+	projectsLinkAmp: (projectId: string, assignmentId: string, deviceId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_link_amp", { projectId, assignmentId, deviceId })),
+	/**  Clears a project amp's linked MAC. Planned config is left untouched. */
+	projectsUnlinkAmp: (projectId: string, assignmentId: string) => typedError<Project, AppError>(__TAURI_INVOKE("projects_unlink_amp", { projectId, assignmentId })),
+	/**
+	 *  Read-only: whether this project amp is editable right now, with both
+	 *  fingerprints and the field-by-field comparison when it's locked. See
+	 *  `data/edit_lock.rs`.
+	 */
+	projectsAmpEditLock: (projectId: string, assignmentId: string) => typedError<AmpEditLock, AppError>(__TAURI_INVOKE("projects_amp_edit_lock", { projectId, assignmentId })),
+	/**
+	 *  Copies the linked network amp's settings into this project amp (offline ←
+	 *  online). All or nothing: the mirrored candidate is re-fingerprinted and
+	 *  only saved when its amp hash equals the online amp's; otherwise nothing is
+	 *  written and the still-differing rows come back. See `data/amp_merge.rs`
+	 *  for what is and isn't copied.
+	 */
+	projectsMergeAmpFromLive: (projectId: string, assignmentId: string) => typedError<AmpMergeResult, AppError>(__TAURI_INVOKE("projects_merge_amp_from_live", { projectId, assignmentId })),
+	/**
+	 *  FC=17 ROTARY_LOCK — locks/unlocks the amp's front-panel knobs. Does not
+	 *  affect what this app may edit. No explicit refetch: the new state comes
+	 *  back through the next FC=27 poll (`rotary_locked`).
+	 */
+	liveControlSetRotaryLock: (deviceId: string, locked: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_rotary_lock", { deviceId, locked })),
 };
 
 /* Types */
@@ -403,6 +452,11 @@ export type AmpAssignment = {
 	 */
 	firmwareVersion?: string | null,
 	channels: AmpChannel[],
+	/**
+	 *  The amp's user-set name (FC=60 `CUSTOMER_NAME_MODIFY`, read back via FC=0
+	 *  BASIC_INFO). Not yet editable here.
+	 */
+	deviceName?: string | null,
 };
 
 /**
@@ -448,17 +502,19 @@ export type AmpCapability_Serialize = {
 };
 
 /**
- *  Per-channel config on an amp assignment. `ohms` is the channel's
- *  independently authored load impedance, used by the Limiter.
+ *  Per-channel config on an amp assignment. `ohms` is the channel's load
+ *  impedance, used by the Limiter; the amp reports its own as `load_data`.
  */
 export type AmpChannel = {
 	channelIndex: number,
 	ohms: number | null,
 	/**
 	 *  Which physical source feeds this channel's input — Routing tab.
-	 *  `None` until the user picks one.
+	 *  Always set: a physical input always has a source. New channels
+	 *  default to Analog N (1:1); older files are backfilled on load (see
+	 *  `CURRENT_PROJECT_SCHEMA_VERSION`).
 	 */
-	source?: ChannelSource | null,
+	source: ChannelSource,
 	/**
 	 *  One crosspoint per possible matrix source (0..matrix_input_count) —
 	 *  Matrix tab. Grown/shrunk alongside `channels` whenever the assigned
@@ -531,6 +587,12 @@ export type AmpChannel = {
 	 *  offers), though CVR currently offers all three unconditionally.
 	 */
 	powerMode?: PowerMode,
+	/**  FIR filter bypass. Read back, not yet editable here. */
+	firBypassed?: boolean,
+	/**  Per-source trim/delay. Read back, not yet editable here. */
+	sourceTrims?: SourceTrims,
+	/**  Backup source switching. Read back, not yet editable here. */
+	backupPriority?: BackupPriority,
 };
 
 /**
@@ -582,10 +644,44 @@ export type AmpDspTopology_Serialize = {
 	ratedRmsVoltage: number | null,
 };
 
+export type AmpEditLock = {
+	state: AmpEditLockState,
+	locked: boolean,
+	/**  The linked network amp, when it is currently discovered. */
+	deviceId: string | null,
+	/**
+	 *  The amp's front-panel knob lock from its latest FC=27 snapshot.
+	 *  Informational only — it never affects `locked`.
+	 */
+	rotaryLocked: boolean | null,
+	project: AmpFingerprint | null,
+	live: AmpFingerprint | null,
+	rows: FingerprintRow[],
+	/**  Why a fingerprint couldn't be computed, prefixed with its side. */
+	unreadable: string[],
+};
+
+export type AmpEditLockState = 
+/**  No MAC on the assignment — editable. */
+"unlinked" | 
+/**  Linked, but the network amp isn't discovered or is offline — editable. */
+"offline" | 
+/**  Online, but no FC=27 settings snapshot has arrived yet — locked. */
+"checking" | 
+/**  Amp hashes are equal — editable. */
+"matches" | 
+/**  Amp hashes differ — locked. */
+"mismatch" | 
+/**  A fingerprint couldn't be fully computed — locked. */
+"unreadable";
+
 export type AmpFingerprint = {
 	fingerprintVersion: number,
 	origin: FingerprintOrigin,
 	identity: AmpIdentity,
+	settings: AmpSettingsCanonical,
+	/**  Shown, never hashed. Always empty for a project amp. */
+	status: AmpStatus,
 	/**  `None` whenever `missing` is non-empty. */
 	ampHash: string | null,
 	channels: ChannelFingerprint[],
@@ -606,6 +702,43 @@ export type AmpIdentity = {
 	channelCount: number,
 	/**  Protocol firmware bucket, e.g. "1.1.8"/"1.1.9" for CVR. */
 	firmwareFamily: string | null,
+};
+
+export type AmpLinkCheck = {
+	kind: AmpLinkCheckKind,
+	passed: boolean,
+	/**  User-facing explanation, shown next to the check in the Link Amp modal. */
+	detail: string,
+};
+
+export type AmpLinkCheckKind = "deviceOnline" | "modelDetected" | "modelMatches" | "firmwareMatches" | "notLinkedElsewhere";
+
+/**
+ *  Whether a live device may be linked to a planned project amp. Every check
+ *  is always present (so the UI can list them); `compatible` only when all
+ *  pass. All checks are hard blocks — there is no "link anyway".
+ */
+export type AmpLinkValidation = {
+	compatible: boolean,
+	detectedModelId: string | null,
+	checks: AmpLinkCheck[],
+};
+
+/**
+ *  Outcome of `projects_merge_amp_from_live`. Flat rather than a tagged enum,
+ *  like `FingerprintOrigin`: `merged` says which fields are set.
+ */
+export type AmpMergeResult = {
+	merged: boolean,
+	/**  The saved project; `Some` only when `merged`. */
+	project: Project | null,
+	/**  The amp hash both sides now share; `Some` only when `merged`. */
+	ampHash: string | null,
+	/**
+	 *  Candidate-vs-online rows when the hashes still differed and nothing was
+	 *  saved; empty when `merged`.
+	 */
+	remaining: FingerprintRow[],
 };
 
 /**
@@ -703,16 +836,47 @@ export type AmpParamRanges = {
  */
 export type AmpProtocol = "cvrUdp";
 
+/**  Amp-wide settings beyond identity. */
+export type AmpSettingsCanonical = {
+	/**
+	 *  The amp's user-set name (written with FC=60, read back via FC=0
+	 *  BASIC_INFO). Trimmed; empty when unset.
+	 */
+	deviceName: string,
+};
+
+/**
+ *  Operational state read from the amp — shown next to the comparison, never
+ *  hashed. Always empty for a project amp.
+ */
+export type AmpStatus = {
+	standby: boolean | null,
+	presetName: string | null,
+	rotaryLocked: boolean | null,
+};
+
 export type AppError = {
 	message: string,
+};
+
+/**
+ *  Backup source switching for one channel (vendor `StruPriority`). `first`/
+ *  `second` are the raw source codes as stored on the amp — which kind a code
+ *  names depends on the model's source set, so they are not mapped here.
+ */
+export type BackupPriority = {
+	enabled: boolean,
+	first: number,
+	second: number,
+	thresholdDb: number,
 };
 
 /**  The per-channel fields `ampHash` covers beyond the speaker hash. */
 export type ChannelAmpCanonical = {
 	inputEq: EqCanonical,
 	/**
-	 *  `None` = no source picked (a project channel). An unreadable live
-	 *  source is reported in `missing` instead.
+	 *  `None` only for a live channel whose source byte is unreadable (also
+	 *  listed in `missing`); a project channel always has a source.
 	 */
 	source: ChannelSource | null,
 	/**  Only the model's matrix inputs (`0..matrix_input_count`). */
@@ -723,11 +887,20 @@ export type ChannelAmpCanonical = {
 	noiseGateEnabled: boolean,
 	/**  Trimmed; empty when unnamed or still the default "In{n}" label. */
 	inputName: string,
+	inputMuted: boolean,
+	outputMuted: boolean,
+	/**
+	 *  Trimmed, `_XXXX` hash suffix removed; empty when unnamed or still the
+	 *  default "Out{letter}" label.
+	 */
+	outputNameBase: string,
+	sourceTrims: SourceTrims,
+	/**  Shown, never hashed — see the module doc comment. */
+	backupPriority: BackupPriority,
 };
 
 export type ChannelConfig = {
 	channelIndex: number,
-	gainIn: number,
 	delayInMs: number | null,
 	/**
 	 *  Sourced from the trailer's `muteIn` block, NOT any channel-body byte
@@ -764,20 +937,25 @@ export type ChannelConfig = {
 	danteDelayMs: number | null,
 	aes3TrimDb: number | null,
 	aes3DelayMs: number | null,
+	/**
+	 *  Vendor `load_data` — the load impedance the amp is set to (Ω; unit to
+	 *  verify on hardware).
+	 */
+	loadOhms: number | null,
+	backupPriority: BackupPriority,
 };
 
 export type ChannelConfigSnapshot = {
 	channels: ChannelConfig[],
+	/**  Header `Standby`; `None` for a byte other than 0/1. */
+	standby: boolean | null,
 	/**
-	 *  `None` when the payload shape doesn't match the variant this parser
-	 *  implements — a known gap, not a guess (see `channel_config_v118.rs`).
-	 */
-	backupPriority: number[][] | null,
-	/**
-	 *  `None` for payload shapes this parser doesn't special-case (e.g. the
-	 *  reference's 2-channel `DP_1` layout) — known gap, not a guess.
+	 *  Header `Rotary_lock` (front-panel knob lock); `None` for a byte other
+	 *  than 0/1.
 	 */
 	rotaryLocked: boolean | null,
+	/**  Label of the last recalled preset (trailer `Scene_mode_name`). */
+	presetName: string | null,
 	receivedAt: number | null,
 };
 
@@ -1077,6 +1255,32 @@ export type FingerprintOrigin = {
 	label: string | null,
 };
 
+/**
+ *  One compared setting of two fingerprints. Values are formatted at exactly
+ *  the precision the hash encodes, and a value the hash skips (bypassed band,
+ *  disabled limiter, inactive crosspoint, unused gain/Q) is shown as
+ *  "bypassed"/"off" — so two rows are equal exactly when they hash equal, and
+ *  the red highlights can never disagree with the lock.
+ */
+export type FingerprintRow = {
+	/**  "Amp", "In 1", "Out A", … */
+	group: string,
+	label: string,
+	/**
+	 *  `None` when this side has no such setting (e.g. a channel the other
+	 *  side lacks).
+	 */
+	project: string | null,
+	live: string | null,
+	differs: boolean,
+	/**
+	 *  `false` for status rows (standby, preset name, knob lock) and for
+	 *  backup priority (unverified — see the module doc comment): shown for
+	 *  context, never compared.
+	 */
+	hashed: boolean,
+};
+
 export type FingerprintSource = "offline" | "online";
 
 /**
@@ -1153,6 +1357,8 @@ export type PeakLimiter = {
 	thresholdVp: number | null,
 	holdMs: number | null,
 	releaseMs: number | null,
+	/**  Vendor `peak_Limiter_max` (V). Read back, not yet editable here. */
+	maxVp?: number | null,
 };
 
 export type PeakLimiterCanonical = {
@@ -1160,6 +1366,7 @@ export type PeakLimiterCanonical = {
 	thresholdVp: number | null,
 	holdMs: number | null,
 	releaseMs: number | null,
+	maxVp: number | null,
 };
 
 /**  Output power/impedance mode — ported from the old app's `POWER_MODE_NAMES`. */
@@ -1186,6 +1393,10 @@ export type RmsLimiter = {
 	thresholdVrms: number | null,
 	attackMs: number | null,
 	releaseMultiplier: number | null,
+	/**  Vendor `RMS_Limiter_Auto`. Read back, not yet editable here. */
+	auto?: boolean,
+	/**  Vendor `RMS_Limiter_max` (V). Read back, not yet editable here. */
+	maxVrms?: number | null,
 };
 
 export type RmsLimiterCanonical = {
@@ -1193,6 +1404,8 @@ export type RmsLimiterCanonical = {
 	thresholdVrms: number | null,
 	attackMs: number | null,
 	releaseMultiplier: number | null,
+	auto: boolean,
+	maxVrms: number | null,
 };
 
 /**
@@ -1224,6 +1437,22 @@ export type SourceChannelCount = {
  */
 export type SourceKind = "analog" | "dante" | "aes3" | "backup";
 
+/**  One trim + delay pair for a single input source kind. */
+export type SourceTrim = {
+	trimDb: number | null,
+	delayMs: number | null,
+};
+
+/**
+ *  Per-source gain matching (vendor `Ana/Dante/AES_gain_matching`) — each
+ *  source kind feeding a channel has its own trim and delay.
+ */
+export type SourceTrims = {
+	analog: SourceTrim,
+	dante: SourceTrim,
+	aes3: SourceTrim,
+};
+
 /**  The values `speakerHash` is computed from. */
 export type SpeakerCanonical = {
 	outputEq: EqCanonical,
@@ -1233,6 +1462,8 @@ export type SpeakerCanonical = {
 	phaseInverted: boolean,
 	/**  `None` only for a live channel whose power-mode byte is unmapped. */
 	powerMode: PowerMode | null,
+	loadOhms: number | null,
+	firBypassed: boolean,
 };
 
 export type Telemetry = {
