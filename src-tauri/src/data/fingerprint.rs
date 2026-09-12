@@ -775,7 +775,7 @@ fn planned_firmware_family(model: &AmpModelCatalogEntry, version: Option<&str>) 
     }
 }
 
-fn output_letter(channel_index: u32) -> char {
+pub(crate) fn output_letter(channel_index: u32) -> char {
     char::from(b'A' + (channel_index % 26) as u8)
 }
 

@@ -2483,6 +2483,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         projectId={source?.kind === "project" ? source.project.id : undefined}
         assignmentId={source?.kind === "project" ? source.assignment.id : undefined}
         onProjectUpdate={source?.kind === "project" ? source.onProjectUpdate : undefined}
+        following={Boolean(live)}
       />
     <Tabs defaultValue="input" orientation="vertical" className="min-h-0 flex-1">
       {/* `min-w-0` on the panel is what lets the tab body shrink below its

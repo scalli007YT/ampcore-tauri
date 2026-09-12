@@ -82,6 +82,19 @@ pub fn build_set_matrix_crosspoint(channel_index: u8, source_index: u8, gain_db:
 ///
 /// This still matches `CvrFirmwareCapability.noise_gate_threshold`, which is
 /// what already decides whether the UI offers a threshold control at all.
+///
+/// **Unresolved: the vendor source disagrees with the reference here.** It
+/// never sends a 2-byte FC=69. It sends the enable flag on FC=69 (1 byte,
+/// `Variable\Channels_out.cs:772`) and the threshold on **FC=87**
+/// `Noise_Gate` (1 signed byte, `Channels_out.cs:799-805`) as two separate
+/// packets — and only 1.1.9 stores a threshold at all (`SynData_Flow_n.cs:67`;
+/// the vendor fabricates `-70` when upconverting a 1.1.8 payload). So this
+/// body is likely wrong, inherited from a reference bug rather than a capture.
+///
+/// Left as-is deliberately: there is no 1.1.9 hardware to ground-truth
+/// against, the threshold has no readback in this app on either firmware, and
+/// it is not hashed — so nothing depends on it being right yet. Port FC=87 and
+/// drop the second body byte once such a unit exists.
 pub fn build_set_noise_gate(channel_index: u8, enabled: bool, threshold_dbu: i8) -> Vec<u8> {
     use super::protocol::build_control_packet;
     let body = [if enabled { 0x00 } else { 0x01 }, threshold_dbu as u8];
@@ -122,4 +135,29 @@ pub fn build_set_analog_input(channel_index: u8, analog_input_index: u8) -> Vec<
 
 pub fn build_set_output_bridge(pair_index: u8, bridged: bool) -> Vec<u8> {
     super::write_v118::build_set_output_bridge(pair_index, bridged)
+}
+
+pub fn build_set_eq_chain(
+    channel_index: u8,
+    in_out_flag: u8,
+    bands: &[super::write_v118::EqChainBand; super::write_v118::EQ_CHAIN_BANDS],
+    chain_bypass: u8,
+) -> Vec<u8> {
+    super::write_v118::build_set_eq_chain(channel_index, in_out_flag, bands, chain_bypass)
+}
+
+pub fn build_set_fir_bypass(channel_index: u8, bypassed: bool) -> Vec<u8> {
+    super::write_v118::build_set_fir_bypass(channel_index, bypassed)
+}
+
+pub fn build_set_rms_limiter_auto(channel_index: u8, auto: bool) -> Vec<u8> {
+    super::write_v118::build_set_rms_limiter_auto(channel_index, auto)
+}
+
+pub fn build_set_device_name(name: &str) -> Vec<u8> {
+    super::write_v118::build_set_device_name(name)
+}
+
+pub fn build_set_source_trim(channel_index: u8, segment: u8, trim_db: f32, delay_ms: f32) -> Vec<u8> {
+    super::write_v118::build_set_source_trim(channel_index, segment, trim_db, delay_ms)
 }

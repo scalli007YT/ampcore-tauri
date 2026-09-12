@@ -24,7 +24,7 @@ use crate::data::project::{
     BackupPriority, ChannelEq, ChannelSource, CrossoverSlot, EqBand, Limiter, MatrixCrosspoint, PeakLimiter, RmsLimiter,
 };
 
-use super::channel_config::{ChannelConfig, ChannelConfigSnapshot};
+use super::channel_config::{ChannelConfig, ChannelConfigSnapshot, EqChainWire};
 
 /// 172, NOT the reference implementation's documented 192 — this value is
 /// corrected from direct measurement against real hardware (a 1.1.8
@@ -201,6 +201,7 @@ struct EqBlockResult {
     hp: CrossoverSlot,
     bands: Vec<EqBand>,
     lp: CrossoverSlot,
+    wire: EqChainWire,
 }
 
 /// 10 bands x 14-byte stride: type(u8,1) + gain(f32LE,4) + freq(f32LE,4) +
@@ -209,11 +210,18 @@ struct EqBlockResult {
 /// = `255 - raw_type`) OR the trailing byte — either condition means
 /// bypassed. Band 0 = HP crossover slot, band 9 = LP crossover slot (their
 /// own type vocabulary); bands 1..=8 = parametric EQ bands.
+///
+/// This is byte-for-byte the same body FC=52 writes (see
+/// `write_v118::build_set_eq_chain`), which is what makes that write
+/// auditable: the layout below has been correct against real hardware since
+/// long before anything wrote it. The fields this app's model has no home for
+/// come back in `EqChainWire` so that write can echo them.
 fn parse_eq_block(body: &[u8], block_offset: usize) -> EqBlockResult {
     const STRIDE: usize = 14;
     let mut hp = None;
     let mut lp = None;
     let mut bands = Vec::with_capacity(8);
+    let mut wire = EqChainWire::default();
 
     for band_index in 0..10usize {
         let off = block_offset + band_index * STRIDE;
@@ -227,8 +235,13 @@ fn parse_eq_block(body: &[u8], block_offset: usize) -> EqBlockResult {
         let active = !bypass;
 
         if band_index == 0 {
+            // A crossover slot's gain/Q are not part of `CrossoverSlot` — the
+            // slope type implies Q, and gain is meaningless — but they still
+            // occupy their bytes, so they are kept for the echo.
+            (wire.hp_gain_db, wire.hp_q) = (gain, q);
             hp = Some(CrossoverSlot { filter_type: crossover_filter_type(real_type), freq_hz: freq as f64, active });
         } else if band_index == 9 {
+            (wire.lp_gain_db, wire.lp_q) = (gain, q);
             lp = Some(CrossoverSlot { filter_type: crossover_filter_type(real_type), freq_hz: freq as f64, active });
         } else {
             bands.push(EqBand {
@@ -242,9 +255,14 @@ fn parse_eq_block(body: &[u8], block_offset: usize) -> EqBlockResult {
     }
 
     // The vendor struct has one more byte after the 10 filters
-    // (`f_CH_bypass`), but CVR amps have no whole-EQ bypass — bands are only
-    // active or bypassed individually — so it is deliberately not read.
-    EqBlockResult { hp: hp.unwrap(), bands, lp: lp.unwrap() }
+    // (`f_CH_bypass`, 0 = chain active). CVR amps have no whole-EQ bypass —
+    // bands are only active or bypassed individually — so it is still not
+    // modelled, but FC=52 has to send *something* in that byte, and echoing
+    // what the amp reports is the only value that can't change its behaviour
+    // behind the user's back.
+    wire.chain_bypass = u8_at(body, block_offset + 10 * STRIDE);
+
+    EqBlockResult { hp: hp.unwrap(), bands, lp: lp.unwrap(), wire }
 }
 
 fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> ChannelConfig {
@@ -285,6 +303,8 @@ fn parse_channel(body: &[u8], channel_index: u32, trailer_base: usize) -> Channe
         matrix_crosspoints,
         input_eq: ChannelEq { hp: input_eq_raw.hp, bands: input_eq_raw.bands, lp: input_eq_raw.lp },
         output_eq: ChannelEq { hp: output_eq_raw.hp, bands: output_eq_raw.bands, lp: output_eq_raw.lp },
+        input_eq_wire: input_eq_raw.wire,
+        output_eq_wire: output_eq_raw.wire,
         output_trim_db: f32_le(body, at(80)),
         output_volume_db: f32_le(body, at(405)),
         output_muted: u8_at(body, at(84)) == 0, // inverted: 0=muted

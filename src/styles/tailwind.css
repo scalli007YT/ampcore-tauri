@@ -102,6 +102,18 @@
   }
 }
 
+/* The push direction (online ← offline) runs the other way: offline (left) →
+   online (right). Only the drift needs its own keyframes — the shimmer
+   reuses `link-shimmer`, which already travels left to right. */
+@keyframes push-flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 18px 0;
+  }
+}
+
 html,
 body,
 #root {

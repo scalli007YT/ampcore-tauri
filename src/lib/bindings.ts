@@ -423,6 +423,25 @@ export const commands = {
 	 */
 	projectsMergeAmpFromLive: (projectId: string, assignmentId: string) => typedError<AmpMergeResult, AppError>(__TAURI_INVOKE("projects_merge_amp_from_live", { projectId, assignmentId })),
 	/**
+	 *  Read-only: what a push would write, stage by stage. Lets the modal render
+	 *  the step list (and the adopted-fields note) before the user commits to it.
+	 */
+	projectsPlanAmpPush: (projectId: string, assignmentId: string) => typedError<AmpPushPlan, AppError>(__TAURI_INVOKE("projects_plan_amp_push", { projectId, assignmentId })),
+	/**
+	 *  Makes the linked network amp adopt this project amp's settings (online ←
+	 *  offline).
+	 * 
+	 *  Not a transaction: the plan's stages are written in order and the first
+	 *  failure stops the push, leaving the amp partly configured. That is reported
+	 *  rather than papered over — the stage that failed comes back in the result,
+	 *  and pushing again re-plans against the amp's new state, so a retry picks up
+	 *  where this left off instead of redoing the work that landed.
+	 * 
+	 *  Three hashed fields travel the other way instead of being written (load and
+	 *  the two rated max voltages) — see `data/amp_push.rs`.
+	 */
+	projectsPushAmpToLive: (projectId: string, assignmentId: string) => typedError<AmpPushResult, AppError>(__TAURI_INVOKE("projects_push_amp_to_live", { projectId, assignmentId })),
+	/**
 	 *  FC=17 ROTARY_LOCK — locks/unlocks the amp's front-panel knobs. Does not
 	 *  affect what this app may edit. No explicit refetch: the new state comes
 	 *  back through the next FC=27 poll (`rotary_locked`).
@@ -867,6 +886,52 @@ export type AmpParamRanges = {
  *  a physical unit, detected at discovery time, not a fixed catalog attribute).
  */
 export type AmpProtocol = "cvrUdp";
+
+/**  The plan the frontend renders and the progress events index into. */
+export type AmpPushPlan = {
+	stages: PushStage[],
+	packetCount: number,
+	/**
+	 *  Device-determined fields the *project* will take from the amp instead
+	 *  of pushing — see the module doc comment. Empty when they already agree.
+	 */
+	adopted: FingerprintRow[],
+};
+
+/**
+ *  Where a push got to. `pushed` is the only field that says the amp and the
+ *  project now agree — everything else is there to explain why they don't.
+ */
+export type AmpPushResult = {
+	/**
+	 *  True only when every stage was written *and* the two fingerprints
+	 *  matched afterwards.
+	 */
+	pushed: boolean,
+	/**
+	 *  The saved project. Always `Some` on a result: the three device facts
+	 *  are re-read and saved even when no write was needed, so the caller can
+	 *  use it unconditionally. `Option` only so the shape matches
+	 *  `AmpMergeResult`, whose pull can legitimately save nothing.
+	 */
+	project: Project | null,
+	/**  The amp hash both sides now share; `Some` only when `pushed`. */
+	ampHash: string | null,
+	stagesCompleted: number,
+	stagesTotal: number,
+	packetsSent: number,
+	/**
+	 *  The stage that failed, by `PushStage.id`; `None` when every write
+	 *  landed.
+	 */
+	failedStageId: string | null,
+	/**  Human-readable "Out A · Speaker" for the failed stage. */
+	failedStageLabel: string | null,
+	/**  Why it failed — an ACK timeout, a full queue, a stopped driver. */
+	error: string | null,
+	/**  Settings still differing after the push. Empty when `pushed`. */
+	remaining: FingerprintRow[],
+};
 
 /**  Amp-wide settings beyond identity. */
 export type AmpSettingsCanonical = {
@@ -1446,6 +1511,19 @@ export type Project = {
 	createdAt: number | null,
 	updatedAt: number | null,
 	ampAssignments: AmpAssignment[],
+};
+
+/**
+ *  A stage as the frontend sees it: an identity, where it belongs, and how
+ *  much work it is. The actions themselves never cross the bridge.
+ */
+export type PushStage = {
+	/**  Stable across re-plans, so a progress event can address a rendered row. */
+	id: string,
+	/**  "Amp", "In 1", "Out A" — the same grouping `FingerprintRow` uses. */
+	group: string,
+	label: string,
+	packets: number,
 };
 
 /**  RMS-window limiter stage — ranged by `AmpParamRanges.rms_limiter_*`. */

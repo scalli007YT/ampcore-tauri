@@ -16,7 +16,8 @@ import {
 import { ChevronDown } from "lucide-react";
 import type { AmpEditLock, AmpEditLockState, AmpMergeResult, FingerprintRow, Project } from "../lib/bindings";
 import { useIsCompact } from "../lib/breakpoints";
-import { AmpMergePanel } from "./AmpMergePanel";
+import { AmpMergePanel, type MergeDirection } from "./AmpMergePanel";
+import { AmpPushSteps } from "./AmpPushSteps";
 
 const STATE_BADGE: Record<AmpEditLockState, { color: string; label: string }> = {
   unlinked: { color: "gray", label: "Unlinked" },
@@ -69,6 +70,7 @@ export function FingerprintMismatchModal({
   focusDifferences,
   projectId,
   assignmentId,
+  following,
   onProjectUpdate,
 }: {
   opened: boolean;
@@ -81,6 +83,11 @@ export function FingerprintMismatchModal({
   focusDifferences?: boolean;
   projectId?: string;
   assignmentId?: string;
+  /** Set while this project amp is following its linked online amp. Pushing is
+   * withdrawn then: the project is a mirror rather than a plan, edits already
+   * go straight to the amp, and `useLinkedSync` would pull any difference back
+   * out from under a push. */
+  following?: boolean;
   onProjectUpdate?: (project: Project) => void;
 }) {
   const compact = useIsCompact();
@@ -93,11 +100,25 @@ export function FingerprintMismatchModal({
   // Rows from a match attempt whose hashes still differed — shown instead of
   // the lock's own rows until the online amp changes.
   const [remaining, setRemaining] = useState<FingerprintRow[] | null>(null);
+  // Which way the panel is pointing, owned here so the write plan below can
+  // appear alongside it.
+  const [direction, setDirection] = useState<MergeDirection>("pull");
+  const [push, setPush] = useState({ running: false, attempt: 0 });
+
+  const pushBlocked = following
+    ? "This amp is following the online one, so its settings are already the amp's. Stop following to push a plan instead."
+    : null;
 
   const liveHash = lock?.live?.ampHash ?? null;
   useEffect(() => {
     setRemaining(null);
   }, [liveHash, assignmentId]);
+
+  // Following can start while the modal is open, which withdraws the
+  // direction the panel is currently pointing.
+  useEffect(() => {
+    if (pushBlocked) setDirection("pull");
+  }, [pushBlocked]);
 
   // Applied on the closed → open edge only: a later toggle by the user must
   // not be undone by a re-render while the modal stays open.
@@ -159,9 +180,22 @@ export function FingerprintMismatchModal({
               lock={lock}
               projectId={projectId}
               assignmentId={assignmentId}
+              direction={direction}
+              onDirectionChange={setDirection}
+              pushBlocked={pushBlocked}
               onProjectUpdate={onProjectUpdate}
               onResult={handleMergeResult}
+              onPushStateChange={(running, attempt) => setPush({ running, attempt })}
             />
+            {direction === "push" && (
+              <AmpPushSteps
+                lock={lock}
+                projectId={projectId}
+                assignmentId={assignmentId}
+                running={push.running}
+                reloadKey={push.attempt}
+              />
+            )}
             <Divider />
           </>
         )}

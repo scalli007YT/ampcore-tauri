@@ -133,9 +133,15 @@ pub fn projects_amp_edit_lock(
     Ok(resolve_edit_lock(&project, assignment, &models, &links, reading.as_ref()))
 }
 
+/// Shared with `amp_push.rs` rather than duplicated: a pull and a push need
+/// exactly the same reading, and a divergence between how the two see one
+/// amp is the kind of difference nobody would think to look for.
 /// Clones what the live store knows about the discovered amp with `mac`, then
 /// releases the live lock. `None` when no discovered amp has that MAC.
-fn read_linked_amp(live: &State<LiveDeviceState>, mac: &str) -> Result<Option<LiveAmpReading>, AppError> {
+pub(crate) fn read_linked_amp(
+    live: &State<'_, LiveDeviceState>,
+    mac: &str,
+) -> Result<Option<LiveAmpReading>, AppError> {
     let mac = normalize_mac(mac);
     let inner = live.0.lock().map_err(|e| e.to_string())?;
     let reading = inner.devices.values().find(|d| normalize_mac(&d.mac) == mac).map(|device| LiveAmpReading {
