@@ -201,6 +201,7 @@ mod tests {
     use super::*;
     use crate::live::cvr::bridge::DeviceBridgeSnapshot;
     use crate::live::cvr::channel_config::ChannelConfigSnapshot;
+    use crate::live::cvr::channel_state::AmpChannelState;
     use crate::live::state::DiscoveredDevice;
 
     const MAC: &str = "6A:20:67:18:B5:8A";
@@ -328,12 +329,14 @@ mod tests {
                 digital_input_channels: 4,
                 output_channels: 4,
                 machine_state: 0,
+                machine_state_decoded: Some(AmpChannelState::Normal),
                 online: true,
                 last_seen_at: 0.0,
             },
             snapshot: Some(ChannelConfigSnapshot {
                 channels: (0..4).map(live_channel).collect(),
                 standby: Some(false),
+                standby_locked: Some(false),
                 rotary_locked: Some(true),
                 preset_name: Some("Lab".to_string()),
                 received_at: 0.0,

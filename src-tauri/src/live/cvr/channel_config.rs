@@ -57,8 +57,17 @@ pub struct ChannelConfig {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfigSnapshot {
     pub channels: Vec<ChannelConfig>,
-    /// Header `Standby`; `None` for a byte other than 0/1.
+    /// Header `Standby` — whether the amp is in standby. True for both the
+    /// plain standby value and the locked-out one (see `standby_locked`);
+    /// `None` for a byte outside the known 0/1/2 set.
     pub standby: Option<bool>,
+    /// Whether standby is locked out on the amp, i.e. it will ignore a
+    /// standby write. Comes from the same header byte as `standby` (the value
+    /// `2`), so it is `Some(false)` whenever `standby` is known and not
+    /// locked, and `None` exactly when `standby` is `None`. The frontend
+    /// disables its standby control on `Some(true)` rather than letting the
+    /// user press something the amp will drop.
+    pub standby_locked: Option<bool>,
     /// Header `Rotary_lock` (front-panel knob lock); `None` for a byte other
     /// than 0/1.
     pub rotary_locked: Option<bool>,

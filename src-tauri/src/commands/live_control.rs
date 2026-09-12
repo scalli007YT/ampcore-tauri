@@ -938,6 +938,28 @@ pub async fn live_control_set_rotary_lock(
     Ok(tally.finish())
 }
 
+/// FC=15 STANDBY — puts the amp into standby or brings it back out. Amp-wide,
+/// not per channel. No explicit refetch: the new state comes back through the
+/// next FC=27 poll (`standby`), same as the front-panel lock.
+///
+/// Deliberately does not check `standby_locked` (FC=27 byte 32 == 2)
+/// before sending: the frontend disables the control in that case, and the
+/// authority on whether the amp will accept it is the amp, not a cached poll.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_standby(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    standby: bool,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet = write::build_set_standby(firmware_family.as_deref(), standby)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn live_control_set_channel_power_mode(

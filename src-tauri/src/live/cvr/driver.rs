@@ -12,6 +12,7 @@ use crate::live::dsp::voltage_to_db;
 use crate::live::state::{DiscoveredDevice, LiveEventSink};
 
 use super::channel_config;
+use super::channel_state;
 use super::protocol::*;
 use super::bridge::{BRIDGE_PAIR_COUNT, FC_BRIDGE};
 use super::request::{
@@ -779,6 +780,8 @@ fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'
         FC_BASIC_INFO => {
             if let Some(info) = parse_basic_info_reply(raw) {
                 let firmware_family = detect_firmware_family(&info.firmware_version).label().map(String::from);
+                let machine_state_decoded =
+                    channel_state::decode(firmware_family.as_deref(), info.machine_state as i32);
                 sink.upsert(DiscoveredDevice {
                     id: format!("{protocol_slug}:{}", info.mac),
                     driver_id: protocol_slug.to_string(),
@@ -793,6 +796,7 @@ fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'
                     digital_input_channels: info.digital_input_channels as u32,
                     output_channels: info.output_channels as u32,
                     machine_state: info.machine_state as u32,
+                    machine_state_decoded,
                     online: true,
                     last_seen_at: now_millis(),
                 });
@@ -823,6 +827,14 @@ fn handle_single(raw: &[u8], ip: String, sink: &LiveEventSink, protocol_slug: &'
                         parsed.output_voltages.iter().map(|&v| voltage_to_db(v, 1.0, rated_v_f32)).collect();
                     parsed.rated_rms_voltage = Some(rated_v);
                 }
+                // Same kind of enrichment for the output state bytes: the
+                // numbering is firmware-specific, and the family is only known
+                // here. (The input bytes are a different, fixed two-value flag
+                // the adapter decodes itself — see `Telemetry::input_clipping`.)
+                let family = device.firmware_family.as_deref();
+                parsed.output_channel_states =
+                    channel_state::decode_all(family, parsed.output_states.iter().map(|&v| v as i32));
+                parsed.machine_state_decoded = channel_state::decode(family, parsed.machine_mode);
                 sink.set_telemetry(device.id.clone(), parsed);
             }
             Some(device.id)

@@ -90,6 +90,16 @@ pub fn build_set_phase_invert(firmware_family: Option<&str>, channel_index: u8, 
     }
 }
 
+/// Routes an amp-level standby set to the adapter for `firmware_family`.
+/// Amp-wide, not per channel — `chx` is 0 and there is no channel parameter.
+pub fn build_set_standby(firmware_family: Option<&str>, standby: bool) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_standby(standby)),
+        Some("1.1.9") => Some(super::write_v119::build_set_standby(standby)),
+        _ => None,
+    }
+}
+
 pub fn build_set_rotary_lock(firmware_family: Option<&str>, locked: bool) -> Option<Vec<u8>> {
     match firmware_family {
         Some("1.1.8") => Some(super::write_v118::build_set_rotary_lock(locked)),

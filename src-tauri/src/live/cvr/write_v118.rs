@@ -10,13 +10,14 @@
 
 use crate::data::capability::PowerMode;
 
-use super::protocol::build_control_packet;
+use super::protocol::{build_control_packet, build_control_packet_with_status};
 
 pub const FC_VOL: u8 = 9;
 pub const FC_MUTE: u8 = 10;
 pub const FC_SOURCE_SELECT: u8 = 11;
 pub const FC_ROUTING: u8 = 12;
 pub const FC_DELAY: u8 = 14;
+pub const FC_STANDBY: u8 = 15;
 pub const FC_ROTARY_LOCK: u8 = 17;
 pub const FC_PHASE: u8 = 18;
 pub const FC_FILTER_TYPE: u8 = 30;
@@ -114,6 +115,25 @@ pub fn build_set_delay_out(channel_index: u8, delay_ms: f32) -> Vec<u8> {
 pub fn build_set_rotary_lock(locked: bool) -> Vec<u8> {
     let body = [u8::from(locked)];
     build_control_packet(FC_ROTARY_LOCK, 0, 0, 0, IN_OUT_FLAG_INPUT, &body)
+}
+
+/// FC=15 STANDBY, `chx=0`, `in_out_flag=0`. Wire body: `0x01`=standby,
+/// `0x00`=powered on.
+///
+/// Note the `status_code` of **0**, which no other write in this app uses.
+/// The vendor source calls the `SendStruct(..., Responsed.Response, ...)`
+/// overload for this one command (`Variable\Basic.cs`), where every other
+/// write goes through the `NOT_Response` (1) path; the reference web app's
+/// `setAmpStandby` records the same thing from a captured frame of the
+/// original software. Sending the usual `1` here is therefore untested and
+/// would be a guess.
+///
+/// Read back through FC=27's `standby` (absolute body byte 32), which is also
+/// where the "standby locked out" state comes from — see
+/// `channel_config_v118.rs`.
+pub fn build_set_standby(standby: bool) -> Vec<u8> {
+    let body = [u8::from(standby)];
+    build_control_packet_with_status(FC_STANDBY, 0, 0, 0, 0, IN_OUT_FLAG_INPUT, &body)
 }
 
 /// FC=18 PHASE, `in_out_flag=1` (output). Wire body: `0x01`=inverted,
@@ -381,4 +401,41 @@ pub fn build_set_analog_input(channel_index: u8, analog_input_index: u8) -> Vec<
 pub fn build_set_output_bridge(pair_index: u8, bridged: bool) -> Vec<u8> {
     let body = [if bridged { 0x00 } else { 0x01 }];
     build_control_packet(FC_BRIDGE, pair_index, 0, 0, IN_OUT_FLAG_INPUT, &body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the FC=15 frame, above all its `status_code` of 0 — the one field
+    /// that makes this command different from every other write here, and the
+    /// one a future "why is standby not using `build_control_packet` like
+    /// everything else?" cleanup would quietly normalize away.
+    ///
+    /// The bytes come from this module's own already-ground-truthed header and
+    /// checksum builders, so this is a regression lock on the encoding, not
+    /// independent proof of what the hardware wants — that part is verified
+    /// against a real amp.
+    #[test]
+    fn standby_frame_uses_status_code_zero() {
+        let packet = build_set_standby(true);
+        assert_eq!(
+            packet,
+            vec![
+                // NetworkData: flag 0xd903 little-endian (so 0x03 first),
+                // machine_mode=0, count=1, frame_len=14, step=1, state=0, pad
+                0x03, 0xd9, 0x00, 0x00, 0x01, 0x0e, 0x00, 0x01, 0x00, 0x00,
+                // StructHeader: 0x55, FC=15, status=0, chx=0, seg=0, link=0, in_out=0
+                0x55, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                // Standby_data = 1
+                0x01,
+                // checksum: hi, lo, sum
+                0x00, 0x0e, 0x73,
+            ]
+        );
+        // Only the body byte differs between standby and powered-on.
+        let on = build_set_standby(false);
+        assert_eq!(on[20], 0x00);
+        assert_eq!(on[12], 0x00, "status_code stays 0 in both directions");
+    }
 }

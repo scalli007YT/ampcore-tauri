@@ -177,6 +177,10 @@ pub struct AmpSettingsCanonical {
 #[serde(rename_all = "camelCase")]
 pub struct AmpStatus {
     pub standby: Option<bool>,
+    /// Whether the amp is refusing standby writes — folded into the `Standby`
+    /// status row's text rather than given a row of its own, since it is
+    /// `false` on every amp that isn't in this unusual state.
+    pub standby_locked: Option<bool>,
     pub preset_name: Option<String>,
     pub rotary_locked: Option<bool>,
 }
@@ -514,6 +518,7 @@ pub fn fingerprint_live_device(
         device_name: Some(device.name.as_str()),
         status: AmpStatus {
             standby: snapshot.standby,
+            standby_locked: snapshot.standby_locked,
             preset_name: snapshot.preset_name.clone(),
             rotary_locked: snapshot.rotary_locked,
         },
@@ -1172,7 +1177,11 @@ fn hashed_entries(fp: &AmpFingerprint) -> Vec<Entry> {
             Some(false) => off.to_string(),
             None => "—".to_string(),
         };
-        push_status(&mut out, "Standby", flag(status.standby, "standby", "on"));
+        let standby_text = match (status.standby, status.standby_locked) {
+            (Some(true), Some(true)) => "standby (locked out)".to_string(),
+            (value, _) => flag(value, "standby", "on"),
+        };
+        push_status(&mut out, "Standby", standby_text);
         push_status(&mut out, "Preset", status.preset_name.clone().unwrap_or_else(|| "—".to_string()));
         push_status(&mut out, "Front panel lock", flag(status.rotary_locked, "locked", "unlocked"));
     }

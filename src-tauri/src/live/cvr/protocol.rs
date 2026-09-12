@@ -153,8 +153,10 @@ pub fn build_network_data_header(
 /// `status` is the vendor reference's `Responsed` enum, in full:
 /// 0=`Response`, 1=`NOT_Response`, 2=`Request`, 3=`Response_aa`,
 /// 4=`Response_error`, 5=`Response_bb`, 6=`Response_cc`, 7=`Response_dd`.
-/// This app only ever sends 1 (writes, via `build_control_packet`) and 2
-/// (queries, via `build_protocol_packet`). Note 4 is an explicit *error*
+/// This app sends 1 (writes, via `build_control_packet`), 2 (queries, via
+/// `build_protocol_packet`) and — for FC=15 STANDBY alone — 0, via
+/// `build_control_packet_with_status` (see `write_v118::build_set_standby`).
+/// Note 4 is an explicit *error*
 /// status a device can reply with; nothing here inspects it yet, and doing
 /// so would be an application-level check entirely separate from the
 /// transport ACK that `request.rs`'s `WriteRegistry` waits on.
@@ -206,11 +208,29 @@ pub fn build_protocol_packet(function_code: u8, status_code: u8, chx: u8, body: 
 
 /// Full packet for a write/control command — the write-side counterpart to
 /// `build_protocol_packet` (which hardcodes `segment=link=in_out_flag=0` for
-/// the read-only queries it serves). `status_code` is always `1` here,
-/// matching the reference implementation's write/control convention (see
-/// `write.rs`).
+/// the read-only queries it serves). `status_code` is `1`, the reference
+/// implementation's write/control convention (see `write.rs`); the one command
+/// that needs a different one reaches for `build_control_packet_with_status`.
 pub fn build_control_packet(function_code: u8, chx: u8, segment: u8, link: i32, in_out_flag: u8, body: &[u8]) -> Vec<u8> {
-    let struct_header = build_struct_header(function_code, 1, chx, segment, link, in_out_flag);
+    build_control_packet_with_status(function_code, 1, chx, segment, link, in_out_flag, body)
+}
+
+/// `build_control_packet` with an explicit `status_code`. Exists for FC=15
+/// STANDBY, which the vendor software alone among writes sends with
+/// `Responsed::Response` (0) rather than `NOT_Response` (1) — see
+/// `write_v118::build_set_standby`. Prefer `build_control_packet` for anything
+/// else: a non-standard status on a command the device expects `1` on is the
+/// kind of difference that shows up as a silently ignored write.
+pub fn build_control_packet_with_status(
+    function_code: u8,
+    status_code: u8,
+    chx: u8,
+    segment: u8,
+    link: i32,
+    in_out_flag: u8,
+    body: &[u8],
+) -> Vec<u8> {
+    let struct_header = build_struct_header(function_code, status_code, chx, segment, link, in_out_flag);
     let mut inner = Vec::with_capacity(STRUCT_HEADER_LEN + body.len());
     inner.extend_from_slice(&struct_header);
     inner.extend_from_slice(body);

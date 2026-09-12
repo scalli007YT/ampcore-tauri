@@ -370,7 +370,19 @@ pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
         1 => Some(true),
         _ => None,
     };
-    let standby = flag(32);
+    // Standby is tri-state, not a flag: the vendor's FC=15 receive path treats
+    // `0` as powered on, `1` as standby, and `2` as standby *locked out* —
+    // `RunState = num != 0` with a separate `IsBanRunState = num == 2` that
+    // disables its own toggle. FC=27's `Standbys` is the same `Standby_data`
+    // struct, so the same three values are assumed here; only `2`'s meaning is
+    // inferred rather than observed on this byte. Anything past the known set
+    // stays unknown rather than being folded into "on".
+    let (standby, standby_locked) = match u8_at(body, 32) {
+        0 => (Some(false), Some(false)),
+        1 => (Some(true), Some(false)),
+        2 => (Some(true), Some(true)),
+        _ => (None, None),
+    };
     let rotary_locked = flag(33);
 
     // Trailer from `trailer_base + 36`: `link_input[8]` and `link_output[8]`
@@ -392,6 +404,7 @@ pub fn parse_channel_config(body: &[u8]) -> Option<ChannelConfigSnapshot> {
     Some(ChannelConfigSnapshot {
         channels,
         standby,
+        standby_locked,
         rotary_locked,
         preset_name,
         received_at: now_millis(),
@@ -411,5 +424,22 @@ mod tests {
         let snapshot = parse_channel_config(&body).unwrap();
         assert_eq!(snapshot.standby, Some(true));
         assert_eq!(snapshot.rotary_locked, Some(true));
+    }
+
+    /// `2` must not read as "unknown" (which would render a dead control on an
+    /// amp that really is in standby) nor as plain standby (which would offer
+    /// a toggle the amp ignores).
+    #[test]
+    fn standby_byte_is_tri_state() {
+        let read = |value: u8| {
+            let mut body = vec![0u8; 4 * BYTES_PER_CHANNEL + TRAILER_SIZE_V118];
+            body[32] = value;
+            let snapshot = parse_channel_config(&body).unwrap();
+            (snapshot.standby, snapshot.standby_locked)
+        };
+        assert_eq!(read(0), (Some(false), Some(false)));
+        assert_eq!(read(1), (Some(true), Some(false)));
+        assert_eq!(read(2), (Some(true), Some(true)));
+        assert_eq!(read(3), (None, None), "an unexpected value stays honestly unknown");
     }
 }
