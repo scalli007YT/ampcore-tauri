@@ -13,6 +13,27 @@ use specta::Type;
 use crate::data::capability::PowerMode;
 use crate::data::project::{BackupPriority, ChannelEq, ChannelSource, Limiter, MatrixCrosspoint};
 
+/// The parts of one EQ chain's wire body this app's model has no home for,
+/// kept so the whole-chain write (FC=52, `write_v118::build_set_eq_chain`) can
+/// echo them back instead of inventing values — the same rule
+/// `commands/live_control.rs`'s `current_channel` states for partial writes.
+///
+/// - `chain_bypass`: the vendor's `f_CH_bypass` (0 = chain active). CVR amps
+///   have no whole-EQ bypass, so nothing here models it.
+/// - the HP/LP `gain`/`q`: a `CrossoverSlot` carries only type/freq/active,
+///   because the slope type implies Q and gain is meaningless for it.
+///
+/// Rust-side only (`#[serde(skip)]`): the frontend has no use for any of it,
+/// and it would otherwise ride along on every `live_channel_config:updated`.
+#[derive(Debug, Clone, Default)]
+pub struct EqChainWire {
+    pub chain_bypass: u8,
+    pub hp_gain_db: f32,
+    pub hp_q: f32,
+    pub lp_gain_db: f32,
+    pub lp_q: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfig {
@@ -24,6 +45,11 @@ pub struct ChannelConfig {
     pub matrix_crosspoints: Vec<MatrixCrosspoint>,
     pub input_eq: ChannelEq,
     pub output_eq: ChannelEq,
+    /// Companion bytes of `input_eq`/`output_eq` — see `EqChainWire`.
+    #[serde(skip)]
+    pub input_eq_wire: EqChainWire,
+    #[serde(skip)]
+    pub output_eq_wire: EqChainWire,
     pub output_trim_db: f32,
     pub output_volume_db: f32,
     pub output_muted: bool,
@@ -57,8 +83,17 @@ pub struct ChannelConfig {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfigSnapshot {
     pub channels: Vec<ChannelConfig>,
-    /// Header `Standby`; `None` for a byte other than 0/1.
+    /// Header `Standby` — whether the amp is in standby. True for both the
+    /// plain standby value and the locked-out one (see `standby_locked`);
+    /// `None` for a byte outside the known 0/1/2 set.
     pub standby: Option<bool>,
+    /// Whether standby is locked out on the amp, i.e. it will ignore a
+    /// standby write. Comes from the same header byte as `standby` (the value
+    /// `2`), so it is `Some(false)` whenever `standby` is known and not
+    /// locked, and `None` exactly when `standby` is `None`. The frontend
+    /// disables its standby control on `Some(true)` rather than letting the
+    /// user press something the amp will drop.
+    pub standby_locked: Option<bool>,
     /// Header `Rotary_lock` (front-panel knob lock); `None` for a byte other
     /// than 0/1.
     pub rotary_locked: Option<bool>,

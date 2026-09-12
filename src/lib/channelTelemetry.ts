@@ -1,4 +1,4 @@
-import type { Telemetry } from "./bindings";
+import type { AmpChannelState, Telemetry } from "./bindings";
 
 /** One channel's slice of a heartbeat, with every field `null` when there's
  * no telemetry at all, when this channel is past the end of the packet's
@@ -21,6 +21,19 @@ export interface ChannelTelemetry {
    * the magnitude; the reference implementation negates it the same way).
    * `0` means "not limiting" and is a real reading, not a placeholder. */
   gainReductionDb: number | null;
+  /** This channel's output operating state, decoded by the backend. `null`
+   * when there is no reading for this channel at all — see
+   * `ChannelStateBadge`, which renders that as a dash rather than "Normal". */
+  outputState: AmpChannelState | null;
+  /** Raw wire value behind `outputState`, for the badge's tooltip. */
+  outputStateRaw: number | null;
+  /** Whether this input is clipping. Inputs have no operating state — the
+   * heartbeat's per-input byte is the vendor's two-value `InputChState`, not
+   * the output states' enum (see `Telemetry::input_clipping`). `null` when
+   * there is no reading. */
+  inputClipping: boolean | null;
+  /** Raw `InStates` byte behind `inputClipping`, for the pill's tooltip. */
+  inputStateRaw: number | null;
 }
 
 export const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
@@ -30,9 +43,23 @@ export const NO_CHANNEL_TELEMETRY: ChannelTelemetry = {
   outputCurrent: null,
   temperatureC: null,
   gainReductionDb: null,
+  outputState: null,
+  outputStateRaw: null,
+  inputClipping: null,
+  inputStateRaw: null,
 };
 
 function at(values: (number | null)[] | undefined, index: number): number | null {
+  return values?.[index] ?? null;
+}
+
+/** Same "short array degrades to null" rule as `at`, for the decoded state
+ * arrays — whose elements are already nullable when the backend had no state
+ * table for the device's firmware. */
+function stateAt(
+  values: (AmpChannelState | null)[] | undefined,
+  index: number,
+): AmpChannelState | null {
   return values?.[index] ?? null;
 }
 
@@ -75,6 +102,10 @@ export function channelTelemetry(
     // past 3 has no reading of its own rather than borrowing the PSU's.
     temperatureC: channelIndex < 4 ? at(telemetry.temperatures, channelIndex) : null,
     gainReductionDb: gr === null ? null : -Math.abs(gr),
+    outputState: stateAt(telemetry.outputChannelStates, channelIndex),
+    outputStateRaw: at(telemetry.outputStates, channelIndex),
+    inputClipping: telemetry.inputClipping[channelIndex] ?? null,
+    inputStateRaw: at(telemetry.inputStates, channelIndex),
   };
 }
 

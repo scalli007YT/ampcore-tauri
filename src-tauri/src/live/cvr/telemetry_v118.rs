@@ -87,7 +87,7 @@ fn parse_whole118_family(body: &[u8]) -> HeartFields {
             output_states: read_bytes(body, 36, 4),
             input_voltages: read_floats(body, 40, 4),
             limiters: read_floats(body, 56, 4),
-            input_states: read_sbytes(body, 72, 4),
+            input_states: if body.len() >= 76 { read_sbytes(body, 72, 4) } else { Vec::new() },
             fan_voltage: if body.len() >= 96 { Some(read_floats(body, 92, 1)[0]) } else { None },
         }
     } else {
@@ -98,7 +98,10 @@ fn parse_whole118_family(body: &[u8]) -> HeartFields {
             output_states: read_bytes(body, 52, 4),
             input_voltages: read_floats(body, 56, 4),
             limiters: if body.len() >= 88 { read_floats(body, 72, 4) } else { vec![0.0; 4] },
-            input_states: if body.len() >= 92 { read_sbytes(body, 88, 4) } else { vec![0; 4] },
+            // Empty, never `vec![0; 4]`: the vendor's `InputChState` names 0
+            // "Clip", so four fabricated zeros would read as every input
+            // clipping on any firmware whose body stops short of this field.
+            input_states: if body.len() >= 92 { read_sbytes(body, 88, 4) } else { Vec::new() },
             fan_voltage: if body.len() >= 96 { Some(read_floats(body, 92, 1)[0]) } else { None },
         }
     }
@@ -142,6 +145,24 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
     // Filled in by `driver.rs` once it can look up a real rated voltage from
     // the device's firmware string — this adapter only sees raw bytes.
     let output_level_db = vec![None; fields.output_voltages.len()];
+    // Same split of responsibility as `output_level_db`: decoding an output
+    // state byte needs the device's firmware family, which only `driver.rs`
+    // knows, so the raw array is carried through here and the decoded one is
+    // left length-matched but empty of meaning for it to fill in.
+    let output_channel_states = vec![None; fields.output_states.len()];
+    // The input flag needs no such dispatch — it is the fixed two-value
+    // `InputChState { Clip = 0, None = 1 }`, and its only firmware-dependence
+    // (older bodies omit the field entirely) is the length guard above, which
+    // leaves `input_states` empty and so this empty too.
+    let input_clipping = fields
+        .input_states
+        .iter()
+        .map(|&v| match v {
+            0 => Some(true),
+            1 => Some(false),
+            _ => None,
+        })
+        .collect();
 
     Some(Telemetry {
         temperatures: fields.temperatures,
@@ -155,8 +176,54 @@ pub fn parse_heartbeat_telemetry(raw: &[u8]) -> Option<Telemetry> {
         input_dbfs,
         limiters: fields.limiters,
         input_states: fields.input_states,
+        output_channel_states,
+        input_clipping,
+        machine_state_decoded: None,
         fan_voltage: fields.fan_voltage,
         machine_mode,
         received_at: now_millis(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wraps a heartbeat body in the framing `parse_heartbeat_telemetry`
+    /// expects: NetworkHeader(10) + StructHeader(10) + body + Checksum(3).
+    /// Only bytes 10 and 11 of the header are inspected, and the checksum is
+    /// not verified here, so the padding can be zeros.
+    fn framed(body: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0u8; BODY_START];
+        raw[10] = 0x55;
+        raw[11] = FC_HEARTBEAT;
+        raw.extend_from_slice(body);
+        raw.extend_from_slice(&[0u8; CHECKSUM_LEN]);
+        raw
+    }
+
+    /// A body that stops before `InStates` must report no input reading at
+    /// all. It used to substitute `vec![0; 4]`, and `InputChState` names 0
+    /// "Clip" — so that default now means "all four inputs clipping".
+    #[test]
+    fn body_without_instates_reports_no_input_clip_reading() {
+        let parsed = parse_heartbeat_telemetry(&framed(&[0u8; WHOLE118_MINUS_INSTATES])).unwrap();
+        assert!(parsed.input_states.is_empty());
+        assert!(parsed.input_clipping.is_empty());
+    }
+
+    #[test]
+    fn instates_decode_to_clip_flags() {
+        let mut body = [0u8; WHOLE118];
+        // Legacy layout puts InStates at 88; 0 = Clip, 1 = None, 7 = unknown.
+        body[88] = 0;
+        body[89] = 1;
+        body[90] = 1;
+        body[91] = 7;
+        let parsed = parse_heartbeat_telemetry(&framed(&body)).unwrap();
+        assert_eq!(
+            parsed.input_clipping,
+            vec![Some(true), Some(false), Some(false), None]
+        );
+    }
 }

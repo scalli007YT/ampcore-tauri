@@ -48,6 +48,9 @@ import {
 import { FingerprintMismatchModal } from "./FingerprintMismatchModal";
 import { LimiterEditor } from "./LimiterEditor";
 import { RotaryLockToggle } from "./RotaryLockToggle";
+import { StandbyToggle } from "./StandbyToggle";
+import { ChannelStateBadge } from "./ChannelStateBadge";
+import { InputClipPill } from "./InputClipPill";
 import {
   PresetActionTile,
   StatEditorTile,
@@ -443,11 +446,19 @@ function RenameableLabel({
   name,
   maxLength,
   onRename,
+  trailing,
 }: {
   defaultLabel: string;
   name: string | null | undefined;
   maxLength: number;
   onRename: (name: string | null) => void;
+  /** Status pills shown beside the name — the channel state, an input clip
+   * flag. They live in this header rather than in the row's tile `Group`
+   * because that row has a fixed width budget (`OUTPUT_ROW_MAX_WIDTH`) that
+   * an extra item wraps, and because a pill that comes and goes with
+   * telemetry would move the wrap point at runtime. The reference app floats
+   * its pills over the card's top-left corner for the same reason. */
+  trailing?: ReactNode;
 }) {
   const [opened, setOpened] = useState(false);
   const [draft, setDraft] = useState(name ?? "");
@@ -470,13 +481,19 @@ function RenameableLabel({
       shadow="md"
       width={220}
     >
-      <Popover.Target>
-        <UnstyledButton onClick={() => setOpened((o) => !o)}>
-          <Text size="xs" fw={700} c="dimmed" tt="uppercase" mb={6}>
-            {name && name.length > 0 ? name : defaultLabel}
-          </Text>
-        </UnstyledButton>
-      </Popover.Target>
+      {/* The header's bottom margin belongs to whichever element is the
+          outermost one here, so it stays a single 6px whether or not there
+          are pills — putting it on the `Text` as well would double it. */}
+      <Group gap={6} align="center" wrap="nowrap" mb={6} className="min-w-0">
+        <Popover.Target>
+          <UnstyledButton onClick={() => setOpened((o) => !o)}>
+            <Text size="xs" fw={700} c="dimmed" tt="uppercase">
+              {name && name.length > 0 ? name : defaultLabel}
+            </Text>
+          </UnstyledButton>
+        </Popover.Target>
+        {trailing}
+      </Group>
       <Popover.Dropdown>
         <Stack gap="sm">
           <Text size="xs" fw={700} c="dimmed" tt="uppercase" ta="center">
@@ -548,6 +565,7 @@ function InputChannelRow({
         name={channel.inputName}
         maxLength={nameMaxLength}
         onRename={onRename}
+        trailing={<InputClipPill clipping={telemetry.inputClipping} raw={telemetry.inputStateRaw} />}
       />
       <Group gap="xs" wrap="wrap" align="center">
         <ChannelLevelMeter levelDb={telemetry.inputDbv} disabled={muted} />
@@ -878,6 +896,13 @@ function OutputChannelRow({
         name={channel.outputName}
         maxLength={nameMaxLength}
         onRename={onRename}
+        trailing={
+          <ChannelStateBadge
+            state={telemetry.outputState}
+            raw={telemetry.outputStateRaw}
+            hideNominal
+          />
+        }
       />
       <Group gap="xs" wrap="wrap" align="center">
         {/* Grouped by role, left to right in rough order of how often each is
@@ -2342,9 +2367,10 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
     if (editLock && editLock.state !== "checking") sawLockVerdict.current = true;
   }, [showsMismatch, lockAssignmentId, editLock]);
 
-  // Front-panel lock toggle target: the live device itself, or a project
-  // amp's linked network amp while it is online.
-  const rotaryDeviceId =
+  // Target for the amp-level live controls (front-panel lock, standby): the
+  // live device itself, or a project amp's linked network amp while it is
+  // online.
+  const liveAmpDeviceId =
     live?.device.id ??
     (source?.kind === "project" && source.linkedDevice?.online
       ? source.linkedDevice.id
@@ -2352,6 +2378,13 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
   const rotaryLocked = live
     ? live.channelConfig?.rotaryLocked
     : editLock?.rotaryLocked;
+  // Standby shares the rotary lock's target device and reads from the same
+  // FC=27 snapshot, by the same two routes (live snapshot / project amp's
+  // edit lock).
+  const standby = live ? live.channelConfig?.standby : editLock?.standby;
+  const standbyLocked = live
+    ? live.channelConfig?.standbyLocked
+    : editLock?.standbyLocked;
 
   // Preset Configuration is a live-device-only concept (FC=59 presets live on
   // the physical amp; a Project with no live amp behind it has nothing to
@@ -2450,6 +2483,7 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         projectId={source?.kind === "project" ? source.project.id : undefined}
         assignmentId={source?.kind === "project" ? source.assignment.id : undefined}
         onProjectUpdate={source?.kind === "project" ? source.onProjectUpdate : undefined}
+        following={Boolean(live)}
       />
     <Tabs defaultValue="input" orientation="vertical" className="min-h-0 flex-1">
       {/* `min-w-0` on the panel is what lets the tab body shrink below its
@@ -2472,7 +2506,14 @@ export function AmpConfigureView({ source }: AmpConfigureViewProps) {
         ))}
         <FingerprintInspector target={fingerprintTarget} />
         {(live || (source?.kind === "project" && source.linkedDevice)) && (
-          <RotaryLockToggle deviceId={rotaryDeviceId} rotaryLocked={rotaryLocked} />
+          <>
+            <RotaryLockToggle deviceId={liveAmpDeviceId} rotaryLocked={rotaryLocked} />
+            <StandbyToggle
+              deviceId={liveAmpDeviceId}
+              standby={standby}
+              standbyLocked={standbyLocked}
+            />
+          </>
         )}
       </Tabs.List>
 

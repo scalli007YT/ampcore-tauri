@@ -423,11 +423,40 @@ export const commands = {
 	 */
 	projectsMergeAmpFromLive: (projectId: string, assignmentId: string) => typedError<AmpMergeResult, AppError>(__TAURI_INVOKE("projects_merge_amp_from_live", { projectId, assignmentId })),
 	/**
+	 *  Read-only: what a push would write, stage by stage. Lets the modal render
+	 *  the step list (and the adopted-fields note) before the user commits to it.
+	 */
+	projectsPlanAmpPush: (projectId: string, assignmentId: string) => typedError<AmpPushPlan, AppError>(__TAURI_INVOKE("projects_plan_amp_push", { projectId, assignmentId })),
+	/**
+	 *  Makes the linked network amp adopt this project amp's settings (online ←
+	 *  offline).
+	 * 
+	 *  Not a transaction: the plan's stages are written in order and the first
+	 *  failure stops the push, leaving the amp partly configured. That is reported
+	 *  rather than papered over — the stage that failed comes back in the result,
+	 *  and pushing again re-plans against the amp's new state, so a retry picks up
+	 *  where this left off instead of redoing the work that landed.
+	 * 
+	 *  Three hashed fields travel the other way instead of being written (load and
+	 *  the two rated max voltages) — see `data/amp_push.rs`.
+	 */
+	projectsPushAmpToLive: (projectId: string, assignmentId: string) => typedError<AmpPushResult, AppError>(__TAURI_INVOKE("projects_push_amp_to_live", { projectId, assignmentId })),
+	/**
 	 *  FC=17 ROTARY_LOCK — locks/unlocks the amp's front-panel knobs. Does not
 	 *  affect what this app may edit. No explicit refetch: the new state comes
 	 *  back through the next FC=27 poll (`rotary_locked`).
 	 */
 	liveControlSetRotaryLock: (deviceId: string, locked: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_rotary_lock", { deviceId, locked })),
+	/**
+	 *  FC=15 STANDBY — puts the amp into standby or brings it back out. Amp-wide,
+	 *  not per channel. No explicit refetch: the new state comes back through the
+	 *  next FC=27 poll (`standby`), same as the front-panel lock.
+	 * 
+	 *  Deliberately does not check `standby_locked` (FC=27 byte 32 == 2)
+	 *  before sending: the frontend disables the control in that case, and the
+	 *  authority on whether the amp will accept it is the amp, not a cached poll.
+	 */
+	liveControlSetStandby: (deviceId: string, standby: boolean) => typedError<LiveWriteAck, AppError>(__TAURI_INVOKE("live_control_set_standby", { deviceId, standby })),
 };
 
 /* Types */
@@ -596,6 +625,18 @@ export type AmpChannel = {
 };
 
 /**
+ *  One channel's (or the amp's) operating state, decoded from the vendor's
+ *  `Jiqizhuangtai` enum. See `channel_state_v118.rs` for the raw-value table
+ *  and the two places the vendor's own identifiers and UI labels disagree.
+ * 
+ *  `Unknown` is a plain variant rather than `Unknown(u32)`: a tagged enum
+ *  makes an awkward TypeScript shape, and the raw values stay available on
+ *  `Telemetry.output_states`/`input_states`/`machine_mode` for wire debugging,
+ *  so carrying the byte twice buys nothing.
+ */
+export type AmpChannelState = "offline" | "normal" | "standby" | "fault" | "open" | "overload" | "clip" | "dcp" | "powerError" | "run" | "temp" | "limit" | "sleep" | "unknown";
+
+/**
  *  Per-model DSP-capability schema — channel/IO topology, EQ structure, and
  *  electrical rating for a catalog entry. Populated at seed time for builtin
  *  CVR models (see `capability::cvr::builtin_topology`); defaults to zeroed/
@@ -654,6 +695,16 @@ export type AmpEditLock = {
 	 *  Informational only — it never affects `locked`.
 	 */
 	rotaryLocked: boolean | null,
+	/**
+	 *  The amp's standby state from the same snapshot, and whether it is
+	 *  refusing standby writes. Carried here for exactly the reason
+	 *  `rotary_locked` is: these are amp-level controls a project amp's
+	 *  configure view offers whenever its linked amp is online, and this lock
+	 *  is that view's only channel to the live snapshot. Informational only —
+	 *  neither ever affects `locked`.
+	 */
+	standby: boolean | null,
+	standbyLocked: boolean | null,
 	project: AmpFingerprint | null,
 	live: AmpFingerprint | null,
 	rows: FingerprintRow[],
@@ -836,6 +887,52 @@ export type AmpParamRanges = {
  */
 export type AmpProtocol = "cvrUdp";
 
+/**  The plan the frontend renders and the progress events index into. */
+export type AmpPushPlan = {
+	stages: PushStage[],
+	packetCount: number,
+	/**
+	 *  Device-determined fields the *project* will take from the amp instead
+	 *  of pushing — see the module doc comment. Empty when they already agree.
+	 */
+	adopted: FingerprintRow[],
+};
+
+/**
+ *  Where a push got to. `pushed` is the only field that says the amp and the
+ *  project now agree — everything else is there to explain why they don't.
+ */
+export type AmpPushResult = {
+	/**
+	 *  True only when every stage was written *and* the two fingerprints
+	 *  matched afterwards.
+	 */
+	pushed: boolean,
+	/**
+	 *  The saved project. Always `Some` on a result: the three device facts
+	 *  are re-read and saved even when no write was needed, so the caller can
+	 *  use it unconditionally. `Option` only so the shape matches
+	 *  `AmpMergeResult`, whose pull can legitimately save nothing.
+	 */
+	project: Project | null,
+	/**  The amp hash both sides now share; `Some` only when `pushed`. */
+	ampHash: string | null,
+	stagesCompleted: number,
+	stagesTotal: number,
+	packetsSent: number,
+	/**
+	 *  The stage that failed, by `PushStage.id`; `None` when every write
+	 *  landed.
+	 */
+	failedStageId: string | null,
+	/**  Human-readable "Out A · Speaker" for the failed stage. */
+	failedStageLabel: string | null,
+	/**  Why it failed — an ACK timeout, a full queue, a stopped driver. */
+	error: string | null,
+	/**  Settings still differing after the push. Empty when `pushed`. */
+	remaining: FingerprintRow[],
+};
+
 /**  Amp-wide settings beyond identity. */
 export type AmpSettingsCanonical = {
 	/**
@@ -851,6 +948,12 @@ export type AmpSettingsCanonical = {
  */
 export type AmpStatus = {
 	standby: boolean | null,
+	/**
+	 *  Whether the amp is refusing standby writes — folded into the `Standby`
+	 *  status row's text rather than given a row of its own, since it is
+	 *  `false` on every amp that isn't in this unusual state.
+	 */
+	standbyLocked: boolean | null,
 	presetName: string | null,
 	rotaryLocked: boolean | null,
 };
@@ -947,8 +1050,21 @@ export type ChannelConfig = {
 
 export type ChannelConfigSnapshot = {
 	channels: ChannelConfig[],
-	/**  Header `Standby`; `None` for a byte other than 0/1. */
+	/**
+	 *  Header `Standby` — whether the amp is in standby. True for both the
+	 *  plain standby value and the locked-out one (see `standby_locked`);
+	 *  `None` for a byte outside the known 0/1/2 set.
+	 */
 	standby: boolean | null,
+	/**
+	 *  Whether standby is locked out on the amp, i.e. it will ignore a
+	 *  standby write. Comes from the same header byte as `standby` (the value
+	 *  `2`), so it is `Some(false)` whenever `standby` is known and not
+	 *  locked, and `None` exactly when `standby` is `None`. The frontend
+	 *  disables its standby control on `Some(true)` rather than letting the
+	 *  user press something the amp will drop.
+	 */
+	standbyLocked: boolean | null,
 	/**
 	 *  Header `Rotary_lock` (front-panel knob lock); `None` for a byte other
 	 *  than 0/1.
@@ -1160,7 +1276,17 @@ export type DiscoveredDevice = {
 	analogInputChannels: number,
 	digitalInputChannels: number,
 	outputChannels: number,
+	/**
+	 *  Raw FC=0 BASIC_INFO `Machine_state` byte — the same vendor state enum
+	 *  the heartbeat's per-channel bytes use. Kept raw for wire debugging;
+	 *  `machine_state_decoded` is the form the UI reads.
+	 */
 	machineState: number,
+	/**
+	 *  `machine_state` decoded. `None` for a firmware family with no state
+	 *  table (see `cvr::channel_state::decode`) — never a guessed meaning.
+	 */
+	machineStateDecoded: AmpChannelState | null,
 	online: boolean,
 	lastSeenAt: number | null,
 };
@@ -1387,6 +1513,19 @@ export type Project = {
 	ampAssignments: AmpAssignment[],
 };
 
+/**
+ *  A stage as the frontend sees it: an identity, where it belongs, and how
+ *  much work it is. The actions themselves never cross the bridge.
+ */
+export type PushStage = {
+	/**  Stable across re-plans, so a progress event can address a rendered row. */
+	id: string,
+	/**  "Amp", "In 1", "Out A" — the same grouping `FingerprintRow` uses. */
+	group: string,
+	label: string,
+	packets: number,
+};
+
 /**  RMS-window limiter stage — ranged by `AmpParamRanges.rms_limiter_*`. */
 export type RmsLimiter = {
 	enabled: boolean,
@@ -1491,11 +1630,54 @@ export type Telemetry = {
 	 *  `None` under the same conditions as `output_level_db`.
 	 */
 	ratedRmsVoltage: number | null,
+	/**
+	 *  Raw per-output state bytes, straight off the wire — kept alongside the
+	 *  decoded `output_channel_states` for wire debugging and because the
+	 *  decode needs a firmware family this adapter never sees.
+	 */
 	outputStates: number[],
 	inputVoltages: (number | null)[],
 	inputDbfs: (number | null)[],
 	limiters: (number | null)[],
+	/**
+	 *  Raw per-input `InStates` bytes — signed, as the vendor struct declares
+	 *  them. NOT the same enum as `output_states`: see `input_clipping`.
+	 *  Empty on the body lengths that don't carry the field at all.
+	 */
 	inputStates: number[],
+	/**
+	 *  `output_states` decoded to meanings, one entry per raw entry so a
+	 *  short packet stays distinguishable from a full one. Every element is
+	 *  `None` until `driver.rs` fills it in (and stays `None` for a firmware
+	 *  family with no state table), for the same reason `output_level_db`
+	 *  does: the wire adapters only see raw bytes, never the device's
+	 *  firmware family.
+	 */
+	outputChannelStates: (AmpChannelState | null)[],
+	/**
+	 *  Per-input clip flag, decoded from `input_states`. The vendor's
+	 *  heartbeat struct calls this field `InStates: sbyte[4]` and gives it its
+	 *  own two-value enum, `Struct_test.InputChState { Clip = 0, None = 1 }` —
+	 *  it is emphatically *not* the 12-value `Jiqizhuangtai` the output states
+	 *  use, so there is no such thing as a per-input operating state.
+	 * 
+	 *  The two references disagree on what the byte means and both can't be
+	 *  right: the vendor enum names `0` "Clip" and the vendor UI lights a
+	 *  yellow LED when it reads 0, while the prior web implementation reads
+	 *  the same `0` as "signal present" and shows green. This follows the
+	 *  vendor. `input_states` stays exposed raw so a check against real
+	 *  hardware can settle it without a rebuild.
+	 * 
+	 *  Element is `None` for a byte outside the known 0/1 set; the whole vec
+	 *  is empty when the packet doesn't carry the field.
+	 */
+	inputClipping: (boolean | null)[],
+	/**
+	 *  `machine_mode` decoded to a meaning — the amp-level state, and what the
+	 *  reference web app drives its standby indicator from. Same fill-in and
+	 *  `None` rules as `output_channel_states`.
+	 */
+	machineStateDecoded: AmpChannelState | null,
 	/**
 	 *  `None` on the (common) heartbeat body lengths that don't include this
 	 *  trailing field at all — only the 96-byte `WHOLE118_PLUS` variant

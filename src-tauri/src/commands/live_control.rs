@@ -23,7 +23,7 @@ use crate::live::state::{
 /// channel in one pass, so each command body is just "build a packet or
 /// error, then send it". The channel is resolved here rather than at each
 /// send so a command against a stopped driver fails before building anything.
-fn resolve_write_target(
+pub(crate) fn resolve_write_target(
     state: &State<'_, LiveDeviceState>,
     device_id: &str,
 ) -> Result<(Option<String>, Ipv4Addr, mpsc::UnboundedSender<WriteSpec>), AppError> {
@@ -49,7 +49,7 @@ fn resolve_write_target(
 /// single-packet ones, so the shape the frontend receives never depends on
 /// how many packets a given parameter happens to require.
 #[derive(Default)]
-struct WriteTally {
+pub(crate) struct WriteTally {
     packets: u32,
     attempts: u32,
     elapsed_ms: u32,
@@ -57,7 +57,7 @@ struct WriteTally {
 }
 
 impl WriteTally {
-    fn record(&mut self, outcome: WriteOutcome) {
+    pub(crate) fn record(&mut self, outcome: WriteOutcome) {
         self.packets += 1;
         if outcome.attempts == 0 {
             // Coalesced: never transmitted, so it contributes no latency and
@@ -69,7 +69,7 @@ impl WriteTally {
         }
     }
 
-    fn finish(self) -> LiveWriteAck {
+    pub(crate) fn finish(self) -> LiveWriteAck {
         LiveWriteAck {
             packets: self.packets,
             attempts: self.attempts,
@@ -79,7 +79,7 @@ impl WriteTally {
     }
 }
 
-fn unknown_firmware_error(device_id: &str) -> AppError {
+pub(crate) fn unknown_firmware_error(device_id: &str) -> AppError {
     AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id))
 }
 
@@ -933,6 +933,28 @@ pub async fn live_control_set_rotary_lock(
     let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
     let mut tally = WriteTally::default();
     let packet = write::build_set_rotary_lock(firmware_family.as_deref(), locked)
+        .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
+    tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
+    Ok(tally.finish())
+}
+
+/// FC=15 STANDBY — puts the amp into standby or brings it back out. Amp-wide,
+/// not per channel. No explicit refetch: the new state comes back through the
+/// next FC=27 poll (`standby`), same as the front-panel lock.
+///
+/// Deliberately does not check `standby_locked` (FC=27 byte 32 == 2)
+/// before sending: the frontend disables the control in that case, and the
+/// authority on whether the amp will accept it is the amp, not a cached poll.
+#[tauri::command]
+#[specta::specta]
+pub async fn live_control_set_standby(
+    state: State<'_, LiveDeviceState>,
+    device_id: String,
+    standby: bool,
+) -> Result<LiveWriteAck, AppError> {
+    let (firmware_family, ip, write_tx) = resolve_write_target(&state, &device_id)?;
+    let mut tally = WriteTally::default();
+    let packet = write::build_set_standby(firmware_family.as_deref(), standby)
         .ok_or_else(|| AppError::from(format!("device {} has unrecognized/unknown firmware — cannot build write packet", device_id)))?;
     tally.record(write::send_control(&write_tx, ip, &packet).await.map_err(|e| e.to_string())?);
     Ok(tally.finish())

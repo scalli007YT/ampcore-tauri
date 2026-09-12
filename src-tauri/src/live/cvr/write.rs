@@ -90,6 +90,16 @@ pub fn build_set_phase_invert(firmware_family: Option<&str>, channel_index: u8, 
     }
 }
 
+/// Routes an amp-level standby set to the adapter for `firmware_family`.
+/// Amp-wide, not per channel — `chx` is 0 and there is no channel parameter.
+pub fn build_set_standby(firmware_family: Option<&str>, standby: bool) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_standby(standby)),
+        Some("1.1.9") => Some(super::write_v119::build_set_standby(standby)),
+        _ => None,
+    }
+}
+
 pub fn build_set_rotary_lock(firmware_family: Option<&str>, locked: bool) -> Option<Vec<u8>> {
     match firmware_family {
         Some("1.1.8") => Some(super::write_v118::build_set_rotary_lock(locked)),
@@ -256,6 +266,68 @@ pub fn build_set_output_bridge(firmware_family: Option<&str>, pair_index: u8, br
     match firmware_family {
         Some("1.1.8") => Some(super::write_v118::build_set_output_bridge(pair_index, bridged)),
         Some("1.1.9") => Some(super::write_v119::build_set_output_bridge(pair_index, bridged)),
+        _ => None,
+    }
+}
+
+/// One whole 10-band EQ chain in a single packet — see
+/// `write_v118::build_set_eq_chain`. Used by the offline → online push; the
+/// interactive Direct Edit path stays on the per-band codes above, where a
+/// fader drag should move one field and coalesce, not rewrite the chain.
+pub fn build_set_eq_chain(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    in_out_flag: u8,
+    bands: &[super::write_v118::EqChainBand; super::write_v118::EQ_CHAIN_BANDS],
+    chain_bypass: u8,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_eq_chain(channel_index, in_out_flag, bands, chain_bypass)),
+        Some("1.1.9") => Some(super::write_v119::build_set_eq_chain(channel_index, in_out_flag, bands, chain_bypass)),
+        _ => None,
+    }
+}
+
+pub fn build_set_fir_bypass(firmware_family: Option<&str>, channel_index: u8, bypassed: bool) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_fir_bypass(channel_index, bypassed)),
+        Some("1.1.9") => Some(super::write_v119::build_set_fir_bypass(channel_index, bypassed)),
+        _ => None,
+    }
+}
+
+/// Auto travels on its own function code (FC=48), not inside the FC=55 record
+/// — see `write_v118::build_set_rms_limiter_auto`.
+pub fn build_set_rms_limiter_auto(firmware_family: Option<&str>, channel_index: u8, auto: bool) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_rms_limiter_auto(channel_index, auto)),
+        Some("1.1.9") => Some(super::write_v119::build_set_rms_limiter_auto(channel_index, auto)),
+        _ => None,
+    }
+}
+
+/// Amp-level, not per channel: `chx` is always 0 (see
+/// `write_v118::build_set_device_name`).
+pub fn build_set_device_name(firmware_family: Option<&str>, name: &str) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_device_name(name)),
+        Some("1.1.9") => Some(super::write_v119::build_set_device_name(name)),
+        _ => None,
+    }
+}
+
+/// `segment` selects the source family: 0=Analog, 1=Dante, 2=AES3. Trim and
+/// delay have no partial form and must both be supplied.
+pub fn build_set_source_trim(
+    firmware_family: Option<&str>,
+    channel_index: u8,
+    segment: u8,
+    trim_db: f32,
+    delay_ms: f32,
+) -> Option<Vec<u8>> {
+    match firmware_family {
+        Some("1.1.8") => Some(super::write_v118::build_set_source_trim(channel_index, segment, trim_db, delay_ms)),
+        Some("1.1.9") => Some(super::write_v119::build_set_source_trim(channel_index, segment, trim_db, delay_ms)),
         _ => None,
     }
 }

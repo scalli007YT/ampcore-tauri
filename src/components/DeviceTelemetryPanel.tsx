@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 import { Badge, Divider, Group, ScrollArea, Stack, Table, Text } from "@mantine/core";
 import type { ChannelConfig, ChannelConfigSnapshot, ChannelEq, DiscoveredDevice, Telemetry } from "../lib/bindings";
+import { ChannelStateBadge } from "./ChannelStateBadge";
+import { InputClipPill } from "./InputClipPill";
+import { CHANNEL_STATE_LABEL } from "../lib/channelState";
 
 export interface DeviceTelemetryPanelProps {
   device: DiscoveredDevice;
@@ -226,7 +229,15 @@ function ChannelConfigSection({ snapshot }: { snapshot: ChannelConfigSnapshot })
         />
         <InfoField
           label="standby"
-          value={snapshot.standby === null ? "— (unknown)" : snapshot.standby ? "yes" : "no"}
+          value={
+            snapshot.standby === null
+              ? "— (unknown)"
+              : snapshot.standby
+                ? snapshot.standbyLocked
+                  ? "yes (locked out)"
+                  : "yes"
+                : "no"
+          }
         />
         <InfoField label="preset" value={snapshot.presetName ?? "—"} />
       </Group>
@@ -270,7 +281,14 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
           <InfoField label="analog in ch" value={device.analogInputChannels} />
           <InfoField label="digital in ch" value={device.digitalInputChannels} />
           <InfoField label="output ch" value={device.outputChannels} />
-          <InfoField label="machine state" value={device.machineState} />
+          <InfoField
+            label="machine state"
+            value={
+              device.machineStateDecoded === null
+                ? `— (raw ${device.machineState})`
+                : `${CHANNEL_STATE_LABEL[device.machineStateDecoded]} (raw ${device.machineState})`
+            }
+          />
           <InfoField label="last seen" value={msAgo(device.lastSeenAt)} />
         </Group>
 
@@ -288,7 +306,14 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
           <>
             <Group gap="lg" wrap="wrap">
               <InfoField label="function code" value={TELEMETRY_FUNCTION_CODE} />
-              <InfoField label="machine mode" value={telemetry.machineMode} />
+              <InfoField
+                label="machine mode"
+                value={
+                  telemetry.machineStateDecoded === null
+                    ? `— (raw ${telemetry.machineMode})`
+                    : `${CHANNEL_STATE_LABEL[telemetry.machineStateDecoded]} (raw ${telemetry.machineMode})`
+                }
+              />
               <InfoField label="received" value={msAgo(telemetry.receivedAt)} />
               <InfoField
                 label="rated RMS voltage"
@@ -323,7 +348,8 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                     const impedance = telemetry.outputImpedance[i] ?? 0;
                     const levelDb = telemetry.outputLevelDb[i] ?? null;
                     const limiter = telemetry.limiters[i] ?? 0;
-                    const state = telemetry.outputStates[i] ?? 0;
+                    const state = telemetry.outputChannelStates[i] ?? null;
+                    const stateRaw = telemetry.outputStates[i] ?? null;
                     return (
                       <Table.Tr key={i}>
                         <Table.Td ff="monospace" fw={600}>
@@ -335,9 +361,7 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                         <Table.Td ff="monospace">{levelDb === null ? "—" : levelDb.toFixed(1)}</Table.Td>
                         <Table.Td ff="monospace">{limiter.toFixed(1)}</Table.Td>
                         <Table.Td>
-                          <Badge size="xs" color={state === 0 ? "gray" : "orange"} variant="outline">
-                            {state}
-                          </Badge>
+                          <ChannelStateBadge state={state} raw={stateRaw} />
                         </Table.Td>
                       </Table.Tr>
                     );
@@ -358,14 +382,17 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                     <Table.Th>Ch</Table.Th>
                     <Table.Th>Level</Table.Th>
                     <Table.Th>V</Table.Th>
-                    <Table.Th>State</Table.Th>
+                    {/* Not "State": inputs have no operating state, only the
+                        vendor's two-value `InStates` clip flag. */}
+                    <Table.Th>Clip</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
                   {Array.from({ length: inputCount }, (_, i) => {
                     const dbfs = telemetry.inputDbfs[i] ?? null;
                     const voltage = telemetry.inputVoltages[i] ?? 0;
-                    const state = telemetry.inputStates[i] ?? 0;
+                    const clipping = telemetry.inputClipping[i] ?? null;
+                    const clipRaw = telemetry.inputStates[i] ?? null;
                     return (
                       <Table.Tr key={i}>
                         <Table.Td ff="monospace" fw={600}>
@@ -374,9 +401,13 @@ export function DeviceTelemetryPanel({ device, telemetry, channelConfig }: Devic
                         <Table.Td ff="monospace">{dbfs === null ? "—" : `${dbfs.toFixed(1)}dB`}</Table.Td>
                         <Table.Td ff="monospace">{voltage.toFixed(3)}</Table.Td>
                         <Table.Td>
-                          <Badge size="xs" color={state === 0 ? "gray" : "orange"} variant="outline">
-                            {state}
-                          </Badge>
+                          {clipping === true ? (
+                            <InputClipPill clipping raw={clipRaw} />
+                          ) : (
+                            <Text size="xs" c="dimmed">
+                              {clipping === false ? "no" : clipRaw === null ? "—" : `— (raw ${clipRaw})`}
+                            </Text>
+                          )}
                         </Table.Td>
                       </Table.Tr>
                     );

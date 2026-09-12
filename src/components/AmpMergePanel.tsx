@@ -1,15 +1,28 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Loader, SegmentedControl, Stack, Text, ThemeIcon } from "@mantine/core";
-import { ArrowLeft, Check, Network, Server, X } from "lucide-react";
-import { commands, type AmpEditLock, type AmpMergeResult, type Project } from "../lib/bindings";
+import { ArrowLeft, ArrowRight, Check, Network, Server, X } from "lucide-react";
+import {
+  commands,
+  type AmpEditLock,
+  type AmpMergeResult,
+  type AmpPushResult,
+  type Project,
+} from "../lib/bindings";
 import { useHoldToConfirm } from "../hooks/useHoldToConfirm";
 
 const HOLD_MS = 1000;
 
+/** Which way the data travels. `pull` copies the online amp into the project
+ * (`projects_merge_amp_from_live`); `push` makes the amp adopt the project
+ * (`projects_push_amp_to_live`). */
+export type MergeDirection = "pull" | "push";
+
 type Outcome =
   | { kind: "merged"; ampHash: string | null }
   | { kind: "diverged"; count: number }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  /** A push that stopped partway: some writes landed, one failed. */
+  | { kind: "partial"; stage: string | null; message: string; stagesCompleted: number; stagesTotal: number };
 
 type StripState = "blocked" | "idle" | "holding" | "pending" | "merged" | "inSync" | "failed";
 
@@ -30,10 +43,20 @@ function blockedReason(lock: AmpEditLock | null): string | null {
   }
 }
 
-function caption(state: StripState, outcome: Outcome | null, reason: string | null): { text: string; color?: string } {
+function caption(
+  state: StripState,
+  outcome: Outcome | null,
+  reason: string | null,
+  direction: MergeDirection,
+): { text: string; color?: string } {
+  const pull = direction === "pull";
   switch (state) {
     case "pending":
-      return { text: "Copying the online settings and re-checking the fingerprint…" };
+      return {
+        text: pull
+          ? "Copying the online settings and re-checking the fingerprint…"
+          : "Writing the plan to the amp, one setting at a time…",
+      };
     case "merged":
       return {
         text:
@@ -45,20 +68,36 @@ function caption(state: StripState, outcome: Outcome | null, reason: string | nu
     case "inSync":
       return { text: "The offline amp already matches the online amp.", color: "green" };
     case "failed":
+      if (outcome?.kind === "partial") {
+        const where = outcome.stage ? ` at ${outcome.stage}` : "";
+        return {
+          text: `Stopped${where} after ${outcome.stagesCompleted} of ${outcome.stagesTotal} steps — ${outcome.message}. Everything before it was written; hold again to carry on.`,
+          color: "red",
+        };
+      }
       if (outcome?.kind === "diverged") {
         const noun = outcome.count === 1 ? "setting" : "settings";
-        return { text: `${outcome.count} ${noun} couldn't be matched — nothing was saved.`, color: "red" };
+        return {
+          text: pull
+            ? `${outcome.count} ${noun} couldn't be matched — nothing was saved.`
+            : `Every write landed, but ${outcome.count} ${noun} still differ.`,
+          color: "red",
+        };
       }
       return { text: outcome?.kind === "error" ? outcome.message : "Matching failed.", color: "red" };
     case "blocked":
       return { text: reason ?? "" };
     default:
-      return { text: "Hold to copy every online setting into this project amp." };
+      return {
+        text: pull
+          ? "Hold to copy every online setting into this project amp."
+          : "Hold to write every differing setting to the online amp.",
+      };
   }
 }
 
 /** One side of the strip. `pulseKey` replays a green ring pulse whenever it
- * changes — used on the offline side, the one that just received data. */
+ * changes — used on whichever side just received data. */
 function AmpEnd({ icon, label, color, pulseKey }: { icon: ReactNode; label: string; color: string; pulseKey?: string }) {
   return (
     <Stack gap={4} align="center" className="shrink-0">
@@ -79,7 +118,7 @@ function AmpEnd({ icon, label, color, pulseKey }: { icon: ReactNode; label: stri
   );
 }
 
-function CenterNode({ state }: { state: StripState }) {
+function CenterNode({ state, direction }: { state: StripState; direction: MergeDirection }) {
   const base =
     "flex size-7 items-center justify-center rounded-full border-2 border-solid transition-colors duration-300";
   switch (state) {
@@ -116,22 +155,37 @@ function CenterNode({ state }: { state: StripState }) {
         state === "holding"
           ? "border-[var(--mantine-color-amber-filled)] text-[var(--mantine-color-amber-filled)]"
           : "border-[var(--mantine-color-default-border)] text-[var(--mantine-color-dimmed)]";
+      const Arrow = direction === "pull" ? ArrowLeft : ArrowRight;
       return (
         <div className={`${base} ${tone} bg-[var(--mantine-color-body)]`}>
-          <ArrowLeft size={14} strokeWidth={2.5} />
+          <Arrow size={14} strokeWidth={2.5} />
         </div>
       );
     }
   }
 }
 
-/** `[offline] ◂◂◂ ── node ── ◂◂◂ [online]`. Every motion runs right to left,
- * the way the data travels: dashes drift toward the offline amp while idle,
- * the hold fills amber from the online side, a shimmer carries the request,
- * and the result fills green (or flashes red). */
-function MergeStrip({ state, progress, attempt }: { state: StripState; progress: number; attempt: number }) {
+/** `[offline] ◂◂◂ ── node ── ◂◂◂ [online]` for a pull, and the same mirrored
+ * for a push. Every motion runs the way the data travels: the dashes drift
+ * toward the receiving amp, the hold fills from the sending side, a shimmer
+ * carries the request, and the result fills green (or flashes red). */
+function MergeStrip({
+  state,
+  progress,
+  attempt,
+  direction,
+}: {
+  state: StripState;
+  progress: number;
+  attempt: number;
+  direction: MergeDirection;
+}) {
   const green = state === "merged" || state === "inSync";
   const drifting = state === "idle" || state === "holding";
+  const pull = direction === "pull";
+  // The fill grows from the sending amp, so its transform origin is that side.
+  const origin = pull ? "origin-right" : "origin-left";
+  const pulse = state === "merged" ? `merged-${attempt}` : undefined;
 
   return (
     <div className="flex w-full max-w-[520px] min-w-0 items-start gap-3">
@@ -139,14 +193,16 @@ function MergeStrip({ state, progress, attempt }: { state: StripState; progress:
         icon={<Server size={20} />}
         label="Offline Amp"
         color={green ? "green" : state === "failed" ? "red" : "gray"}
-        pulseKey={state === "merged" ? `merged-${attempt}` : undefined}
+        pulseKey={pull ? pulse : undefined}
       />
 
       <div className="relative mt-1 h-8 min-w-0 flex-1">
         <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-[var(--mantine-color-default-border)]">
           {drifting && (
             <div
-              className="absolute inset-0 animate-[merge-flow_900ms_linear_infinite] opacity-80 motion-reduce:animate-none"
+              className={`absolute inset-0 opacity-80 motion-reduce:animate-none ${
+                pull ? "animate-[merge-flow_900ms_linear_infinite]" : "animate-[push-flow_900ms_linear_infinite]"
+              }`}
               style={{
                 backgroundImage:
                   "repeating-linear-gradient(90deg, var(--mantine-color-gray-5) 0 6px, transparent 6px 18px)",
@@ -156,14 +212,16 @@ function MergeStrip({ state, progress, attempt }: { state: StripState; progress:
           {/* The hold fill: follows the hook's progress frame by frame while
               held, and eases back on an early release. */}
           <div
-            className={`absolute inset-0 origin-right bg-[var(--mantine-color-amber-filled)] ${
+            className={`absolute inset-0 ${origin} bg-[var(--mantine-color-amber-filled)] ${
               state === "holding" ? "" : "transition-transform duration-200"
             }`}
             style={{ transform: `scaleX(${state === "holding" || state === "idle" ? progress : 0})` }}
           />
           {state === "pending" && (
             <div
-              className="absolute inset-y-0 left-0 w-1/4 animate-[merge-shimmer_900ms_linear_infinite] motion-reduce:animate-none"
+              className={`absolute inset-y-0 left-0 w-1/4 motion-reduce:animate-none ${
+                pull ? "animate-[merge-shimmer_900ms_linear_infinite]" : "animate-[link-shimmer_900ms_linear_infinite]"
+              }`}
               style={{
                 background: "linear-gradient(90deg, transparent, var(--mantine-color-amber-filled), transparent)",
               }}
@@ -172,7 +230,7 @@ function MergeStrip({ state, progress, attempt }: { state: StripState; progress:
           {state === "merged" && (
             <div
               key={`fill-${attempt}`}
-              className="absolute inset-0 origin-right animate-[link-fill_500ms_ease-out_both] bg-[var(--mantine-color-green-filled)] motion-reduce:animate-none"
+              className={`absolute inset-0 ${origin} animate-[link-fill_500ms_ease-out_both] bg-[var(--mantine-color-green-filled)] motion-reduce:animate-none`}
             />
           )}
           {state === "inSync" && <div className="absolute inset-0 bg-[var(--mantine-color-green-filled)]" />}
@@ -180,71 +238,130 @@ function MergeStrip({ state, progress, attempt }: { state: StripState; progress:
         </div>
 
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-          <CenterNode key={`${state}-${attempt}`} state={state} />
+          <CenterNode key={`${state}-${attempt}`} state={state} direction={direction} />
         </div>
       </div>
 
-      <AmpEnd icon={<Network size={20} />} label="Online Amp" color={green ? "green" : "gray"} />
+      <AmpEnd
+        icon={<Network size={20} />}
+        label="Online Amp"
+        color={green ? "green" : !pull && state === "failed" ? "red" : "gray"}
+        pulseKey={pull ? undefined : pulse}
+      />
     </div>
   );
 }
 
-/** Top of the "Offline Amp vs. Online Amp" modal: matches the offline
- * project amp to its linked online amp (`projects_merge_amp_from_live`).
- * Hold-to-confirm, since it overwrites every setting of the project amp. The
- * direction switch is there for the reverse (online ← offline), which isn't
- * built yet. */
+/** Top of the "Offline Amp vs. Online Amp" modal: matches the offline project
+ * amp to its linked online amp, in either direction. Hold-to-confirm, since
+ * both directions overwrite every differing setting of whichever side
+ * receives — and in the push direction that side is real hardware. */
 export function AmpMergePanel({
   lock,
   projectId,
   assignmentId,
+  direction,
+  onDirectionChange,
+  pushBlocked,
   onProjectUpdate,
   onResult,
+  onPushStateChange,
 }: {
   lock: AmpEditLock | null;
   projectId: string;
   assignmentId: string;
+  direction: MergeDirection;
+  onDirectionChange: (direction: MergeDirection) => void;
+  /** Why pushing isn't available, disabling that direction — currently only
+   * while the project amp is following the online one, where it is a mirror
+   * rather than a plan and `useLinkedSync` would pull any difference straight
+   * back out. `null`/undefined when a push is available. */
+  pushBlocked?: string | null;
   onProjectUpdate: (project: Project) => void;
-  /** Every settled attempt (`null` when a new one starts), so the modal can
-   * show the rows that still differ after a failed match. */
+  /** Every settled pull attempt (`null` when a new one starts), so the modal
+   * can show the rows that still differ after a failed match. */
   onResult: (result: AmpMergeResult | null) => void;
+  /** Whether a push is in flight, and a counter bumped on each settled
+   * attempt — the step list uses both to know when to re-plan. */
+  onPushStateChange?: (running: boolean, attempt: number) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [attempt, setAttempt] = useState(0);
 
-  // A new online reading, or another amp, makes an old outcome stale. A
-  // successful match changes only the offline hash, so it keeps showing.
+  // A new online reading, another amp, or a change of direction makes an old
+  // outcome stale. A successful pull changes only the offline hash, so it
+  // keeps showing.
   const liveHash = lock?.live?.ampHash ?? null;
   useEffect(() => {
     setOutcome(null);
-  }, [liveHash, assignmentId]);
+  }, [liveHash, assignmentId, direction]);
 
-  const reason = blockedReason(lock);
-  const mergeable = lock?.state === "mismatch" && !busy && outcome?.kind !== "merged";
+  const blockedHere = direction === "push" ? (pushBlocked ?? null) : null;
+  const reason = blockedHere ?? blockedReason(lock);
+  const runnable = !blockedHere && lock?.state === "mismatch" && !busy && outcome?.kind !== "merged";
 
-  async function merge() {
+  async function run() {
     setBusy(true);
     setOutcome(null);
-    setAttempt((n) => n + 1);
+    const next = attempt + 1;
+    setAttempt(next);
     onResult(null);
-    const response = await commands.projectsMergeAmpFromLive(projectId, assignmentId);
+    onPushStateChange?.(direction === "push", next);
+
+    if (direction === "pull") {
+      const response = await commands.projectsMergeAmpFromLive(projectId, assignmentId);
+      setBusy(false);
+      if (response.status === "error") {
+        setOutcome({ kind: "error", message: response.error.message });
+        return;
+      }
+      const result = response.data;
+      onResult(result);
+      if (result.merged && result.project) {
+        onProjectUpdate(result.project);
+        setOutcome({ kind: "merged", ampHash: result.ampHash });
+      } else {
+        setOutcome({ kind: "diverged", count: result.remaining.filter((row) => row.differs).length });
+      }
+      return;
+    }
+
+    const response = await commands.projectsPushAmpToLive(projectId, assignmentId);
     setBusy(false);
+    onPushStateChange?.(false, next);
     if (response.status === "error") {
       setOutcome({ kind: "error", message: response.error.message });
       return;
     }
-    const result = response.data;
-    onResult(result);
-    if (result.merged && result.project) {
-      onProjectUpdate(result.project);
-      setOutcome({ kind: "merged", ampHash: result.ampHash });
-    } else {
-      setOutcome({ kind: "diverged", count: result.remaining.filter((row) => row.differs).length });
-    }
+    handlePushResult(response.data);
   }
 
-  const hold = useHoldToConfirm({ durationMs: HOLD_MS, disabled: !mergeable, onConfirm: () => void merge() });
+  function handlePushResult(result: AmpPushResult) {
+    // The project is saved whether or not every write landed — the amp's state
+    // moved, and the three device-determined fields are read back from it.
+    if (result.project) onProjectUpdate(result.project);
+    if (result.pushed) {
+      setOutcome({ kind: "merged", ampHash: result.ampHash });
+      return;
+    }
+    if (result.error) {
+      setOutcome({
+        kind: "partial",
+        stage: result.failedStageLabel,
+        message: result.error,
+        stagesCompleted: result.stagesCompleted,
+        stagesTotal: result.stagesTotal,
+      });
+      return;
+    }
+    // Every write was acknowledged but the amp didn't end up where the plan
+    // said — the honest outcome, and the row table below shows what's left.
+    onResult({ merged: false, project: null, ampHash: null, remaining: result.remaining });
+    setOutcome({ kind: "diverged", count: result.remaining.filter((row) => row.differs).length });
+  }
+
+  const hold = useHoldToConfirm({ durationMs: HOLD_MS, disabled: !runnable, onConfirm: () => void run() });
 
   const state: StripState = busy
     ? "pending"
@@ -259,29 +376,36 @@ export function AmpMergePanel({
             : hold.holding
               ? "holding"
               : "idle";
-  const { text, color } = caption(state, outcome, reason);
+  const { text, color } = caption(state, outcome, reason, direction);
   const done = state === "merged" || state === "inSync";
+  const Arrow = direction === "pull" ? ArrowLeft : ArrowRight;
+  const idleLabel = direction === "pull" ? "Hold to match offline to online" : "Hold to match online to offline";
+  const retryLabel = outcome?.kind === "partial" ? "Hold to carry on" : "Hold to try again";
 
   return (
     <Stack gap="sm" align="center" className="min-w-0 py-1">
       <SegmentedControl
         size="xs"
         radius="xl"
-        value="pull"
+        value={direction}
+        onChange={(value) => onDirectionChange(value as MergeDirection)}
+        // Switching direction mid-write would leave the step list describing a
+        // run that is no longer the one in flight.
+        disabled={busy}
         data={[
           { value: "pull", label: "Offline ← Online" },
-          { value: "push", label: "Online ← Offline · soon", disabled: true },
+          { value: "push", label: "Online ← Offline", disabled: Boolean(pushBlocked) },
         ]}
       />
 
-      <MergeStrip state={state} progress={hold.progress} attempt={attempt} />
+      <MergeStrip state={state} progress={hold.progress} attempt={attempt} direction={direction} />
 
       {/* The whole ring is the hold target, not just the button inside it,
           and the button keeps one width while its label changes — a hit area
           that shrank under the pointer mid-hold used to cancel the hold. */}
       <div
         className={`inline-flex max-w-full touch-none rounded-full p-[3px] select-none ${
-          mergeable ? "cursor-pointer" : ""
+          runnable ? "cursor-pointer" : ""
         }`}
         style={{
           background: done
@@ -310,13 +434,13 @@ export function AmpMergePanel({
             color="amber"
             variant={state === "holding" ? "filled" : "light"}
             loading={busy}
-            disabled={!mergeable}
-            leftSection={<ArrowLeft size={14} />}
+            disabled={!runnable}
+            leftSection={<Arrow size={14} />}
             // Mantine nudges a pressed button down 1px, which reads as the
             // button slipping inside the ring while held.
             className="active:transform-none"
           >
-            {state === "holding" ? "Keep holding…" : state === "failed" ? "Hold to try again" : "Hold to match offline to online"}
+            {state === "holding" ? "Keep holding…" : state === "failed" ? retryLabel : idleLabel}
           </Button>
         )}
       </div>

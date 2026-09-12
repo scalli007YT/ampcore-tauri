@@ -10,6 +10,7 @@ use crate::data::common::now_millis;
 
 use super::cvr::bridge::DeviceBridgeSnapshot;
 use super::cvr::channel_config::ChannelConfigSnapshot;
+use super::cvr::channel_state::AmpChannelState;
 use super::cvr::preset::DevicePresetsSnapshot;
 use super::cvr::request::{RequestSpec, WriteSpec};
 use super::cvr::telemetry::Telemetry;
@@ -35,7 +36,13 @@ pub struct DiscoveredDevice {
     pub analog_input_channels: u32,
     pub digital_input_channels: u32,
     pub output_channels: u32,
+    /// Raw FC=0 BASIC_INFO `Machine_state` byte — the same vendor state enum
+    /// the heartbeat's per-channel bytes use. Kept raw for wire debugging;
+    /// `machine_state_decoded` is the form the UI reads.
     pub machine_state: u32,
+    /// `machine_state` decoded. `None` for a firmware family with no state
+    /// table (see `cvr::channel_state::decode`) — never a guessed meaning.
+    pub machine_state_decoded: Option<AmpChannelState>,
     pub online: bool,
     pub last_seen_at: f64,
 }

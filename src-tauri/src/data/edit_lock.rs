@@ -44,6 +44,14 @@ pub struct AmpEditLock {
     /// The amp's front-panel knob lock from its latest FC=27 snapshot.
     /// Informational only — it never affects `locked`.
     pub rotary_locked: Option<bool>,
+    /// The amp's standby state from the same snapshot, and whether it is
+    /// refusing standby writes. Carried here for exactly the reason
+    /// `rotary_locked` is: these are amp-level controls a project amp's
+    /// configure view offers whenever its linked amp is online, and this lock
+    /// is that view's only channel to the live snapshot. Informational only —
+    /// neither ever affects `locked`.
+    pub standby: Option<bool>,
+    pub standby_locked: Option<bool>,
     pub project: Option<AmpFingerprint>,
     pub live: Option<AmpFingerprint>,
     pub rows: Vec<FingerprintRow>,
@@ -70,6 +78,8 @@ pub fn resolve_edit_lock(
         locked: false,
         device_id: reading.map(|r| r.device.id.clone()),
         rotary_locked: reading.and_then(|r| r.snapshot.as_ref()).and_then(|s| s.rotary_locked),
+        standby: reading.and_then(|r| r.snapshot.as_ref()).and_then(|s| s.standby),
+        standby_locked: reading.and_then(|r| r.snapshot.as_ref()).and_then(|s| s.standby_locked),
         project: None,
         live: None,
         rows: Vec::new(),
